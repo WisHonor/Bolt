@@ -1,5 +1,5 @@
-//! `opal goto`: moving the project folder to another save, carrying unsaved work along unless
-//! it is in the way, and `opal discard`: throwing unsaved work away (decisions 049, 050 and 055).
+//! `opalro goto`: moving the project folder to another save, carrying unsaved work along unless
+//! it is in the way, and `opalro discard`: throwing unsaved work away (decisions 049, 050 and 055).
 
 use std::path::Path;
 
@@ -169,7 +169,7 @@ pub struct ShelfCollisions {
     pub label: String,
     /// The save the shelf was made on.
     pub base: Id,
-    /// `opal goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
+    /// `opalro goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
     /// save the project is on changed something in the way.
     pub goto_reaches_base: bool,
     /// Unsaved work, or files Opalro ignores.
@@ -184,20 +184,20 @@ impl SwitchError {
     pub fn hint(&self) -> Option<String> {
         match self {
             SwitchError::Collisions { .. } => Some(
-                "Save them first (opal save \"describe your change\"), shelve them (opal shelf) or \
-                 discard them (opal discard), and move ignored files somewhere else, then run opal \
+                "Save them first (opalro save \"describe your change\"), shelve them (opalro shelf) or \
+                 discard them (opalro discard), and move ignored files somewhere else, then run opalro \
                  goto again."
                     .to_owned(),
             ),
             SwitchError::InTheWay { command, .. } => Some(format!(
-                "Move them somewhere else, then run opal {} again.",
+                "Move them somewhere else, then run opalro {} again.",
                 escape(command, false)
             )),
             SwitchError::Ambiguous { .. } => {
                 Some("Name the one you mean, spelled exactly as it is saved.".to_owned())
             }
             SwitchError::NoMatch { .. } => {
-                Some("Check the path: opal status lists your unsaved changes.".to_owned())
+                Some("Check the path: opalro status lists your unsaved changes.".to_owned())
             }
             SwitchError::InTheWayOfStep {
                 redo, shelve, to, ..
@@ -208,11 +208,11 @@ impl SwitchError {
                 };
                 if *shelve {
                     return Some(format!(
-                        "Move them somewhere else, then run opal {command} --shelve again."
+                        "Move them somewhere else, then run opalro {command} --shelve again."
                     ));
                 }
                 let mut hint = format!(
-                    "Run opal {command} --shelve to set your changes there aside on a new shelf, \
+                    "Run opalro {command} --shelve to set your changes there aside on a new shelf, \
                      as part of the same step."
                 );
                 // Whether saving first helps `undo --to` depends on where its entry is.
@@ -230,53 +230,53 @@ impl SwitchError {
                 Some(hint)
             }
             SwitchError::NoEntry { anywhere: true, .. } => Some(
-                "opal undo --list shows the entries where the diary may have stopped, with the \
+                "opalro undo --list shows the entries where the diary may have stopped, with the \
                  start of each one's ID."
                     .to_owned(),
             ),
             SwitchError::NotAnEntry { .. } | SwitchError::NoEntry { .. } => Some(
-                "opal undo --list shows the steps undo and redo can take with the start of each \
-                 entry's ID, and opal undo --list --all shows every entry."
+                "opalro undo --list shows the steps undo and redo can take with the start of each \
+                 entry's ID, and opalro undo --list --all shows every entry."
                     .to_owned(),
             ),
             SwitchError::EntryAmbiguous { .. } => {
                 Some("Type more of the ID to pick one.".to_owned())
             }
             SwitchError::EntryUnusable { .. } => Some(
-                "Pick another: opal undo --list shows the entries where the diary may have \
+                "Pick another: opalro undo --list shows the entries where the diary may have \
                  stopped."
                     .to_owned(),
             ),
             SwitchError::StepGone { .. } => Some(
-                "opal tidy removes what steps older than the undo window changed, and a damaged \
+                "opalro tidy removes what steps older than the undo window changed, and a damaged \
                  store can lose it too, so undo and redo can't go past this step. To get back to \
-                 an older save, find it with opal history and go to it with opal goto."
+                 an older save, find it with opalro history and go to it with opalro goto."
                     .to_owned(),
             ),
             SwitchError::EntryGone { .. } => Some(
-                "opal tidy removes the saves only entries older than the undo window needed, and \
+                "opalro tidy removes the saves only entries older than the undo window needed, and \
                  a damaged store can lose them too, so undo --to can't go back to this entry. To \
-                 get back to an older save, find it with opal history and go to it with opal goto."
+                 get back to an older save, find it with opalro history and go to it with opalro goto."
                     .to_owned(),
             ),
             SwitchError::NoShelf { label: None } => {
-                Some("opal shelf sets your unsaved changes aside on one.".to_owned())
+                Some("opalro shelf sets your unsaved changes aside on one.".to_owned())
             }
             SwitchError::NoShelf { .. } => {
-                Some("opal shelf --list shows the shelves there are.".to_owned())
+                Some("opalro shelf --list shows the shelves there are.".to_owned())
             }
             SwitchError::ShelfInTheWay(c) => {
-                let unshelf = format!("opal unshelf {}", escape(&c.label, false));
+                let unshelf = format!("opalro unshelf {}", escape(&c.label, false));
                 let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was \
                                made";
                 let (elsewhere, newest) = if c.goto_reaches_base {
-                    let goto = format!("opal goto {}", c.base.short_hex());
+                    let goto = format!("opalro goto {}", c.base.short_hex());
                     let there = format!(
                         "go to the save it was made on with {goto}, then run {unshelf} there"
                     );
                     (there, " (a new shelf would be the newest)")
                 } else {
-                    let gone = "opal goto can't reach the save it was made on, and opal undo \
+                    let gone = "opalro goto can't reach the save it was made on, and opalro undo \
                                 --list shows the steps that can bring it back";
                     (gone.to_owned(), "")
                 };
@@ -293,7 +293,7 @@ impl SwitchError {
                 })
             }
             SwitchError::TooManyShelves => Some(
-                "Bring some back with opal unshelf (opal discard then drops what you don't want), \
+                "Bring some back with opalro unshelf (opalro discard then drops what you don't want), \
                  and run the command again."
                     .to_owned(),
             ),
@@ -337,11 +337,11 @@ fn shelf_in_the_way(c: &ShelfCollisions) -> String {
 pub(crate) fn why_links_stay(one: bool) -> &'static str {
     if one {
         "since it may lead out of the project, or through a name Opalro never writes (a spelling of \
-         .git or .opal, or a name this computer can't hold), or this computer can't make links (on \
+         .git or .opalro, or a name this computer can't hold), or this computer can't make links (on \
          Windows that takes Developer Mode)"
     } else {
         "since they may lead out of the project, or through a name Opalro never writes (a spelling \
-         of .git or .opal, or a name this computer can't hold), or this computer can't make links \
+         of .git or .opalro, or a name this computer can't hold), or this computer can't make links \
          (on Windows that takes Developer Mode)"
     }
 }

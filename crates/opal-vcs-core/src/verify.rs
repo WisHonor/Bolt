@@ -1,4 +1,4 @@
-//! `opal verify`: reads every object of every pack back, then works out what the project needs,
+//! `opalro verify`: reads every object of every pack back, then works out what the project needs,
 //! as `tidy` does, and looks for each of those in the packs. It takes no lock and changes nothing.
 
 use std::collections::{BTreeSet, HashMap, HashSet};

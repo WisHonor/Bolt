@@ -31,7 +31,7 @@ jobs:
         # --no-fail-fast: one failing test file must not hide the rest on that system.
         run: cargo test --workspace --all-features --no-fail-fast 2>&1 | tee -a test-output.txt; exit ${PIPESTATUS[0]}
       # Saves a project nested 2,048 levels deep (a last path of 4,095 bytes), and refuses one a
-      # level deeper (4,097 bytes), on a 1 MiB stack like opal's main thread. Slow, and only
+      # level deeper (4,097 bytes), on a 1 MiB stack like opalro's main thread. Slow, and only
       # Windows can make paths that long, so these tests are #[ignore]d everywhere and run only
       # here. The filter must match only them.
       - name: Real-depth save tests

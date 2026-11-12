@@ -54,11 +54,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install hyperfine
         run: cargo install --locked hyperfine --version 1.20.0
-      - name: Build opal
+      - name: Build opalro
         run: cargo build --release -p opal-vcs
       - name: Versions
         run: |
-          echo "opal at $GITHUB_SHA"
+          echo "opalro at $GITHUB_SHA"
           git --version && hyperfine --version && jq --version
       - name: Opalro against Git
         run: |

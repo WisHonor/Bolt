@@ -6,12 +6,12 @@
 
 | # | Milestone | Done when |
 |---|---|---|
-| 1 | **First save** ✅ | `opal start`, `opal save`, `opal history` and `opal show` work end to end on real projects, on the real formats, on all three systems |
-| 2 | **Coming from Git** ✅ | `opal import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
+| 1 | **First save** ✅ | `opalro start`, `opalro save`, `opalro history` and `opalro show` work end to end on real projects, on the real formats, on all three systems |
+| 2 | **Coming from Git** ✅ | `opalro import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
 | 3 | **Working folder** ✅ | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches; merge small packs and open packs lazily before real use (each save adds a pack, and every pack stays open) |
 | 4 | **Undo everything** ✅ | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
 | 5 | **Big files** ✅ | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
-| 6 | **Presets and polish → v0.1** | The `opal start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `opal setup`; Git-word shortcuts; `--json`; `verify`; packaging |
+| 6 | **Presets and polish → v0.1** | The `opalro start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `opalro setup`; Git-word shortcuts; `--json`; `verify`; packaging |
 
 **Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1 had two sessions, on 2026-11-01 and (on the fixes) 2026-11-02; every finding is fixed. Milestone 2 had two as well, both on 2026-11-03, the second on the fixes; every proven finding is fixed or ruled on in writing (decisions 043 and 044). Milestone 3 had two, both on 2026-11-06 (decisions 067 to 069), milestone 4 two, both on 2026-11-08 (decisions 079 and 080), and milestone 5 two, both on 2026-11-09 (decisions 094 to 098). Milestone 6 had two for each of its halves, all on 2026-11-10 (decisions 111, 112, 126 and 127).
 
@@ -47,7 +47,7 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 **3. Names and paths**
 - Decision 004's always-on name rules and the portability check, in one module. The Windows rules are checked against Microsoft's documentation first.
-- *Done when:* table-driven tests cover every rule, including Windows device names, `.opal` spellings and case or Unicode collisions; a fuzz target runs.
+- *Done when:* table-driven tests cover every rule, including Windows device names, `.opalro` spellings and case or Unicode collisions; a fuzz target runs.
 
 **4. Folder listings**
 - Encode, decode and validate (storage-format.md §3).
@@ -63,23 +63,23 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 **7. Object store**
 - Store, fetch and check objects across many packs, skip objects that are already stored. The lookup index lives in memory for now (rebuilt when the store opens); storing it in `cache/` waits until measurements show a need.
-- An internal integrity check that walks every pack and object: the core of the later `opal verify` command (milestone 6), used by tests from now on.
+- An internal integrity check that walks every pack and object: the core of the later `opalro verify` command (milestone 6), used by tests from now on.
 - *Done when:* property tests with random stores and fetches pass; the integrity check catches every corruption the pack tests introduce.
 
 **8. Diary, head and the lock**
 - Encode and decode diary entries (§9); replace `state/head` atomically; take the OS lock for changing commands, with the "waiting" message.
 - *Done when:* a crash between writing the pack and moving `head` leaves the repository exactly as before; two changing commands run one after the other; read-only commands never wait.
 
-**9. `opal start`**
-- Create `.opal/` (the format file, the folders, hidden on Windows), the empty first save and the line `main`, recorded in the first diary entry; refuse to start inside another project. No presets yet (milestone 6).
+**9. `opalro start`**
+- Create `.opalro/` (the format file, the folders, hidden on Windows), the empty first save and the line `main`, recorded in the first diary entry; refuse to start inside another project. No presets yet (milestone 6).
 - *Done when:* CLI tests pass on all three systems, and opening a repository with an unknown feature is refused with a clear message.
 
-**10. `opal save`**
-- Walk the folder (respecting `.opalignore`, skipping `.opal/`), store every file whole (streamed, never loaded fully into memory; chunking arrives in milestone 5 and changes no IDs), build folder listings from the bottom up, and write the save and its diary entry in one pack.
+**10. `opalro save`**
+- Walk the folder (respecting `.opalroignore`, skipping `.opalro/`), store every file whole (streamed, never loaded fully into memory; chunking arrives in milestone 5 and changes no IDs), build folder listings from the bottom up, and write the save and its diary entry in one pack.
 - Record executable flags, symlinks and empty folders; refuse non-portable new names (decision 004); say so when nothing changed.
 - *Done when:* every saved file reads back byte-identically from the store; a property test with random folders passes; the malicious-name cases are refused.
 
-**11. `opal history` and `opal show`**
+**11. `opalro history` and `opalro show`**
 - `history` lists the saves on the current line (change ID, time, author, message). `show` lists what a save changed: added, removed and modified files with their sizes. Line-by-line differences come in milestone 3.
 - *Done when:* snapshot tests cover the output for people and the `--json` output.
 
@@ -116,7 +116,7 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
 - *Done when:* every refusal, limit and parser has a test, and the reader never panics on truncated or crafted input.
 
 **5. Import** ✅ (Tasks 12–14)
-- `opal import`: commits become saves exactly and repeatably (decision 032), branches lines and server lines (033), tags kept exactly (034), dangerous names skipped (035), submodules bare links (036), LFS repositories refused until milestone 5 (037), one-time for now (040).
+- `opalro import`: commits become saves exactly and repeatably (decision 032), branches lines and server lines (033), tags kept exactly (034), dangerous names skipped (035), submodules bare links (036), LFS repositories refused until milestone 5 (037), one-time for now (040).
 - The first save after an import stops at line endings Git converted (decision 039).
 - *Done when:* importing a repository twice, anywhere, gives the same saves, and an interrupted import can be run again.
 
@@ -137,8 +137,8 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
 - **Importing one of the owner's repositories** (a copy of Tailrd: 1,517 commits, 112 branches, 12 server branches, no tags). The import matched Git's counts, listed the 2 refs it leaves out, and took 3.5 s. Every file in `.git` was byte for byte the same afterwards. `history` and `show` matched `git log --first-parent` and `git show`, and a second import refused. Before it ran, Opalro asked for a name and email; its hint now says to make the settings file and its folder.
   - The first save stopped at line endings, as decision 039 says: Git for Windows had written 1,492 of the 1,925 files with CRLF. The hint's three Git commands fixed it.
   - It would then have taken what Git's personal ignore lists hide, since Opalro doesn't read them (decision 038). `.git/info/exclude` hides 44 Git worktrees under `.worktrees/`: 468,000 files and 14 GB on disk, of which the project's `.gitignore` files keep out only part (about 190,000 files and 11 GB stay, by a rough count). The import warned about that list. The global `~/.config/git/ignore` hides `.claude/settings.local.json`, which was saved without a word, since nothing warns about that list.
-  - With the exclude lines copied into `.opalignore`, as the warning says, the first save took exactly the 6 files Git showed as untracked, the new `.opalignore` and that settings file; all 1,925 imported files matched. Git's personal lists, and saving the contents of nested repositories and worktrees (decision 043), are the owner's questions in [the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
-- **A project inside OneDrive** (Files On-Demand on). `start`, eleven saves in a row, `history` and `show` worked, and OneDrive never held a file Opalro needed. After "Free up space" on a file and then on `.opal`, every command still worked. Windows hides OneDrive's placeholders from programs like Opalro, which run in its "disguise placeholders" mode, so Opalro sees ordinary files, and reading an online-only file downloads it first ([security.md](security.md) §7).
+  - With the exclude lines copied into `.opalroignore`, as the warning says, the first save took exactly the 6 files Git showed as untracked, the new `.opalroignore` and that settings file; all 1,925 imported files matched. Git's personal lists, and saving the contents of nested repositories and worktrees (decision 043), are the owner's questions in [the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
+- **A project inside OneDrive** (Files On-Demand on). `start`, eleven saves in a row, `history` and `show` worked, and OneDrive never held a file Opalro needed. After "Free up space" on a file and then on `.opalro`, every command still worked. Windows hides OneDrive's placeholders from programs like Opalro, which run in its "disguise placeholders" mode, so Opalro sees ordinary files, and reading an online-only file downloads it first ([security.md](security.md) §7).
 
 ## Milestone 3: Working folder
 
@@ -149,11 +149,11 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 - *Done when:* the handle tests pass on all three systems, and the owner has reviewed the new `unsafe` code line by line.
 
 **1. Names and limits** ✅ (Task 2)
-- One module decides what may be written: `.git` and `.opal` spellings everywhere, real short names, `\`, `:` and device names on Windows; names up to 765 bytes, paths up to 4,096 (decisions 051, 059).
+- One module decides what may be written: `.git` and `.opalro` spellings everywhere, real short names, `\`, `:` and device names on Windows; names up to 765 bytes, paths up to 4,096 (decisions 051, 059).
 - *Done when:* each rule has a test, `COM0` and `LPT0` save and write on Windows, and the name fuzz target runs.
 
 **2. The walk through handles, and the owner check** ✅ (Tasks 3–4)
-- `save` walks and reads the folder through handles; link targets read on Windows are stored with `/` (decision 045); the owner check resolves the starting folder and refuses a `.opal` that vanishes mid-check.
+- `save` walks and reads the folder through handles; link targets read on Windows are stored with `/` (decision 045); the owner check resolves the starting folder and refuses a `.opalro` that vanishes mid-check.
 - *Done when:* a folder swapped for a link mid-save is refused, not followed.
 
 **3. Packs** ✅ (Tasks 5–6)
@@ -161,7 +161,7 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 - *Done when:* a planted index costs reads, not memory; a merge stopped at any step loses nothing.
 
 **4. Caches and `status`** ✅ (Tasks 7–10)
-- A keyed file-state cache and change-ID cache; `opal status`; `save` skips files the cache vouches for (decision 053).
+- A keyed file-state cache and change-ID cache; `opalro status`; `save` skips files the cache vouches for (decision 053).
 - *Done when:* a planted or edited cache is ignored, unchanged files aren't opened, and `status` on 100,000 unchanged files is measured.
 
 **5. Writing files** ✅ (Tasks 11–13)
@@ -169,7 +169,7 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 - *Done when:* a switch stopped at any write is finished by the next command, with every file wholly old or new.
 
 **6. `goto`, `discard` and lines** ✅ (Tasks 14–16)
-- `goto` with safety copies and collisions, `discard`, saving away from a line, `opal line` (decisions 050, 055).
+- `goto` with safety copies and collisions, `discard`, saving away from a line, `opalro line` (decisions 050, 055).
 - *Done when:* going to a line and back restores every file byte for byte.
 
 **7. Saves** ✅ (Tasks 17–18)
@@ -200,11 +200,11 @@ Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-th
 - *Done when:* a discard's kept save holds exactly what was thrown away, deletions and folders included, and the diary's test vectors match storage-format.md §9.
 
 **1. Undo and redo** ✅ (Tasks 3–5)
-- The done and undone steps worked out from the diary; `opal undo [N]`, `opal redo [N]`, `opal undo --list [--all]` and `opal undo --to <entry>` (decisions 070, 072).
+- The done and undone steps worked out from the diary; `opalro undo [N]`, `opalro redo [N]`, `opalro undo --list [--all]` and `opalro undo --to <entry>` (decisions 070, 072).
 - *Done when:* the step lists match a replay of the diary, undo and redo of every command put back exactly what it did, and unsaved work in the way stops them before anything changes.
 
 **2. Shelves and amend** ✅ (Tasks 6–7)
-- `opal shelf`, `opal unshelf`, `opal shelf --list` and `opal save --amend` (decisions 073, 074).
+- `opalro shelf`, `opalro unshelf`, `opalro shelf --list` and `opalro save --amend` (decisions 073, 074).
 - *Done when:* each case of the decisions has a test, and undo takes each of them back.
 
 **3. Crash recovery** ✅ (Tasks 8–9)
@@ -282,18 +282,18 @@ Decided on 2026-11-09, in decisions [113](decisions/113-presets-what-each-writes
 **1. Change IDs in Jujutsu's letters** ✅ (Task 3)
 - *Done when:* an imported save shows the letters its commit's `change-id` header has (decision 122).
 
-**2. `opal.toml`** ✅ (Task 4)
-- The chunk threshold and the large-save question's numbers are read from the folder's `opal.toml`; what Opalro can't use is passed over with a warning (decision 114).
+**2. `opalro.toml`** ✅ (Task 4)
+- The chunk threshold and the large-save question's numbers are read from the folder's `opalro.toml`; what Opalro can't use is passed over with a warning (decision 114).
 - *Done when:* the vectors of storage-format.md §12 pass, a hostile file never stops a save, and a project without the file saves byte for byte as before.
 
 **3. Presets** ✅ (Tasks 5–7)
-- The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `opal start`'s question and `--preset`, and `opal setup` (decisions 113 and 115).
-- *Done when:* each preset writes its vector byte for byte, `opal undo` after a start gives the folder back, and a preset switch can be undone and redone.
+- The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `opalro start`'s question and `--preset`, and `opalro setup` (decisions 113 and 115).
+- *Done when:* each preset writes its vector byte for byte, `opalro undo` after a start gives the folder back, and a preset switch can be undone and redone.
 
 **4. Git's words** ✅ (Task 8)
 - *Done when:* each shortcut runs its Opalro command, each explained word changes nothing, and the hint shows once (decision 116).
 
-**5. `opal verify`** ✅ (Task 9)
+**5. `opalro verify`** ✅ (Task 9)
 - Every pack and object, then everything the project needs; `tidy` records the window it used (decisions 118 and 123).
 - *Done when:* every kind of damage the pack tests make is found, a deleted pack shows as what the project lacks, and a command running beside it never makes it report damage.
 
@@ -336,7 +336,7 @@ Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-wi
 - *Done when:* an unchanged `status` leaves `cache/files` untouched, and a torn cache is ignored and rebuilt.
 
 **3. The walk** ✅ (2026-11-10)
-- Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.opal` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
+- Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.opalro` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
 - *Done when:* the matcher agrees with Git and with its old self on random rules, and every walk test passes unchanged.
 
 **4. The store and the listings** ✅ (2026-11-10)

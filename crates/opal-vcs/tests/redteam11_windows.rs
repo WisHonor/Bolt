@@ -13,7 +13,7 @@ use support::{Env, junction, text};
 fn project() -> Env {
     let env = Env::empty();
     fs::write(env.root().join("a.txt"), "hello\n").unwrap();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -31,14 +31,14 @@ fn a_junction_named_like_a_pack_is_reported_and_what_it_leads_to_is_left_alone()
     let name = format!("{}.pack", "ab".repeat(32));
     junction(
         &env.root()
-            .join(".opal")
+            .join(".opalro")
             .join("store")
             .join("packs")
             .join(name),
         outside.path(),
     );
 
-    let verify = env.opal().arg("verify").output().unwrap();
+    let verify = env.opalro().arg("verify").output().unwrap();
     assert_eq!(
         verify.status.code(),
         Some(1),
@@ -46,14 +46,14 @@ fn a_junction_named_like_a_pack_is_reported_and_what_it_leads_to_is_left_alone()
         text(&verify.stdout),
         text(&verify.stderr)
     );
-    let _ = env.opal().arg("tidy").output().unwrap();
+    let _ = env.opalro().arg("tidy").output().unwrap();
     assert_eq!(
         fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
         "outside\n"
     );
 }
 
-/// A junction at `.opal/state/tidied` counts as no record at all: `verify` still vouches for an
+/// A junction at `.opalro/state/tidied` counts as no record at all: `verify` still vouches for an
 /// intact project, and nothing goes through the junction.
 #[test]
 fn a_junction_at_state_tidied_is_no_record_and_is_never_gone_through() {
@@ -61,11 +61,11 @@ fn a_junction_at_state_tidied_is_no_record_and_is_never_gone_through() {
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("keep.txt"), "outside\n").unwrap();
     junction(
-        &env.root().join(".opal").join("state").join("tidied"),
+        &env.root().join(".opalro").join("state").join("tidied"),
         outside.path(),
     );
 
-    let verify = env.opal().arg("verify").output().unwrap();
+    let verify = env.opalro().arg("verify").output().unwrap();
     assert_eq!(
         verify.status.code(),
         Some(0),
@@ -73,7 +73,7 @@ fn a_junction_at_state_tidied_is_no_record_and_is_never_gone_through() {
         text(&verify.stdout),
         text(&verify.stderr)
     );
-    let _ = env.opal().arg("tidy").output().unwrap();
+    let _ = env.opalro().arg("tidy").output().unwrap();
     assert_eq!(
         fs::read_to_string(outside.path().join("keep.txt")).unwrap(),
         "outside\n"

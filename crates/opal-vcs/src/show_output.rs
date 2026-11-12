@@ -1,4 +1,4 @@
-//! What `opal show` shows people before its table of changes: the save, its facts and its
+//! What `opalro show` shows people before its table of changes: the save, its facts and its
 //! message.
 
 use std::io::{self, Write};

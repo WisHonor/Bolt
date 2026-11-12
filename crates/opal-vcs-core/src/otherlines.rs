@@ -1,4 +1,4 @@
-//! The other-lines cache, `.opal/cache/other-lines` (storage-format.md section 10): what the check
+//! The other-lines cache, `.opalro/cache/other-lines` (storage-format.md section 10): what the check
 //! before an amend read of the lines the project isn't on, so that the next amend needn't read
 //! them again. Only ever a hint: one that is missing, sealed by another key, edited or unreadable
 //! is just not used.
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn store_keeps_only_runs_a_line_starts_at() {
         let (dir, repo) = repo();
-        let file = dir.path().join(".opal/cache/other-lines");
+        let file = dir.path().join(".opalro/cache/other-lines");
         let mut lines = sample();
         lines.store(&repo, &state_at(&[5, 6]));
         let back = OtherLines::load(&repo);
@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn a_cache_sealed_with_another_key_loads_empty() {
         let (dir, repo) = repo();
-        let file = dir.path().join(".opal/cache/other-lines");
+        let file = dir.path().join(".opalro/cache/other-lines");
         std::fs::write(&file, keyed::seal(&[8; 32], &sample().encode())).unwrap();
         assert!(OtherLines::load(&repo).runs.is_empty());
         std::fs::write(&file, keyed::seal(&[7; 32], &sample().encode())).unwrap();

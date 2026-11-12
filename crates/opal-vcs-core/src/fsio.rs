@@ -1,5 +1,5 @@
 //! The single place every disk write goes through: temp files, atomic replacement, durable
-//! renames, and the fault points that crash tests use. Writes in `.opal` go through its folders
+//! renames, and the fault points that crash tests use. Writes in `.opalro` go through its folders
 //! held open, never by path.
 
 use std::ffi::{OsStr, OsString};
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use opal_platform::dir::Dir;
 
-// One rule for temporary names, shared with the links the platform crate makes in `.opal/tmp`.
+// One rule for temporary names, shared with the links the platform crate makes in `.opalro/tmp`.
 pub(crate) use opal_platform::ACCENTED_SUFFIX;
 pub use opal_platform::is_temp_name;
 
@@ -372,9 +372,9 @@ pub fn open_point(path: &str) -> io::Result<()> {
 }
 
 /// Fault injection for crash tests: per-thread errors (`arm`), a process abort
-/// (`OPAL_FAULT_AT=N`), an error at one named point (`OPAL_FAULT_FAIL=label`), a test's own
+/// (`OPALRO_FAULT_AT=N`), an error at one named point (`OPALRO_FAULT_FAIL=label`), a test's own
 /// change to the disk at one named point (`act_at`), a project file that can't be opened
-/// (`unreadable`, `OPAL_FAULT_UNREADABLE=path`), or early flushes that fail or never start
+/// (`unreadable`, `OPALRO_FAULT_UNREADABLE=path`), or early flushes that fail or never start
 /// (`early_flush`).
 #[cfg(feature = "fault-injection")]
 pub mod fault {
@@ -419,7 +419,7 @@ pub mod fault {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Early {
         On,
-        /// Its flushes fail, as `OPAL_FAULT_FAIL=flush:early` makes them.
+        /// Its flushes fail, as `OPALRO_FAULT_FAIL=flush:early` makes them.
         Fails,
         /// It is never started.
         Off,
@@ -471,7 +471,7 @@ pub mod fault {
     /// `unreadable` for a command run in a process of its own.
     fn unreadable_in_process() -> Option<&'static str> {
         static AT: OnceLock<Option<String>> = OnceLock::new();
-        AT.get_or_init(|| std::env::var("OPAL_FAULT_UNREADABLE").ok())
+        AT.get_or_init(|| std::env::var("OPALRO_FAULT_UNREADABLE").ok())
             .as_deref()
     }
 
@@ -507,14 +507,14 @@ pub mod fault {
 
     fn crash_at() -> Option<u64> {
         static AT: OnceLock<Option<u64>> = OnceLock::new();
-        *AT.get_or_init(|| std::env::var("OPAL_FAULT_AT").ok()?.parse().ok())
+        *AT.get_or_init(|| std::env::var("OPALRO_FAULT_AT").ok()?.parse().ok())
     }
 
     /// The label of the one point that fails every time it is reached, for a test that runs the
     /// command in a process of its own and wants it to carry on after the error.
     fn fails_at() -> Option<&'static str> {
         static AT: OnceLock<Option<String>> = OnceLock::new();
-        AT.get_or_init(|| std::env::var("OPAL_FAULT_FAIL").ok())
+        AT.get_or_init(|| std::env::var("OPALRO_FAULT_FAIL").ok())
             .as_deref()
     }
 

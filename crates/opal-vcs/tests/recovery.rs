@@ -17,9 +17,9 @@ fn read(env: &Env, path: &str) -> Vec<u8> {
     fs::read(env.root().join(path)).unwrap()
 }
 
-/// `opal <args>`, which must succeed; what it printed.
+/// `opalro <args>`, which must succeed; what it printed.
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -29,9 +29,9 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// `opal <args>`, which must fail; what it said, on stdout then stderr.
+/// `opalro <args>`, which must fail; what it said, on stdout then stderr.
 fn refused(env: &Env, args: &[&str]) -> (String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -42,12 +42,12 @@ fn refused(env: &Env, args: &[&str]) -> (String, String) {
 }
 
 fn json(env: &Env, args: &[&str]) -> serde_json::Value {
-    let out = env.opal().args(args).arg("--json").output().unwrap();
+    let out = env.opalro().args(args).arg("--json").output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
 fn head_file(env: &Env) -> PathBuf {
-    env.root().join(".opal/state/head")
+    env.root().join(".opalro/state/head")
 }
 
 fn entry(env: &Env, id: Id) -> DiaryEntry {
@@ -55,7 +55,7 @@ fn entry(env: &Env, id: Id) -> DiaryEntry {
 }
 
 fn packs(env: &Env) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(env.root().join(".opal/store/packs"))
+    let mut names: Vec<String> = fs::read_dir(env.root().join(".opalro/store/packs"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -93,7 +93,7 @@ fn plant_end(env: &Env, parent: Id, change: impl FnOnce(&mut DiaryEntry)) -> Id 
 
 /// The packs that hold the diary entry `id`.
 fn packs_holding(env: &Env, id: Id) -> Vec<PathBuf> {
-    let folder = env.root().join(".opal/store/packs");
+    let folder = env.root().join(".opalro/store/packs");
     packs(env)
         .into_iter()
         .map(|name| folder.join(name))
@@ -109,7 +109,7 @@ fn remove_pack_holding(env: &Env, id: Id) {
 }
 
 const LOST: &str = "error: Opalro can't tell which diary entry is the project's current one: \
-                    .opal/state/head";
+                    .opalro/state/head";
 
 #[test]
 fn a_missing_head_stops_every_command_saying_the_saves_are_safe() {
@@ -141,7 +141,7 @@ fn a_missing_head_stops_every_command_saying_the_saves_are_safe() {
             "{args:?}: {said}"
         );
         assert!(
-            said.contains("opal undo --list") && said.contains("opal undo --to <entry>"),
+            said.contains("opalro undo --list") && said.contains("opalro undo --to <entry>"),
             "{args:?}: {said}"
         );
     }
@@ -151,7 +151,7 @@ fn a_missing_head_stops_every_command_saying_the_saves_are_safe() {
     assert_eq!(read(&env, "a.txt"), b"edited\n");
     let doc = json(&env, &["status"]);
     let message = doc["error"]["message"].as_str().unwrap();
-    assert!(message.ends_with(".opal/state/head is missing."), "{doc}");
+    assert!(message.ends_with(".opalro/state/head is missing."), "{doc}");
     let hint = doc["error"]["hint"].as_str().unwrap();
     assert!(hint.starts_with("Your saves are safe"), "{doc}");
 }
@@ -216,12 +216,12 @@ fn undo_list_with_a_lost_head_lists_the_entries_no_other_follows_newest_first() 
             assert!(line.contains("  save"), "{said}");
         }
         assert!(lines[2].ends_with("\"Two\""), "{said}");
-        assert!(lines[4].contains("opal undo --to <entry>"), "{said}");
+        assert!(lines[4].contains("opalro undo --to <entry>"), "{said}");
         // Listing writes nothing.
         assert!(!head_file(&env).exists());
     }
     let doc = json(&env, &["undo", "--list"]);
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     assert_eq!(doc["head_lost"], true, "{doc}");
     assert_eq!(doc["warnings"], serde_json::json!([]));
     let ends: Vec<&str> = doc["ends"]
@@ -240,7 +240,7 @@ fn undo_list_with_a_lost_head_lists_the_entries_no_other_follows_newest_first() 
     assert_eq!(doc["ends"][2]["time_ms"], 1_000);
     // With every pack gone too, there is nothing to go on from, and the list says so.
     for pack in packs(&env) {
-        fs::remove_file(env.root().join(".opal/store/packs").join(pack)).unwrap();
+        fs::remove_file(env.root().join(".opalro/store/packs").join(pack)).unwrap();
     }
     let said = ok(&env, &["undo", "--list"]);
     assert!(
@@ -273,7 +273,7 @@ fn undo_to_with_a_lost_head_makes_that_entry_current_without_touching_files() {
         said.contains("No diary entry in the store has an ID starting with"),
         "{said}"
     );
-    assert!(said.contains("opal undo --list"), "{said}");
+    assert!(said.contains("opalro undo --list"), "{said}");
     assert!(!head_file(&env).exists());
 
     let said = ok(&env, &["undo", "--to", &one.to_hex()[..8]]);
@@ -330,16 +330,16 @@ fn a_failed_flush_after_head_moves_is_a_warning_and_the_save_stands() {
     let (env, [_, one, two]) = project();
     write(&env, "a.txt", "three\n");
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "Three"])
-        .env("OPAL_FAULT_FAIL", "head:renamed")
+        .env("OPALRO_FAULT_FAIL", "head:renamed")
         .output()
         .unwrap();
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert!(
         said.contains(
-            "warning: The command happened, but Opalro couldn't flush .opal/state to the disk \
+            "warning: The command happened, but Opalro couldn't flush .opalro/state to the disk \
              after it (injected fault at head:renamed), so a power cut soon after could undo \
              it.\n"
         ),
@@ -352,9 +352,9 @@ fn a_failed_flush_after_head_moves_is_a_warning_and_the_save_stands() {
     // A switch too: done, its journal gone, and the warning has its kind.
     let save = entry(&env, one).state.lines["main"];
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &save.to_hex(), "--json"])
-        .env("OPAL_FAULT_FAIL", "head:renamed")
+        .env("OPALRO_FAULT_FAIL", "head:renamed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -367,20 +367,20 @@ fn a_failed_flush_after_head_moves_is_a_warning_and_the_save_stands() {
         .collect();
     assert!(kinds.contains(&"head_not_flushed"), "{doc}");
     assert_eq!(read(&env, "a.txt"), b"one\n");
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
     assert_eq!(head(&env).1.state.position, Position::AtSave(save));
 }
 
-/// Runs `opal <args>` on copies of `template` until a run stops at `label`; that copy.
+/// Runs `opalro <args>` on copies of `template` until a run stops at `label`; that copy.
 #[cfg(feature = "fault-injection")]
 fn stopped_at(template: &Env, args: &[&str], label: &str) -> Env {
     for n in 1..100 {
         let env = Env::empty();
         support::copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .args(args)
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let said = text(&out.stderr);
@@ -404,12 +404,12 @@ fn status_and_history_say_when_a_stopped_switch_left_only_its_journal() {
     // The switch took effect: its head moved and every file is written.
     assert_eq!(head(&env).1.state.position, Position::AtSave(save));
     assert_eq!(read(&env, "a.txt"), b"one\n");
-    assert!(env.root().join(".opal/state/journal").exists());
+    assert!(env.root().join(".opalro/state/journal").exists());
     let pending = "warning: A switch between saves was stopped just after it was done: its files \
                    are all written, and the next command that changes the project removes its \
-                   journal, .opal/state/journal, first.\n";
+                   journal, .opalro/state/journal, first.\n";
     for args in [&["status"][..], &["history"]] {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{args:?}");
         let said = text(&out.stderr);
         assert!(said.contains(pending), "{args:?}: {said}");
@@ -431,8 +431,8 @@ fn status_and_history_say_when_a_stopped_switch_left_only_its_journal() {
     assert_eq!(status["changes"], serde_json::json!([]));
     // The next command that changes the project removes it, and then there is nothing to say.
     ok(&env, &["discard"]);
-    assert!(!env.root().join(".opal/state/journal").exists());
-    let out = env.opal().arg("status").output().unwrap();
+    assert!(!env.root().join(".opalro/state/journal").exists());
+    let out = env.opalro().arg("status").output().unwrap();
     assert!(
         !text(&out.stderr).contains("warning:"),
         "{}",
@@ -445,12 +445,12 @@ fn status_and_history_say_when_a_stopped_switch_left_only_its_journal() {
 fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands() {
     let (env, [_, one, _]) = project();
     let save = entry(&env, one).state.lines["main"];
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     // Removing the journal fails: the switch is done all the same, and the journal is left.
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &save.to_hex()])
-        .env("OPAL_FAULT_FAIL", "journal:removing")
+        .env("OPALRO_FAULT_FAIL", "journal:removing")
         .output()
         .unwrap();
     let said = text(&out.stderr);
@@ -458,7 +458,7 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
     assert!(
         said.contains(
             "warning: The switch between saves is done, but Opalro couldn't remove its journal, \
-             .opal/state/journal (injected fault at journal:removing): the next command that \
+             .opalro/state/journal (injected fault at journal:removing): the next command that \
              changes the project removes it first.\n"
         ),
         "{said}"
@@ -471,7 +471,7 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
     assert_eq!(head(&env).1.state.position, Position::AtSave(save));
     assert_eq!(read(&env, "a.txt"), b"one\n");
     assert!(journal.exists());
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     let said = text(&out.stderr);
     assert!(said.contains("stopped just after it was done"), "{said}");
     // The next command removes it first, then does its own work.
@@ -480,9 +480,9 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
     assert_eq!(read(&env, "a.txt"), b"two\n");
     // The flush after the removal failing is told as the head's own flush is.
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &save.to_hex(), "--json"])
-        .env("OPAL_FAULT_FAIL", "journal:removed")
+        .env("OPALRO_FAULT_FAIL", "journal:removed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -496,7 +496,7 @@ fn a_journal_left_or_unflushed_after_a_switch_is_a_warning_and_the_switch_stands
     // The head's own flush came first, so only the journal could come back.
     assert_eq!(
         message,
-        "The switch between saves is done, but Opalro couldn't flush .opal/state to the disk after \
+        "The switch between saves is done, but Opalro couldn't flush .opalro/state to the disk after \
          removing its journal (injected fault at journal:removed): after a power cut the journal \
          may be back, and the next command that changes the project removes it."
     );
@@ -521,7 +521,7 @@ fn undo_to_with_a_lost_head_refuses_an_entry_whose_saves_cant_be_read() {
     assert!(said.contains(&why), "{said}");
     assert!(said.contains("so nothing was changed.\n"), "{said}");
     assert!(
-        said.contains("hint: Pick another: opal undo --list shows"),
+        said.contains("hint: Pick another: opalro undo --list shows"),
         "{said}"
     );
     assert!(!head_file(&env).exists());
@@ -549,7 +549,7 @@ fn a_pick_up_refuses_an_entry_whose_tag_list_or_server_lines_cannot_be_read() {
         );
         assert!(said.contains(&why), "{said}");
         assert!(
-            said.contains("hint: Pick another: opal undo --list shows"),
+            said.contains("hint: Pick another: opalro undo --list shows"),
             "{said}"
         );
         assert!(!head_file(&env).exists());
@@ -594,7 +594,7 @@ fn undo_list_with_a_lost_head_passes_over_a_pack_it_cannot_read() {
         return;
     }
     fs::remove_file(head_file(&env)).unwrap();
-    let out = env.opal().args(["undo", "--list"]).output().unwrap();
+    let out = env.opalro().args(["undo", "--list"]).output().unwrap();
     let (said, warned) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{warned}");
     // `Two` is in the pack passed over, so `One` is where the diary ends.
@@ -619,13 +619,13 @@ fn a_stopped_switch_from_a_lost_head_is_dropped_without_writing_a_file() {
     let save = entry(&env, one).state.lines["main"];
     // A goto stopped after its first change; then the entry it was made from is lost.
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &save.to_hex()])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     assert!(journal.exists());
     remove_pack_holding(&env, two);
     let folder = read(&env, "a.txt");
@@ -634,7 +634,7 @@ fn a_stopped_switch_from_a_lost_head_is_dropped_without_writing_a_file() {
     assert_eq!(head(&env).1.parent, Some(one));
     assert_eq!(read(&env, "a.txt"), folder);
     assert!(!journal.exists());
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(text(&out.stderr), "");
 }
@@ -649,9 +649,9 @@ fn a_pick_up_that_fails_after_dropping_a_switch_still_says_so() {
         let (env, [_, one, _]) = project();
         let save = entry(&env, one).state.lines["main"];
         let out = env
-            .opal()
+            .opalro()
             .args(["goto", &save.to_hex()])
-            .env("OPAL_FAULT_FAIL", "switch:changed")
+            .env("OPALRO_FAULT_FAIL", "switch:changed")
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -662,13 +662,13 @@ fn a_pick_up_that_fails_after_dropping_a_switch_still_says_so() {
             args.insert(0, "--json");
         }
         let out = env
-            .opal()
+            .opalro()
             .args(&args)
-            .env("OPAL_FAULT_FAIL", "journal:removed")
+            .env("OPALRO_FAULT_FAIL", "journal:removed")
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-        assert!(!env.root().join(".opal/state/journal").exists());
+        assert!(!env.root().join(".opalro/state/journal").exists());
         let said = text(&out.stderr);
         if json_out {
             let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -703,14 +703,14 @@ fn an_undo_to_picking_up_a_lost_head_stopped_anywhere_leaves_it_lost_or_picked_u
         let env = Env::empty();
         support::copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .args(["undo", "--to", &to])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
         assert_eq!(read(&env, "a.txt"), b"edited\n", "fault {n}");
-        let report = opal_core::verify::verify_store(&env.root().join(".opal/store/packs"));
+        let report = opal_core::verify::verify_store(&env.root().join(".opalro/store/packs"));
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
         // Either the step is current, or the head is still lost and running it again picks it up.
         if !head_file(&env).exists() {
@@ -735,12 +735,12 @@ fn an_undo_to_picking_up_a_lost_head_stopped_anywhere_leaves_it_lost_or_picked_u
 #[test]
 fn a_journal_a_finished_switch_left_never_outlives_its_head() {
     let (env, _) = project();
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     write(&env, "a.txt", "edited\n");
     let out = env
-        .opal()
+        .opalro()
         .arg("discard")
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -749,9 +749,9 @@ fn a_journal_a_finished_switch_left_never_outlives_its_head() {
     // own head, so it stops there, having saved nothing.
     write(&env, "b.txt", "b\n");
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "Three"])
-        .env("OPAL_FAULT_FAIL", "journal:removing")
+        .env("OPALRO_FAULT_FAIL", "journal:removing")
         .output()
         .unwrap();
     let said = text(&out.stderr);
@@ -767,7 +767,7 @@ fn a_journal_a_finished_switch_left_never_outlives_its_head() {
     assert_eq!(head(&env).1.command, "discard");
     assert!(journal.exists());
     // It still names the head, so it is only what the finished switch left.
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     let said = text(&out.stderr);
     assert!(said.contains("stopped just after it was done"), "{said}");
     assert!(!said.contains("made for another save"), "{said}");
@@ -786,13 +786,13 @@ fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_
     let save = entry(&env, one).state.lines["main"];
     ok(&env, &["goto", &save.to_hex()]);
     let (goto, _) = head(&env);
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     // Undoing the goto writes files but can't remove its journal; the save before it changes no
     // file, and stops, having changed nothing, when it can't remove that journal either.
     let out = env
-        .opal()
+        .opalro()
         .args(["undo", "2"])
-        .env("OPAL_FAULT_FAIL", "journal:removing")
+        .env("OPALRO_FAULT_FAIL", "journal:removing")
         .output()
         .unwrap();
     let said = text(&out.stderr);
@@ -805,7 +805,7 @@ fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_
     assert_eq!(head(&env).1.action, Action::Undo(goto));
     assert_eq!(read(&env, "a.txt"), b"two\n");
     assert!(journal.exists());
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     let said = text(&out.stderr);
     assert!(said.contains("stopped just after it was done"), "{said}");
     // The next undo only removes it, as after any stop, and the one after takes the save back.
@@ -837,7 +837,7 @@ fn undo_list_json_with_a_lost_head_matches_its_snapshot() {
     let (env, _) = project();
     fs::remove_file(head_file(&env)).unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["undo", "--list", "--json"])
         .output()
         .unwrap();

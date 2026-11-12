@@ -54,7 +54,7 @@ fn everyday_history_matches_git() {
     env.git(&["merge", "-q", "-m", "Merge two and three", "two", "three"]);
 
     // Entries only the index holds, which no checkout here could make: a link, two names only
-    // letter case tells apart, a submodule, and names Opalro leaves out (a `.opal` folder below the
+    // letter case tells apart, a submodule, and names Opalro leaves out (a `.opalro` folder below the
     // top, and a name Windows takes for `.git`).
     let target = blob(&env, b"b.txt");
     let (upper, lower) = (blob(&env, b"Read me\n"), blob(&env, b"Or me\n"));
@@ -64,7 +64,7 @@ fn everyday_history_matches_git() {
         format!("100644,{lower},Readme"),
         format!("160000,{},vendor/lib", "5a".repeat(20)),
         format!("100644,{upper},sub/kept.txt"),
-        format!("100644,{upper},sub/.opal/config"),
+        format!("100644,{upper},sub/.opalro/config"),
         format!("100644,{upper},sub/git~1"),
     ] {
         // Git refuses `git~1` unless told not to guard NTFS.
@@ -447,9 +447,9 @@ fn a_link_git_wrote_keeps_its_target_when_saved() {
 }
 
 #[test]
-#[ignore = "nightly: needs OPAL_DIFF_REPO, a full clone of a real repository"]
+#[ignore = "nightly: needs OPALRO_DIFF_REPO, a full clone of a real repository"]
 fn a_real_repository_matches_git() {
-    let clone = std::env::var_os("OPAL_DIFF_REPO").expect("OPAL_DIFF_REPO names a clone");
+    let clone = std::env::var_os("OPALRO_DIFF_REPO").expect("OPALRO_DIFF_REPO names a clone");
     let shallow = text(&git(
         Path::new(&clone),
         &["rev-parse", "--is-shallow-repository"],
@@ -457,7 +457,7 @@ fn a_real_repository_matches_git() {
     assert_eq!(
         shallow.trim(),
         "false",
-        "OPAL_DIFF_REPO must be a full clone"
+        "OPALRO_DIFF_REPO must be a full clone"
     );
     // Its .git copied, so the clone stays as it was and the test can run again.
     let work = tempfile::tempdir().unwrap();

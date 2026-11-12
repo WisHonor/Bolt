@@ -2,7 +2,7 @@
 
 Opalro keeps every version of your project, the code and the big files together: textures, models, sounds, videos.
 It has its own engine and its own way of storing things; it is not built on Git, though it can bring in a Git repository.
-Almost every command that changes something can be taken back with `opal undo`.
+Almost every command that changes something can be taken back with `opalro undo`.
 
 **This is an early version.** Opalro 0.1 is for one person on one computer: there is no server, so no sharing or locking yet, and no merging yet either. Keep another copy of anything that matters to you; Opalro is not a backup yet.
 
@@ -37,7 +37,7 @@ The user guide's section 2, Installing, has the command that checks a file on ea
 
 Each archive holds six files:
 
-- the program, `opal.exe` on Windows and `opal` elsewhere;
+- the program, `opalro.exe` on Windows and `opalro` elsewhere;
 - `README.md`, a first look at Opalro;
 - the user guide, `docs/guide.md`;
 - `USER-AGREEMENT.md`, the user agreement;
@@ -47,10 +47,10 @@ Each archive holds six files:
 
 1. Download the archive for your system, and `SHA256SUMS`, into the same folder.
 2. Read the user agreement, `USER-AGREEMENT.md`.
-3. Then follow the user guide's section 2, Installing: it checks the download, unpacks it, puts `opal` on your PATH and runs `opal --version`. The guide is `docs/guide.md` in the archive, and is published on this page too.
+3. Then follow the user guide's section 2, Installing: it checks the download, unpacks it, puts `opalro` on your PATH and runs `opalro --version`. The guide is `docs/guide.md` in the archive, and is published on this page too.
 
 The guide's section 3, The first five minutes, comes next. Windows and macOS may warn about Opalro the first time it runs, because it isn't signed; the guide's section 2 says what to do.
 
 ## Reporting a problem
 
-Write to support@opalro.com. Say which version `opal --version` prints, your system, and what you typed and saw. A security problem goes to the same address, privately, with "security" in the subject. "Reporting a problem", published on this page, says what to send.
+Write to support@opalro.com. Say which version `opalro --version` prints, your system, and what you typed and saw. A security problem goes to the same address, privately, with "security" in the subject. "Reporting a problem", published on this page, says what to send.

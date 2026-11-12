@@ -19,10 +19,10 @@ fn project() -> Env {
 }
 
 fn run(env: &Env, args: &[&str]) -> Output {
-    env.opal().args(args).output().unwrap()
+    env.opalro().args(args).output().unwrap()
 }
 
-/// `opal <args>`, which must succeed; what it printed.
+/// `opalro <args>`, which must succeed; what it printed.
 fn ok(env: &Env, args: &[&str]) -> String {
     let out = run(env, args);
     assert_eq!(
@@ -34,7 +34,7 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// `opal <args>`, which must be explained and change nothing: what it said on stderr.
+/// `opalro <args>`, which must be explained and change nothing: what it said on stderr.
 fn explained(env: &Env, args: &[&str]) -> String {
     let before = head(env);
     let out = run(env, args);
@@ -61,11 +61,11 @@ fn last_message(env: &Env) -> String {
 fn each_shortcut_runs_its_opal_command() {
     let fresh = Env::empty();
     ok(&fresh, &["init", "--preset", "custom"]);
-    assert!(fresh.root().join(".opal").is_dir());
+    assert!(fresh.root().join(".opalro").is_dir());
 
     let env = project();
     write(&env, "a.txt", "changed\n");
-    for (git, opal) in [
+    for (git, opalro) in [
         (&["diff"][..], &["changes"][..]),
         (&["diff", "a.txt"], &["changes", "a.txt"]),
         (&["log"], &["history"]),
@@ -73,7 +73,7 @@ fn each_shortcut_runs_its_opal_command() {
         (&["stash", "list"], &["shelf", "--list"]),
     ] {
         let typed = run(&env, &[git, &["--json"]].concat());
-        let meant = run(&env, &[opal, &["--json"]].concat());
+        let meant = run(&env, &[opalro, &["--json"]].concat());
         assert_eq!(typed.status.code(), Some(0), "{git:?}");
         assert_eq!(text(&typed.stdout), text(&meant.stdout), "{git:?}");
     }
@@ -126,7 +126,7 @@ fn commit_with_a_path_and_no_message_explains_and_saves_nothing() {
     let env = project();
     write(&env, "a.txt", "changed\n");
     let said = explained(&env, &["commit", "a.txt"]);
-    assert!(said.contains("opal save \"message\" <paths>"), "{said}");
+    assert!(said.contains("opalro save \"message\" <paths>"), "{said}");
     assert_eq!(changed(&env), ["a.txt"]);
     assert_eq!(last_message(&env), "Files");
 }
@@ -194,7 +194,7 @@ fn stash_with_anything_else_explains_and_shelves_nothing() {
         &["stash", "pop", "stash@{1}"],
     ] {
         let said = explained(&env, args);
-        assert!(said.contains("opal shelf --list"), "{said}");
+        assert!(said.contains("opalro shelf --list"), "{said}");
         assert_eq!(changed(&env), ["a.txt"]);
     }
     let shelves = doc(&run(&env, &["shelf", "--list", "--json"]).stdout);
@@ -211,7 +211,7 @@ fn restore_without_a_path_explains_and_discards_nothing() {
         &["restore", "--staged"],
     ] {
         let said = explained(&env, args);
-        assert!(said.contains("opal discard <paths>"), "{said}");
+        assert!(said.contains("opalro discard <paths>"), "{said}");
         assert_eq!(changed(&env), ["a.txt"]);
     }
 }
@@ -223,7 +223,7 @@ fn restore_with_paths_explains_and_discards_nothing() {
     write(&env, "new.txt", "new\n");
     for args in [&["restore", "a.txt"][..], &["restore", "."]] {
         let said = explained(&env, args);
-        assert!(said.contains("opal undo"), "{said}");
+        assert!(said.contains("opalro undo"), "{said}");
     }
     assert_eq!(changed(&env), ["a.txt", "new.txt"]);
     assert_eq!(
@@ -261,7 +261,7 @@ fn add_explains_and_changes_nothing() {
     let env = project();
     write(&env, "new.txt", "new\n");
     let said = explained(&env, &["add", "new.txt"]);
-    assert!(said.contains("opal save"), "{said}");
+    assert!(said.contains("opalro save"), "{said}");
     // With --json it is still text, on stderr.
     let with_json = explained(&env, &["--json", "add", "."]);
     assert_eq!(with_json, said);
@@ -289,11 +289,11 @@ fn each_explained_word_explains() {
         "clean",
     ] {
         let said = explained(&env, &[word, "x"]);
-        assert!(said.contains("opal "), "{word}: {said}");
+        assert!(said.contains("opalro "), "{word}: {said}");
     }
     for sub in ["apply", "drop", "clear", "show"] {
         let said = explained(&env, &["stash", sub]);
-        assert!(said.contains("opal unshelf"), "{said}");
+        assert!(said.contains("opalro unshelf"), "{said}");
     }
 }
 
@@ -306,18 +306,18 @@ fn checkout_dash_b_and_branch_with_a_name_explain() {
         &["branch", "x"],
     ] {
         let said = explained(&env, args);
-        assert!(said.contains("opal save --line <name>"), "{said}");
+        assert!(said.contains("opalro save --line <name>"), "{said}");
     }
     let lines = doc(&run(&env, &["line", "--json"]).stdout);
     assert_eq!(lines["lines"].as_array().unwrap().len(), 1, "{lines}");
 }
 
-/// `opal` on an 80-column terminal without colour.
+/// `opalro` on an 80-column terminal without colour.
 #[cfg(feature = "fault-injection")]
 fn on_a_terminal(env: &Env, args: &[&str]) -> Output {
-    env.opal()
-        .env("OPAL_FAKE_TERMINAL", "80")
-        .env("OPAL_PROGRESS_QUIET_MS", "600000")
+    env.opalro()
+        .env("OPALRO_FAKE_TERMINAL", "80")
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env("NO_COLOR", "1")
         .args(args)
         .output()
@@ -326,7 +326,7 @@ fn on_a_terminal(env: &Env, args: &[&str]) -> Output {
 
 #[cfg(feature = "fault-injection")]
 const COMMIT_HINT: &str =
-    "\nhint: in Opalro, commit is save, which takes new files too: opal save \"message\"\n";
+    "\nhint: in Opalro, commit is save; it takes new files too: opalro save \"message\"\n";
 
 #[cfg(feature = "fault-injection")]
 #[test]
@@ -353,7 +353,7 @@ fn the_hint_shows_once_per_word_on_a_terminal() {
     assert_eq!(failed.status.code(), Some(1));
     assert!(
         text(&failed.stderr)
-            .ends_with("\nhint: in Opalro, checkout is goto: opal goto <line or save>\n"),
+            .ends_with("\nhint: in Opalro, checkout is goto: opalro goto <line or save>\n"),
         "{}",
         text(&failed.stderr)
     );
@@ -412,8 +412,8 @@ fn an_explanation_wraps_on_a_narrow_terminal() {
     let env = project();
     let logged = explained(&env, &["stash", "apply"]);
     let out = env
-        .opal()
-        .env("OPAL_FAKE_TERMINAL", "40")
+        .opalro()
+        .env("OPALRO_FAKE_TERMINAL", "40")
         .env("NO_COLOR", "1")
         .args(["stash", "apply"])
         .output()
@@ -435,7 +435,9 @@ fn stash_says_a_shelfs_number_is_the_one_shelf_list_shows() {
     let env = project();
     let said = explained(&env, &["stash", "drop"]);
     assert!(
-        said.contains("`opal shelf --list` lists them by that number, which stays with its shelf."),
+        said.contains(
+            "`opalro shelf --list` lists them by that number, which stays with its shelf."
+        ),
         "{said}"
     );
     write(&env, "a.txt", "changed\n");
@@ -443,8 +445,8 @@ fn stash_says_a_shelfs_number_is_the_one_shelf_list_shows() {
     assert_eq!(out.status.code(), Some(0));
     assert!(
         text(&out.stderr).ends_with(
-            "\nhint: in Opalro, stash is shelf, which takes new files too: opal shelf\n      A \
-             shelf keeps the number opal shelf --list shows, counted from 1.\n"
+            "\nhint: in Opalro, stash is shelf, which takes new files too: opalro shelf\n      A \
+             shelf keeps the number opalro shelf --list shows, counted from 1.\n"
         ),
         "{}",
         text(&out.stderr)
@@ -458,16 +460,16 @@ fn the_stash_hints_commands_are_both_coloured() {
     let env = project();
     write(&env, "a.txt", "changed\n");
     let out = env
-        .opal()
-        .env("OPAL_FAKE_TERMINAL", "80")
-        .env("OPAL_PROGRESS_QUIET_MS", "600000")
+        .opalro()
+        .env("OPALRO_FAKE_TERMINAL", "80")
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env_remove("NO_COLOR")
         .arg("stash")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let said = text(&out.stderr);
-    for command in ["opal shelf", "opal shelf --list"] {
+    for command in ["opalro shelf", "opalro shelf --list"] {
         assert!(
             said.contains(&format!("\x1b[36m{command}\x1b[0m")),
             "{command}: {said:?}"

@@ -1,4 +1,4 @@
-//! Red-team session RT14 (decision 024): look-alikes of `.git` and `.opal` that only a Windows or
+//! Red-team session RT14 (decision 024): look-alikes of `.git` and `.opalro` that only a Windows or
 //! macOS drive can show, asserting the safe behaviour. See docs/redteam/2026-11-11-v0.1-release.md.
 #![cfg(any(windows, target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -11,11 +11,11 @@ use std::path::Path;
 
 #[cfg(windows)]
 use opal_core::listing::EntryKind;
-use opal_core::names::{is_opal_alias, is_git_alias};
+use opal_core::names::{is_git_alias, is_opal_alias};
 #[cfg(windows)]
 use support::{Env, listings, main_tip, plant_save};
 
-/// Every name made from `.git` or `.opal` by putting one character from U+0080 to U+FFFF in
+/// Every name made from `.git` or `.opalro` by putting one character from U+0080 to U+FFFF in
 /// place of one of its characters, or in between two of them, that this drive opens as the real
 /// folder: each must be one Opalro's look-alike tests catch.
 #[test]
@@ -24,7 +24,7 @@ fn every_one_character_change_this_drive_opens_as_git_or_opal_is_caught() {
     let dir = tempfile::tempdir().unwrap();
     let mut missed = Vec::new();
     let mut opened = 0;
-    for real in [".git", ".opal"] {
+    for real in [".git", ".opalro"] {
         fs::create_dir(dir.path().join(real)).unwrap();
         fs::write(dir.path().join(real).join("marker"), b"x").unwrap();
         let chars: Vec<char> = real.chars().collect();
@@ -54,7 +54,7 @@ fn every_one_character_change_this_drive_opens_as_git_or_opal_is_caught() {
         }
         fs::remove_dir_all(dir.path().join(real)).unwrap();
     }
-    println!("names that open .git or .opal: {opened}; missed: {missed:#?}");
+    println!("names that open .git or .opalro: {opened}; missed: {missed:#?}");
     assert!(missed.is_empty(), "{missed:#?}");
 }
 
@@ -84,20 +84,20 @@ fn short_names(dir: &Path) -> Vec<(String, String)> {
     found
 }
 
-/// A project whose `.git` and `.opal` got short names other than `GIT~1` and `OPAL~1`, because
+/// A project whose `.git` and `.opalro` got short names other than `GIT~1` and `OPALRO~1`, because
 /// folders whose short names take those came first. A save holding folders named by those short
-/// names must never write into `.git` or `.opal`.
+/// names must never write into `.git` or `.opalro`.
 #[cfg(windows)]
 #[test]
 #[ignore = "RT14: run on a redteam/* branch"]
 fn a_save_naming_the_real_short_names_of_git_and_opal_writes_into_neither() {
     let env = Env::empty();
     let root = env.root();
-    for taken in ["g it", "o pal", "op al", "opa l", "o p al"] {
+    for taken in ["g it", "o palro", "op alro", "opa lro", "opal ro"] {
         fs::create_dir(root.join(taken)).unwrap();
         fs::write(root.join(taken).join("f"), b"x").unwrap();
     }
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -110,13 +110,13 @@ fn a_save_naming_the_real_short_names_of_git_and_opal_writes_into_neither() {
             .find(|(l, _)| l == long)
             .map(|(_, s)| s.clone())
     };
-    let (git_short, opal_short) = (short_of(".git"), short_of(".opal"));
-    println!("short names: .git {git_short:?}, .opal {opal_short:?}");
+    let (git_short, opal_short) = (short_of(".git"), short_of(".opalro"));
+    println!("short names: .git {git_short:?}, .opalro {opal_short:?}");
     let (Some(git_short), Some(opal_short)) = (git_short, opal_short) else {
         panic!("this drive makes no short names, so nothing was attacked: {shorts:?}");
     };
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     let git_path = format!("{git_short}/config");
     let opal_path = format!("{opal_short}/planted");
     plant_save(root, |pack| {
@@ -129,7 +129,7 @@ fn a_save_naming_the_real_short_names_of_git_and_opal_writes_into_neither() {
             ],
         )
     });
-    let out = env.opal().args(["goto", "main"]).output().unwrap();
+    let out = env.opalro().args(["goto", "main"]).output().unwrap();
     println!(
         "goto: {:?}\n{}\n{}",
         out.status.code(),
@@ -140,5 +140,5 @@ fn a_save_naming_the_real_short_names_of_git_and_opal_writes_into_neither() {
         fs::read(root.join(".git").join("config")).unwrap(),
         b"ORIGINAL"
     );
-    assert!(!root.join(".opal").join("planted").exists());
+    assert!(!root.join(".opalro").join("planted").exists());
 }

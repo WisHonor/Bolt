@@ -1,4 +1,4 @@
-//! What `opal` prints: JSON shapes, warnings and error messages.
+//! What `opalro` prints: JSON shapes, warnings and error messages.
 
 use std::fmt::{self, Write as _};
 use std::io::{self, Write};
@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use crate::progress;
 use crate::style::{self, Role, Sym};
 
-/// The version of every JSON document `opal --json` prints.
-pub const OPAL_JSON: u32 = 1;
+/// The version of every JSON document `opalro --json` prints.
+pub const OPALRO_JSON: u32 = 1;
 
 fn person_json(p: &Person) -> Value {
     json!({
@@ -80,7 +80,7 @@ pub fn change_json(c: &FileChange) -> Value {
     })
 }
 
-/// A step undone or redone as JSON (docs/json.md, `opal undo --json`).
+/// A step undone or redone as JSON (docs/json.md, `opalro undo --json`).
 pub fn step_json(t: &Taken) -> Value {
     let effects: Vec<Value> = t.effects.iter().map(effect_json).collect();
     let action = match t.action {
@@ -257,7 +257,7 @@ pub fn picked_up_line(t: &Taken, named: &mut dyn FnMut(&Id) -> (String, Option<S
         Position::AtSave(save) => format!("at save {}", titled(named, save)),
     };
     format!(
-        "{} entry {} ({}) the current one: {at}. No file was changed: opal status shows how \
+        "{} entry {} ({}) the current one: {at}. No file was changed: opalro status shows how \
          your files differ from that save.",
         style::out().paint(Role::Ok, "Made"),
         t.step.short_hex(),
@@ -265,7 +265,7 @@ pub fn picked_up_line(t: &Taken, named: &mut dyn FnMut(&Id) -> (String, Option<S
     )
 }
 
-/// A diary entry as `opal undo --list --json` gives it (docs/json.md, "An entry").
+/// A diary entry as `opalro undo --list --json` gives it (docs/json.md, "An entry").
 pub fn entry_json(id: &Id, entry: &DiaryEntry, effects: &[Effect]) -> Value {
     let (action, target) = match &entry.action {
         Action::Command => ("command", None),
@@ -284,7 +284,7 @@ pub fn entry_json(id: &Id, entry: &DiaryEntry, effects: &[Effect]) -> Value {
     })
 }
 
-/// What a diary entry did, as `opal undo --list` tells it: its command, and the step it undid or
+/// What a diary entry did, as `opalro undo --list` tells it: its command, and the step it undid or
 /// redid, then what changed. `named` names a save as for [`step_line`]; `files` counts the files
 /// two saves differ in, if it can read them.
 pub fn entry_line(
@@ -346,7 +346,7 @@ pub fn entry_line(
     line
 }
 
-/// A shelf as `opal shelf --list --json` gives it (docs/json.md, "A shelf").
+/// A shelf as `opalro shelf --list --json` gives it (docs/json.md, "A shelf").
 pub fn shelf_json(s: &ShelfInfo) -> Value {
     json!({
         "label": s.label,
@@ -358,7 +358,7 @@ pub fn shelf_json(s: &ShelfInfo) -> Value {
     })
 }
 
-/// `opal shelf --json`'s document for what `shelf` did.
+/// `opalro shelf --json`'s document for what `shelf` did.
 pub fn shelved_json(done: &Shelved, warnings: &[Warning]) -> Value {
     let made = match done {
         Shelved::Made(made) => Some(made),
@@ -367,7 +367,7 @@ pub fn shelved_json(done: &Shelved, warnings: &[Warning]) -> Value {
     let applied = made.map(|d| d.applied.clone()).unwrap_or_default();
     let shelf = made.map(|d| json!({"label": d.label, "save": d.save.to_hex(), "files": d.files}));
     json!({
-        "opal_json": OPAL_JSON,
+        "opalro_json": OPALRO_JSON,
         "shelf": shelf,
         "changed_again": matches!(done, Shelved::Nothing { changed_again: true, .. }),
         "written": applied.written,
@@ -389,7 +389,7 @@ fn titled(named: &mut dyn FnMut(&Id) -> (String, Option<String>), save: &Id) -> 
 /// The document of a command that failed after doing part of its work: `done` with the error
 /// and the warnings added.
 pub fn failed_document(mut done: Value, failure: &Failure, warnings: &[Warning]) -> Value {
-    done["opal_json"] = OPAL_JSON.into();
+    done["opalro_json"] = OPALRO_JSON.into();
     done["error"] = error_json(failure);
     done["warnings"] = warnings_json(warnings);
     done
@@ -492,7 +492,7 @@ pub fn files(n: usize) -> String {
     counted(n as u64, "file", "files")
 }
 
-/// A file's change with its lines, as `opal changes --json` gives it. It is written as it is
+/// A file's change with its lines, as `opalro changes --json` gives it. It is written as it is
 /// shown, a line at a time, never held as one value.
 pub struct LinesJson<'a> {
     pub change: &'a FileChange<'a>,
@@ -634,7 +634,7 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
     Ok(())
 }
 
-/// What parts two files in `opal changes`: on a terminal a dim rule across it, up to 100 columns;
+/// What parts two files in `opalro changes`: on a terminal a dim rule across it, up to 100 columns;
 /// elsewhere an empty line, as a rule of `-` could pass for a removed line.
 pub fn between_files() -> String {
     let s = style::out();
@@ -645,7 +645,7 @@ pub fn between_files() -> String {
 }
 
 /// Standard output. What it couldn't take is remembered for the whole command (its reader went
-/// away, as in `opal changes | head`, or a write failed), so [`ended`] can tell it on stderr.
+/// away, as in `opalro changes | head`, or a write failed), so [`ended`] can tell it on stderr.
 pub struct Stdout {
     inner: io::StdoutLock<'static>,
 }
@@ -741,8 +741,8 @@ fn seen_any() -> bool {
 }
 
 /// What a changing command whose output was lost did all the same.
-const DONE: &str = "The command did its work all the same: only what Opalro printed was lost. opal \
-                    status and opal undo --list show where the project stands.";
+const DONE: &str = "The command did its work all the same: only what Opalro printed was lost. opalro \
+                    status and opalro undo --list show where the project stands.";
 
 /// Ends a command, once it has printed what it could on stdout.
 ///
@@ -885,7 +885,7 @@ fn error_json(failure: &Failure) -> Value {
 /// warnings found before it failed.
 fn error_document(failure: &Failure, warnings: &[Warning]) -> Value {
     json!({
-        "opal_json": OPAL_JSON,
+        "opalro_json": OPALRO_JSON,
         "error": error_json(failure),
         "warnings": warnings_json(warnings),
     })
@@ -1037,7 +1037,7 @@ fn zoned(time_ms: i64, tz_offset_min: i16, format: &str) -> String {
     )
 }
 
-/// What `opal discard` did, for people; `everywhere` when it was given no paths.
+/// What `opalro discard` did, for people; `everywhere` when it was given no paths.
 pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
     let s = style::out();
     let n = done.restored.len() + done.removed.len();
@@ -1063,13 +1063,13 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
     // The warning that follows names what stayed and says why.
     let said = match (nothing, everywhere) {
         (true, true) if !done.applied.changed_since_plan.is_empty() => {
-            "Nothing was discarded: your files changed while Opalro was discarding them. Run opal \
+            "Nothing was discarded: your files changed while Opalro was discarding them. Run opalro \
              discard again."
                 .to_owned()
         }
         (true, false) if !done.applied.changed_since_plan.is_empty() => {
             "Nothing was discarded there: your files changed while Opalro was discarding them. Run \
-             the same opal discard again."
+             the same opalro discard again."
                 .to_owned()
         }
         (true, _) if done.links_left.len() == 1 => {
@@ -1088,7 +1088,7 @@ pub fn discarded(done: &DiscardOutcome, everywhere: bool) -> String {
     said + "\n"
 }
 
-/// What `opal tidy` did, for people: what it freed, then the packs it left young.
+/// What `opalro tidy` did, for people: what it freed, then the packs it left young.
 pub fn tidied(report: &TidyReport) -> String {
     let s = style::out();
     let freed = report.bytes_before.saturating_sub(report.bytes_after);
@@ -1111,11 +1111,13 @@ pub fn tidied(report: &TidyReport) -> String {
     };
     let left = match report.packs_young {
         0 => return text,
-        1 => "Left 1 pack changed in the last 24 hours as it is: a later opal tidy frees what it \
+        1 => {
+            "Left 1 pack changed in the last 24 hours as it is: a later opalro tidy frees what it \
               holds that nothing needs."
-            .to_owned(),
+                .to_owned()
+        }
         n => format!(
-            "Left {} changed in the last 24 hours as they are: a later opal tidy frees what they \
+            "Left {} changed in the last 24 hours as they are: a later opalro tidy frees what they \
              hold that nothing needs.",
             counted(n as u64, "pack", "packs")
         ),
@@ -1123,7 +1125,7 @@ pub fn tidied(report: &TidyReport) -> String {
     text + "\n" + &s.detail(None, &left) + "\n"
 }
 
-/// How many problems of a kind `opal verify` lists on screen.
+/// How many problems of a kind `opalro verify` lists on screen.
 const PROBLEMS_SHOWN: usize = 20;
 
 /// `n`, then `one` or `many`.
@@ -1131,13 +1133,13 @@ pub fn counted(n: u64, one: &str, many: &str) -> String {
     format!("{} {}", thousands(n), if n == 1 { one } else { many })
 }
 
-/// `opal verify`'s outcome line, for `--json`'s `error` too.
+/// `opalro verify`'s outcome line, for `--json`'s `error` too.
 pub fn verify_outcome(v: &Verified, project: &str) -> String {
     let problems = counted(v.problems_total, "problem", "problems");
     format!("Checked {project}: {problems} found.")
 }
 
-/// What to do about what `opal verify` found: v0.1 can't repair.
+/// What to do about what `opalro verify` found: v0.1 can't repair.
 pub fn verify_hint(v: &Verified) -> String {
     let general = "Opalro can't repair a project in this version. Saves that don't use the damaged \
                    or missing data still work; keep any other copy of this project safe.";
@@ -1152,7 +1154,7 @@ pub fn verify_hint(v: &Verified) -> String {
     general.to_owned()
 }
 
-/// What `opal verify` found, for people: the outcome line, then a line for each check, or the
+/// What `opalro verify` found, for people: the outcome line, then a line for each check, or the
 /// problems it found, grouped by kind. Headers count every problem found, kept or not.
 pub fn verified(v: &Verified, project: &str) -> String {
     let s = style::out();
@@ -1268,7 +1270,7 @@ pub fn verified(v: &Verified, project: &str) -> String {
         let _ = writeln!(text, "{}", s.detail(Some(&cross), why));
     }
     if unshown {
-        let json = s.command("opal verify --json");
+        let json = s.command("opalro verify --json");
         let which = if v.problems_total <= PROBLEMS_KEPT as u64 {
             "them all".to_owned()
         } else {
@@ -1339,7 +1341,7 @@ fn problem_row(s: style::Screen, p: &Problem) -> String {
     row
 }
 
-/// `opal verify --json`'s document, without `error`.
+/// `opalro verify --json`'s document, without `error`.
 pub fn verified_json(v: &Verified) -> Value {
     let problems: Vec<Value> = v
         .problems
@@ -1359,7 +1361,7 @@ pub fn verified_json(v: &Verified) -> Value {
         })
         .collect();
     json!({
-        "opal_json": OPAL_JSON,
+        "opalro_json": OPALRO_JSON,
         "packs": v.packs,
         "objects": v.objects,
         "bytes": v.bytes,
@@ -1496,7 +1498,7 @@ mod tests {
 
     #[test]
     fn packs_that_could_not_be_listed_get_no_check_mark() {
-        let unlisted = "Opalro couldn't list the packs in .opal/store/packs: no permission.";
+        let unlisted = "Opalro couldn't list the packs in .opalro/store/packs: no permission.";
         let lost = "Opalro can't tell which diary entry is the project's current one.";
         let v = Verified {
             problems_total: 2,
@@ -1544,8 +1546,8 @@ mod tests {
         (String::from_utf8(out).unwrap(), ended)
     }
 
-    const SAVES: &str = r#"{"opal_json":1,"position":{"line":"main"},"saves":["#;
-    const CHANGES: &str = r#"{"opal_json":1,"changes":["#;
+    const SAVES: &str = r#"{"opalro_json":1,"position":{"line":"main"},"saves":["#;
+    const CHANGES: &str = r#"{"changes":["#;
 
     #[test]
     fn an_undone_jump_says_where_it_went_and_leaves_nothing_unsaved() {
@@ -1706,12 +1708,16 @@ mod tests {
 
     #[test]
     fn a_finished_stream_is_the_document_serde_json_would_write() {
-        let (out, ended) = stream(CHANGES, json!({"save": {"id": "x"}}), |each| {
-            each(&json!({"path": "a"}))?;
-            each(&json!({"path": "b"}))
-        });
+        let (out, ended) = stream(
+            CHANGES,
+            json!({"opalro_json": 1, "save": {"id": "x"}}),
+            |each| {
+                each(&json!({"path": "a"}))?;
+                each(&json!({"path": "b"}))
+            },
+        );
         let expected = json!({
-            "opal_json": 1,
+            "opalro_json": 1,
             "changes": [{"path": "a"}, {"path": "b"}],
             "save": {"id": "x"},
             "warnings": [{"kind": "pack_damaged", "message": "pack x is damaged."}],
@@ -1734,7 +1740,7 @@ mod tests {
         assert_eq!(
             error_document(&failure(), &[damaged()]),
             json!({
-                "opal_json": 1,
+                "opalro_json": 1,
                 "error": {"message": "Can't read it.", "hint": "Try again."},
                 "warnings": [{"kind": "pack_damaged", "message": "pack x is damaged."}],
             })
@@ -1773,7 +1779,7 @@ mod tests {
         assert_eq!(
             tidied(&report),
             "Freed 2.9 KiB  (1 pack removed, 1 written)\n\n    Left 1 pack changed in the last 24 \
-             hours as it is: a later opal tidy frees what it holds that nothing needs.\n"
+             hours as it is: a later opalro tidy frees what it holds that nothing needs.\n"
         );
         let nothing = TidyReport {
             bytes_before: 2048,
@@ -1877,14 +1883,14 @@ mod tests {
         };
         assert_eq!(
             discarded(&changed_again, true),
-            "Nothing was discarded: your files changed while Opalro was discarding them. Run opal \
+            "Nothing was discarded: your files changed while Opalro was discarding them. Run opalro \
              discard again.\n"
         );
         // Given paths, it says the same of them, so running it again throws away no more.
         assert_eq!(
             discarded(&changed_again, false),
             "Nothing was discarded there: your files changed while Opalro was discarding them. Run \
-             the same opal discard again.\n"
+             the same opalro discard again.\n"
         );
     }
 }

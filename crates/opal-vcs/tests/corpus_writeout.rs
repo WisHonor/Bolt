@@ -1,7 +1,7 @@
 //! Hostile saves written out (security.md §4, T1 to T5, and the write-out cases of the review of
-//! Git's published vulnerabilities): each case plants a save, or a journal, as a hostile `.opal`
-//! could hold it, runs `opal goto` onto it, and checks what was written, that nothing reached the
-//! folder beside the project or went into `.git` or `.opal`, and what Opalro said.
+//! Git's published vulnerabilities): each case plants a save, or a journal, as a hostile `.opalro`
+//! could hold it, runs `opalro goto` onto it, and checks what was written, that nothing reached the
+//! folder beside the project or went into `.git` or `.opalro`, and what Opalro said.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -32,13 +32,13 @@ impl Case {
         plant_save(self.root(), |pack| listings(pack, entries));
     }
 
-    /// `opal goto main --json`: its exit code, its document and what it printed to stderr.
+    /// `opalro goto main --json`: its exit code, its document and what it printed to stderr.
     fn goto_main(&self) -> (Option<i32>, serde_json::Value, String) {
         self.run_json(&["goto", "main"])
     }
 }
 
-// `.git` and `.opal` spellings (T2).
+// `.git` and `.opalro` spellings (T2).
 
 #[test]
 fn spellings_of_git_in_a_save_are_never_written() {
@@ -80,7 +80,7 @@ fn spellings_of_git_in_a_save_are_never_written() {
     let said = message(&doc, "not_written_here");
     assert!(
         said.starts_with("Left 10 entries unwritten: this computer can't hold them as they are")
-            && said.contains("a spelling of .git or .opal"),
+            && said.contains("a spelling of .git or .opalro"),
         "{said}"
     );
     assert_eq!(
@@ -111,7 +111,7 @@ fn the_short_name_of_gitmodules_is_never_written() {
     // Refused by name, not found in the way of `.gitmodules` on the drive.
     assert_eq!(kinds(&doc), ["not_written_here"], "{doc}");
     assert!(
-        message(&doc, "not_written_here").contains("a spelling of .git or .opal"),
+        message(&doc, "not_written_here").contains("a spelling of .git or .opalro"),
         "{doc}"
     );
     assert_eq!(
@@ -143,7 +143,7 @@ fn a_save_naming_a_spelling_of_opal_is_refused_whole() {
     assert_eq!(
         doc["error"]["message"],
         format!(
-            "Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+            "Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
              writes, so it can't be used.",
             planted.short_hex()
         ),
@@ -157,22 +157,22 @@ fn a_save_naming_a_spelling_of_opal_is_refused_whole() {
     );
     assert!(project_entries(&case.env).is_empty());
     case.assert_nothing_escaped();
-    assert!(!case.root().join(".opal/state/journal").exists());
+    assert!(!case.root().join(".opalro/state/journal").exists());
 }
 
 #[test]
 fn a_spelling_of_opal_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let shown = [
-        (".opalignore", File, b"ignored/\n" as &[u8]),
+        (".opalroignore", File, b"ignored/\n" as &[u8]),
         ("a.txt", File, b"a\n"),
     ];
     // The save to go to, then the save the project is on: its folder `ignored`, which its own
-    // `.opalignore` keeps out, holds a spelling of `.opal`.
+    // `.opalroignore` keeps out, holds a spelling of `.opalro`.
     plant_save(env.root(), |pack| listings(pack, &shown));
     let target = env.state().1.lines["main"];
     plant_save(env.root(), |pack| {
@@ -202,7 +202,7 @@ fn a_spelling_of_opal_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_tha
     }
     std::fs::create_dir(env.root().join("ignored")).unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &target.to_hex(), "--json"])
         .output()
         .unwrap();
@@ -211,7 +211,7 @@ fn a_spelling_of_opal_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_tha
     assert_eq!(
         doc["error"]["message"],
         format!(
-            "Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+            "Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
              writes, so it can't be used.",
             on.short_hex()
         ),
@@ -229,7 +229,7 @@ fn a_spelling_of_opal_in_an_ignored_folder_of_the_save_you_are_on_is_told_as_tha
 #[test]
 fn a_spelling_of_opal_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -251,7 +251,7 @@ fn a_spelling_of_opal_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
     std::fs::write(env.root().join("a.txt"), b"a\n").unwrap();
     for target in [without, sharing] {
         let out = env
-            .opal()
+            .opalro()
             .args(["goto", &target.to_hex(), "--json"])
             .output()
             .unwrap();
@@ -260,7 +260,7 @@ fn a_spelling_of_opal_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
         assert_eq!(
             doc["error"]["message"],
             format!(
-                "Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+                "Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
                  writes, so it can't be used.",
                 on.short_hex()
             ),
@@ -278,7 +278,7 @@ fn a_spelling_of_opal_under_git_in_the_save_you_are_on_is_told_as_that_saves() {
 
 /// Writes `actions` as the journal of a switch from where the project is to the diary entry
 /// before it, which the next command that changes the project carries out. Written as bytes,
-/// as a hostile `.opal` can hold any.
+/// as a hostile `.opalro` can hold any.
 fn plant_journal(root: &Path, actions: &[(&str, Change)]) {
     let repo = Repository::open(root).unwrap();
     let (head, entry) = repo.current().unwrap();
@@ -296,7 +296,7 @@ fn plant_journal(root: &Path, actions: &[(&str, Change)]) {
         from: head,
         actions,
     };
-    std::fs::write(root.join(".opal/state/journal"), journal.encode()).unwrap();
+    std::fs::write(root.join(".opalro/state/journal"), journal.encode()).unwrap();
 }
 
 /// The payload, stored in the project's store, as a journal names contents.
@@ -320,11 +320,11 @@ fn a_journal_naming_a_spelling_of_opal_is_never_carried_out() {
     plant_journal(
         case.root(),
         &[
-            (".OPAL", Change::MakeFolder),
-            (".OPAL/pwned", Change::File(c)),
-            (".opal/tmp/pwned", Change::File(c)),
-            ("opal~1/pwned", Change::File(c)),
-            (".opal./pwned", Change::File(c)),
+            (".OPALRO", Change::MakeFolder),
+            (".OPALRO/pwned", Change::File(c)),
+            (".opalro/tmp/pwned", Change::File(c)),
+            ("opalro~1/pwned", Change::File(c)),
+            (".opalro./pwned", Change::File(c)),
         ],
     );
     case.look_around();
@@ -649,14 +649,14 @@ fn modes_are_exactly_0644_and_0755_whatever_the_umask() {
             ("tool", Executable, b"t"),
             ("deep/tool", Executable, b"t2"),
         ]);
-        let opal = case.env.opal_process_in(case.root());
+        let opalro = case.env.opal_process_in(case.root());
         let mut cmd = std::process::Command::new("sh");
         cmd.arg("-c")
             .arg(format!("umask {umask}; exec \"$0\" \"$@\""))
-            .arg(opal.get_program())
+            .arg(opalro.get_program())
             .args(["goto", "main", "--json"])
             .current_dir(case.root());
-        for (key, value) in opal.get_envs() {
+        for (key, value) in opalro.get_envs() {
             match value {
                 Some(value) => cmd.env(key, value),
                 None => cmd.env_remove(key),
@@ -742,13 +742,13 @@ fn a_link_above_a_written_file_is_never_followed() {
     ]);
     let out = case
         .env
-        .opal()
+        .opalro()
         .args(["goto", "main"])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    assert!(case.root().join(".opal/state/journal").exists());
+    assert!(case.root().join(".opalro/state/journal").exists());
     // The switch made `a` and stopped; now it leads out of the project.
     assert!(case.root().join("a").is_dir());
     std::fs::remove_dir(case.root().join("a")).unwrap();
@@ -826,7 +826,7 @@ fn names(dir: &Dir) -> Vec<String> {
     names
 }
 
-/// Fails unless `opal goto main` refused the save as too large to read, and changed nothing.
+/// Fails unless `opalro goto main` refused the save as too large to read, and changed nothing.
 fn assert_refused_as_too_large(case: &Case) {
     let (code, doc, _) = case.goto_main();
     assert_eq!(code, Some(1), "{doc}");
@@ -843,7 +843,7 @@ fn assert_refused_as_too_large(case: &Case) {
         "{doc}"
     );
     assert!(project_entries(&case.env).is_empty());
-    assert!(!case.root().join(".opal/state/journal").exists());
+    assert!(!case.root().join(".opalro/state/journal").exists());
     case.assert_nothing_escaped();
 }
 

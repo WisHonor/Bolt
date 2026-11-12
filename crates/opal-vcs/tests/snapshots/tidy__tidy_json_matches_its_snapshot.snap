@@ -5,7 +5,7 @@ expression: doc
 {
   "bytes_after": "[redacted]",
   "bytes_before": "[redacted]",
-  "opal_json": 1,
+  "opalro_json": 1,
   "packs_removed": 3,
   "packs_written": 1,
   "packs_young": 0,

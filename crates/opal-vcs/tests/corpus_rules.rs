@@ -1,5 +1,5 @@
 //! Projects that arrive with hostile rule files (security.md T6 and T21, storage-format.md §12): a
-//! `opal.toml` or `.opalignore` that is a link, a folder, a pipe or too long, TOML built to wear
+//! `opalro.toml` or `.opalroignore` that is a link, a folder, a pipe or too long, TOML built to wear
 //! the parser out, numbers at every limit, text that would drive the terminal, and folders planted
 //! to fool the look that suggests a preset. Every command ends, in bounded time, says what it
 //! passed over, escaped, and writes nothing it shouldn't.
@@ -19,13 +19,13 @@ use support::{
     without_opals_codes, write_noise,
 };
 
-/// `opal <args>` in the project's folder: its exit code, stdout and stderr.
+/// `opalro <args>` in the project's folder: its exit code, stdout and stderr.
 fn run(env: &Env, args: &[&str]) -> (Option<i32>, String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     (out.status.code(), text(&out.stdout), text(&out.stderr))
 }
 
-/// `opal --json <args>`: its exit code and document.
+/// `opalro --json <args>`: its exit code and document.
 fn json(env: &Env, args: &[&str]) -> (Option<i32>, Value) {
     let (code, out, err) = run(env, &[&["--json"], args].concat());
     let doc = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{args:?}: {e}: {out:?} {err}"));
@@ -40,7 +40,7 @@ fn started() -> Env {
     env
 }
 
-/// The kinds of a document's warnings about `opal.toml`.
+/// The kinds of a document's warnings about `opalro.toml`.
 fn rules_warnings(doc: &Value) -> Vec<String> {
     let about = ["rules_file_skipped", "rules_ignored"];
     doc["warnings"]
@@ -66,7 +66,7 @@ fn message_of(doc: &Value, kind: &str) -> String {
 /// on CI's slowest machine finish each of these in a few seconds.
 const LIMIT_SECS: u64 = 120;
 
-/// `opal <args>` in the project, killed if it runs past [`LIMIT_SECS`]: its exit code and stderr.
+/// `opalro <args>` in the project, killed if it runs past [`LIMIT_SECS`]: its exit code and stderr.
 fn bounded(env: &Env, args: &[&str]) -> (Option<i32>, String) {
     let mut cmd = env.opal_process_in(env.root());
     cmd.args(args);
@@ -76,10 +76,10 @@ fn bounded(env: &Env, args: &[&str]) -> (Option<i32>, String) {
     (ended.code, ended.stderr)
 }
 
-/// What `opal save` and `opal setup` make of the project's `opal.toml`: each must work, and say
+/// What `opalro save` and `opalro setup` make of the project's `opalro.toml`: each must work, and say
 /// the same about the file; the setup document.
 fn saved_and_shown(env: &Env, file: &str) -> Value {
-    fs::write(env.root().join("opal.toml"), file).unwrap();
+    fs::write(env.root().join("opalro.toml"), file).unwrap();
     // Some files ask before every save.
     let (code, saved) = json(env, &["save", "--yes", "Rules"]);
     assert_eq!(code, Some(0), "{saved}");
@@ -89,7 +89,7 @@ fn saved_and_shown(env: &Env, file: &str) -> Value {
     shown
 }
 
-/// Opalro's own values, as `opal setup --json` gives them.
+/// Opalro's own values, as `opalro setup --json` gives them.
 fn own_values(doc: &Value) -> bool {
     doc["chunk_files_over"] == 1 << 20
         && doc["ask_before_saving_over"] == 100_000_000
@@ -106,11 +106,11 @@ fn a_rules_file_that_is_a_link_out_of_the_project() {
     let secret = "preset = \"the-secret\"\nchunk-files-over = \"8 MiB\"\n";
     fs::write(outside.path().join("rules.toml"), secret).unwrap();
     fs::create_dir(outside.path().join("folder")).unwrap();
-    fs::write(outside.path().join("folder/opal.toml"), secret).unwrap();
+    fs::write(outside.path().join("folder/opalro.toml"), secret).unwrap();
     let before = support::files(outside.path());
     for to_a_file in [false, true] {
         let env = started();
-        let link = env.root().join("opal.toml");
+        let link = env.root().join("opalro.toml");
         if to_a_file {
             if !link_file(&outside.path().join("rules.toml"), &link) {
                 continue;
@@ -133,9 +133,9 @@ fn a_rules_file_that_is_a_link_out_of_the_project() {
         let entry = head(&env).0;
         let (code, _, err) = run(&env, &["setup", "--preset", "code", "--yes"]);
         assert_eq!(code, Some(1), "{err}");
-        assert!(err.contains("opal.toml isn't a regular file"), "{err}");
+        assert!(err.contains("opalro.toml isn't a regular file"), "{err}");
         assert_eq!(head(&env).0, entry);
-        assert!(!env.root().join(".opalignore").exists());
+        assert!(!env.root().join(".opalroignore").exists());
         assert_eq!(support::files(outside.path()), before);
     }
 }
@@ -149,7 +149,7 @@ fn a_rules_file_that_is_a_folder_a_pipe_or_2_mib() {
         ("2 MiB", "larger than 1 MiB"),
     ] {
         let env = started();
-        let at = env.root().join("opal.toml");
+        let at = env.root().join("opalro.toml");
         if case == "folder" {
             fs::create_dir(&at).unwrap();
             fs::write(at.join("inside.txt"), "x\n").unwrap();
@@ -168,7 +168,7 @@ fn a_rules_file_that_is_a_folder_a_pipe_or_2_mib() {
         let (code, said, _) = run(&env, &["setup"]);
         assert_eq!(code, Some(0));
         assert!(
-            said.starts_with("opal.toml couldn't be used, so Opalro's own values apply:"),
+            said.starts_with("opalro.toml couldn't be used, so Opalro's own values apply:"),
             "{case}: {said}"
         );
     }
@@ -177,13 +177,13 @@ fn a_rules_file_that_is_a_folder_a_pipe_or_2_mib() {
     {
         let env = started();
         let made = std::process::Command::new("mkfifo")
-            .arg(env.root().join("opal.toml"))
+            .arg(env.root().join("opalro.toml"))
             .status()
             .unwrap();
         assert!(made.success());
         let (code, said) = bounded(&env, &["setup"]);
         assert_eq!(code, Some(0), "{said}");
-        assert!(said.contains("Opalro passed over opal.toml"), "{said}");
+        assert!(said.contains("Opalro passed over opalro.toml"), "{said}");
         // A save meets the pipe in its walk too: it ends, whatever it makes of it.
         bounded(&env, &["save", "With a pipe"]);
     }
@@ -323,16 +323,16 @@ fn a_rules_file_with_numbers_at_every_limit() {
     assert!(own_values(&shown));
 }
 
-/// `opal <args>` in `dir` on a terminal 80 columns wide that shows colour and symbols.
+/// `opalro <args>` in `dir` on a terminal 80 columns wide that shows colour and symbols.
 #[cfg(feature = "fault-injection")]
 fn on_a_terminal(env: &Env, dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
     let out = env
         .opal_in(dir)
         .args(args)
-        .env("OPAL_FAKE_TERMINAL", "80")
-        .env("OPAL_PROGRESS_QUIET_MS", "600000")
+        .env("OPALRO_FAKE_TERMINAL", "80")
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env("TERM", "xterm-256color")
-        .env("OPAL_ASCII", "0")
+        .env("OPALRO_ASCII", "0")
         .env_remove("NO_COLOR")
         .output()
         .unwrap();
@@ -381,7 +381,7 @@ fn a_rules_file_whose_keys_and_values_hold_escape_codes() {
     // `start` in a folder that brings the file, in a log and on a terminal, each in a copy of it.
     for terminal in ways.clone() {
         let env = Env::empty();
-        fs::write(env.root().join("opal.toml"), &file).unwrap();
+        fs::write(env.root().join("opalro.toml"), &file).unwrap();
         let (_, err) = said_by(&env, &["start"], terminal);
         let err = without_opals_codes(&err);
         let err = err.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -393,7 +393,7 @@ fn a_rules_file_whose_keys_and_values_hold_escape_codes() {
     }
     // Then `save` and `setup` in the project.
     let env = Env::empty();
-    fs::write(env.root().join("opal.toml"), &file).unwrap();
+    fs::write(env.root().join("opalro.toml"), &file).unwrap();
     said_by(&env, &["start"], None);
     for (n, terminal) in ways.into_iter().enumerate() {
         fs::write(env.root().join("a.txt"), format!("{n}\n")).unwrap();
@@ -410,7 +410,7 @@ fn a_rules_file_whose_keys_and_values_hold_escape_codes() {
     }
     // With --json the label and patterns are data, as stored; Opalro's messages are escaped, and
     // nothing raw reaches the stream.
-    let out = env.opal().args(["--json", "setup"]).output().unwrap();
+    let out = env.opalro().args(["--json", "setup"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(!out.stdout.contains(&0x1b) && !out.stdout.contains(&0x07));
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -449,7 +449,7 @@ fn a_rules_file_with_a_million_rules_under_the_size_limit() {
         (&usable, count(&usable, one), 0),
     ] {
         assert!(file.len() <= cap && kept + passed_over > 30_000);
-        fs::write(env.root().join("opal.toml"), file).unwrap();
+        fs::write(env.root().join("opalro.toml"), file).unwrap();
         let started_at = Instant::now();
         for args in [
             &["setup"][..],
@@ -473,11 +473,11 @@ fn a_rules_file_with_a_million_rules_under_the_size_limit() {
     }
 }
 
-// `.opalignore`.
+// `.opalroignore`.
 
 #[test]
-fn a_opalignore_with_ten_thousand_start_marks() {
-    let block = presets::opalignore_block(Preset::Code, &Found::default()).unwrap();
+fn a_opalroignore_with_ten_thousand_start_marks() {
+    let block = presets::opalroignore_block(Preset::Code, &Found::default()).unwrap();
     // Ten thousand blocks: only the first is replaced, every other byte stays.
     let mut blocks = "mine/\n".to_owned();
     let first = blocks.len();
@@ -494,7 +494,7 @@ fn a_opalignore_with_ten_thousand_start_marks() {
     for (before, after) in [(blocks, after_blocks), (marks, after_marks)] {
         assert!(before.len() < 1 << 20);
         let env = started();
-        let path = env.root().join(".opalignore");
+        let path = env.root().join(".opalroignore");
         fs::write(&path, &before).unwrap();
         let (code, said) = bounded(&env, &["setup", "--preset", "code", "--yes"]);
         assert_eq!(code, Some(0), "{said}");
@@ -510,13 +510,13 @@ fn a_opalignore_with_ten_thousand_start_marks() {
     }
 }
 
-/// Every entry at the top of `dir` but `.opal`, by name, with what a file holds (`None` for
+/// Every entry at the top of `dir` but `.opalro`, by name, with what a file holds (`None` for
 /// anything else), read without following a link.
 fn top_entries(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
     let mut found: Vec<_> = fs::read_dir(dir)
         .unwrap()
         .map(Result::unwrap)
-        .filter(|e| e.file_name() != ".opal")
+        .filter(|e| e.file_name() != ".opalro")
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let file = fs::symlink_metadata(e.path()).unwrap().is_file();
@@ -528,16 +528,16 @@ fn top_entries(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
 }
 
 #[test]
-fn a_opalignore_that_is_a_link_stops_setup_and_start() {
+fn a_opalroignore_that_is_a_link_stops_setup_and_start() {
     let outside = tempfile::tempdir().unwrap();
     fs::write(outside.path().join("ignore"), "outside/\n").unwrap();
     fs::create_dir(outside.path().join("folder")).unwrap();
     fs::write(outside.path().join("folder/x"), "x\n").unwrap();
     let seen = support::files(outside.path());
-    // Makes `.opalignore` in `dir` a link out of it, to a file or a folder; false where this
+    // Makes `.opalroignore` in `dir` a link out of it, to a file or a folder; false where this
     // account can't make that link.
     let link = |dir: &Path, to_a_file: bool| {
-        let at = dir.join(".opalignore");
+        let at = dir.join(".opalroignore");
         if to_a_file {
             link_file(&outside.path().join("ignore"), &at)
         } else {
@@ -546,10 +546,10 @@ fn a_opalignore_that_is_a_link_stops_setup_and_start() {
         }
     };
     for (to_a_file, own_toml) in [(false, false), (false, true), (true, false), (true, true)] {
-        // `opal setup --preset`: refused before anything is written, opal.toml included.
+        // `opalro setup --preset`: refused before anything is written, opalro.toml included.
         let env = started();
         if own_toml {
-            fs::write(env.root().join("opal.toml"), "# mine\n").unwrap();
+            fs::write(env.root().join("opalro.toml"), "# mine\n").unwrap();
         }
         if !link(env.root(), to_a_file) {
             continue;
@@ -563,15 +563,15 @@ fn a_opalignore_that_is_a_link_stops_setup_and_start() {
             let (code, out, err) = run(&env, args);
             assert_eq!(code, Some(1), "{args:?}: {err}");
             assert!(out.is_empty(), "{out}");
-            assert!(err.contains(".opalignore isn't a regular file"), "{err}");
+            assert!(err.contains(".opalroignore isn't a regular file"), "{err}");
             assert_eq!(top_entries(env.root()), before);
             assert_eq!(head(&env).0, entry);
         }
-        // `opal start --preset`: with an opal.toml it starts nothing; without one the project is
+        // `opalro start --preset`: with an opalro.toml it starts nothing; without one the project is
         // made, as terminal.md says, and neither rule file is written.
         let env = Env::empty();
         if own_toml {
-            fs::write(env.root().join("opal.toml"), "# mine\n").unwrap();
+            fs::write(env.root().join("opalro.toml"), "# mine\n").unwrap();
         }
         link(env.root(), to_a_file);
         let before = top_entries(env.root());
@@ -579,10 +579,10 @@ fn a_opalignore_that_is_a_link_stops_setup_and_start() {
         assert_eq!(code, Some(1), "{err}");
         assert_eq!(top_entries(env.root()), before);
         if own_toml {
-            assert!(!env.root().join(".opal").exists());
+            assert!(!env.root().join(".opalro").exists());
         } else {
             assert!(err.contains("its rule files weren't written"), "{err}");
-            assert!(err.contains(".opalignore isn't a regular file"), "{err}");
+            assert!(err.contains(".opalroignore isn't a regular file"), "{err}");
             assert_eq!(head(&env).1.command, "start");
         }
         assert_eq!(support::files(outside.path()), seen);
@@ -632,19 +632,19 @@ fn planted_engine_files_only_change_the_suggestion() {
     assert_eq!(doc["found"]["languages"].as_array().unwrap().len(), 8);
     let read = |name: &str| fs::read_to_string(env.root().join(name)).unwrap();
     assert_eq!(
-        read("opal.toml"),
+        read("opalro.toml"),
         presets::opal_toml(Preset::Code, &every).unwrap()
     );
-    let code_block = presets::opalignore_block(Preset::Code, &every).unwrap();
-    assert_eq!(read(".opalignore"), code_block);
+    let code_block = presets::opalroignore_block(Preset::Code, &every).unwrap();
+    assert_eq!(read(".opalroignore"), code_block);
     // Code's lists only: nothing of the engines' found its way in.
-    let game_lines = presets::opalignore_block(Preset::Game, &every).unwrap();
+    let game_lines = presets::opalroignore_block(Preset::Game, &every).unwrap();
     let game_only = game_lines
         .lines()
         .filter(|l| !code_block.contains(l))
         .count();
     assert!(game_only > 50);
-    assert!(!read(".opalignore").contains("/[Ll]ibrary/"));
+    assert!(!read(".opalroignore").contains("/[Ll]ibrary/"));
 }
 
 /// Plants `n` empty files in `dir`, a thousand to a folder.
@@ -710,12 +710,12 @@ fn links_named_like_an_engines_folders_are_never_followed() {
     let read = |name: &str| fs::read_to_string(env.root().join(name)).unwrap();
     let nothing = Found::default();
     assert_eq!(
-        read("opal.toml"),
+        read("opalro.toml"),
         presets::opal_toml(Preset::Code, &nothing).unwrap()
     );
     assert_eq!(
-        read(".opalignore"),
-        presets::opalignore_block(Preset::Code, &nothing).unwrap()
+        read(".opalroignore"),
+        presets::opalroignore_block(Preset::Code, &nothing).unwrap()
     );
     assert_eq!(fs::read_dir(&big).unwrap().count(), 22);
 }
@@ -745,15 +745,15 @@ fn engine_files_deeper_than_a_look_goes_change_nothing() {
 fn rule_files_inside_an_imported_repository_are_data_like_any_other() {
     let env = Env::new();
     // History holds a file that isn't TOML, then rules that would cut a 3 MiB file.
-    env.commit("opal.toml", &"[".repeat(100_000), "Broken rules");
-    env.commit("opal.toml", "chunk-files-over = \"2 MiB\"\n", "Rules");
+    env.commit("opalro.toml", &"[".repeat(100_000), "Broken rules");
+    env.commit("opalro.toml", "chunk-files-over = \"2 MiB\"\n", "Rules");
     let big = write_noise(&env.root().join("big.bin"), 7, 3 << 20);
     env.git(&["add", "big.bin"]);
     env.git(&["commit", "-q", "-m", "Big"]);
     // The folder's copy, changed and not committed, is the one that counts: it keeps the file
     // whole, where Git's copy and Opalro's own 1 MiB would both cut it.
     fs::write(
-        env.root().join("opal.toml"),
+        env.root().join("opalro.toml"),
         "chunk-files-over = \"8 MiB\"\n",
     )
     .unwrap();

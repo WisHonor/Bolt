@@ -2,24 +2,24 @@
 # Tries a release program on a FAT32 and an exFAT drive (a loop file each, mounted for this
 # user), in a folder and at the top. Prints what Opalro says; a refusal is written down, not a
 # failure. Fails only if a try can't be set up.
-# Usage: ordinary-computers.sh <opal>
+# Usage: ordinary-computers.sh <opalro>
 set -euo pipefail
 
-opal=$1
+opalro=$1
 work=$(mktemp -d)
-export OPAL_CONFIG_DIR="$work/config"
-config="$OPAL_CONFIG_DIR/config.toml"
+export OPALRO_CONFIG_DIR="$work/config"
+config="$OPALRO_CONFIG_DIR/config.toml"
 user='[user]
 name = "Ana Lima"
 email = "ana@example.com"'
-unset OPAL_USER_NAME OPAL_USER_EMAIL
-mkdir "$OPAL_CONFIG_DIR"
+unset OPALRO_USER_NAME OPALRO_USER_EMAIL
+mkdir "$OPALRO_CONFIG_DIR"
 
-# Runs opal and prints all it said and its exit code; what it said is also in $work/said.
+# Runs opalro and prints all it said and its exit code; what it said is also in $work/said.
 try_opal() {
-  echo "> opal $*"
+  echo "> opalro $*"
   local s=0
-  "$opal" "$@" > "$work/said" 2>&1 || s=$?
+  "$opalro" "$@" > "$work/said" 2>&1 || s=$?
   sed 's/^/  /' "$work/said"
   echo "  (exit $s)"
 }

@@ -1,4 +1,4 @@
-//! End-to-end tests of `opal status`.
+//! End-to-end tests of `opalro status`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -16,14 +16,14 @@ use support::{Env, plant_save, text};
 /// A project with `files` saved, each last changed an hour ago so the cache can vouch for it.
 fn project(files: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     for (name, content) in files {
         write_old(&env.root().join(name), content.as_bytes());
     }
-    env.opal().args(["save", "Files"]).assert().success();
+    env.opalro().args(["save", "Files"]).assert().success();
     env
 }
 
@@ -41,10 +41,10 @@ fn set_time(path: &Path, time: SystemTime) {
     file.set_modified(time).unwrap();
 }
 
-/// `opal --json status` with `args`, which must succeed.
+/// `opalro --json status` with `args`, which must succeed.
 fn status_json(env: &Env, args: &[&str]) -> serde_json::Value {
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "status"])
         .args(args)
         .output()
@@ -118,7 +118,7 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     assert_eq!(doc["changes"][0]["new_size"], 7);
     assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
     // For people: the position, then a line per change, the name escaped.
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let said = text(&out.stdout);
     assert!(said.starts_with("On line main at save "), "{said}");
@@ -135,8 +135,8 @@ fn status_lists_added_modified_removed_and_kind_changes() {
     }
     assert!(!said.contains('\u{202e}'), "{said}");
     // Saving makes it clean again.
-    env.opal().args(["save", "More"]).assert().success();
-    let said = text(&env.opal().arg("status").output().unwrap().stdout);
+    env.opalro().args(["save", "More"]).assert().success();
+    let said = text(&env.opalro().arg("status").output().unwrap().stdout);
     assert!(said.contains("Nothing changed since "), "{said}");
     assert!(changes(&status_json(&env, &[])).is_empty());
 }
@@ -183,8 +183,8 @@ fn status_does_not_open_unchanged_files() {
     let _held = lock(&env.root().join("locked.txt"));
     fs::write(env.root().join("a.txt"), "changed").unwrap();
     let status = |args: &[&str]| {
-        env.opal()
-            .env("OPAL_FAULT_UNREADABLE", "locked.txt")
+        env.opalro()
+            .env("OPALRO_FAULT_UNREADABLE", "locked.txt")
             .args(args)
             .output()
             .unwrap()
@@ -228,28 +228,28 @@ fn status_full_reads_everything() {
     let Some(_held) = lock(&env.root().join("b.txt")) else {
         return;
     };
-    let out = env.opal().args(["status", "--full"]).output().unwrap();
+    let out = env.opalro().args(["status", "--full"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     // Status only reads, so it says nothing of saving.
     let said = text(&out.stderr);
     assert!(said.contains("Can't read b.txt"), "{said}");
     assert!(
-        said.contains("hint: Let Opalro read it, or list it in .opalignore."),
+        said.contains("hint: Let Opalro read it, or list it in .opalroignore."),
         "{said}"
     );
     assert!(!said.contains("save"), "{said}");
 }
 
-/// Every file in `.opal` but the caches and temporary files, with its contents.
+/// Every file in `.opalro` but the caches and temporary files, with its contents.
 fn store_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    let opal = root.join(".opal");
+    let opalro = root.join(".opalro");
     let mut found = BTreeMap::new();
-    let mut todo = vec![opal.clone()];
+    let mut todo = vec![opalro.clone()];
     while let Some(dir) = todo.pop() {
         for entry in fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
             let rel = path
-                .strip_prefix(&opal)
+                .strip_prefix(&opalro)
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
@@ -278,14 +278,14 @@ fn status_never_writes_to_the_store() {
     }
     assert_eq!(store_files(env.root()), before);
     // The file-state cache is all it writes.
-    assert!(env.root().join(".opal/cache/files").is_file());
+    assert!(env.root().join(".opalro/cache/files").is_file());
 }
 
 #[test]
 fn an_unchanged_status_leaves_the_file_cache_untouched() {
     // Files an hour old, so every entry is trusted and none turns racy.
     let env = project(&[("a.txt", "a"), ("sub/b.txt", "b")]);
-    let cache = env.root().join(".opal/cache/files");
+    let cache = env.root().join(".opalro/cache/files");
     let look = || {
         let meta = fs::metadata(&cache).unwrap();
         #[cfg(unix)]
@@ -309,8 +309,8 @@ fn an_unchanged_status_leaves_the_file_cache_untouched() {
 fn a_cache_that_cant_be_written_is_a_warning() {
     let env = project(&[("a.txt", "a")]);
     // The save wrote the cache; a folder takes its place.
-    fs::remove_file(env.root().join(".opal/cache/files")).unwrap();
-    fs::create_dir_all(env.root().join(".opal/cache/files/in-the-way")).unwrap();
+    fs::remove_file(env.root().join(".opalro/cache/files")).unwrap();
+    fs::create_dir_all(env.root().join(".opalro/cache/files/in-the-way")).unwrap();
     let doc = status_json(&env, &[]);
     let kinds: Vec<&str> = doc["warnings"]
         .as_array()
@@ -334,7 +334,7 @@ fn a_cache_that_cant_be_written_is_a_warning() {
 fn ignored_files_and_nested_projects_are_not_listed() {
     let env = project(&[
         (
-            ".opalignore",
+            ".opalroignore",
             "*.log
 ",
         ),
@@ -416,7 +416,7 @@ fn plant_links(root: &Path) {
 #[test]
 fn entries_this_computer_cant_hold_are_listed_as_not_written() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -430,7 +430,7 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written() {
         "{doc}"
     );
     assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
-    let said = text(&env.opal().arg("status").output().unwrap().stdout);
+    let said = text(&env.opalro().arg("status").output().unwrap().stdout);
     assert!(
         said.ends_with(
             "Not written here, because this computer can't hold them as they are (saves keep \
@@ -443,14 +443,14 @@ fn entries_this_computer_cant_hold_are_listed_as_not_written() {
     let doc = status_json(&env, &[]);
     assert!(changes(&doc).is_empty(), "{doc}");
     assert_eq!(doc["not_written"], serde_json::json!(["deps/lib", "lib"]));
-    let said = text(&env.opal().arg("status").output().unwrap().stdout);
+    let said = text(&env.opalro().arg("status").output().unwrap().stdout);
     assert!(said.contains("Nothing changed since "), "{said}");
 }
 
 #[test]
 fn status_says_in_its_own_words_why_it_stops() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -458,7 +458,7 @@ fn status_says_in_its_own_words_why_it_stops() {
     plant_links(env.root());
     // The save keeps deps/lib as it is, so deps can't be a file.
     write_old(&env.root().join("deps"), b"a file");
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert_eq!(
         text(&out.stderr),
@@ -471,34 +471,34 @@ fn status_says_in_its_own_words_why_it_stops() {
 #[test]
 fn a_save_holding_a_spelling_of_opal_is_named() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    // No listing Opalro makes holds `.OPAL`, so it is spelled `-OPAL`, then the bytes are changed.
+    // No listing Opalro makes holds `.OPALRO`, so it is spelled `-OPALRO`, then the bytes are changed.
     plant_save(env.root(), |pack| {
         let id = pack.add_content(b"x").unwrap();
         let top = Listing::new(vec![Entry {
-            name: "-OPAL".into(),
+            name: "-OPALRO".into(),
             kind: EntryKind::File,
             id,
             size: 1,
         }])
         .unwrap()
         .encode();
-        let at = top.windows(5).position(|w| w == b"-OPAL").unwrap();
+        let at = top.windows(7).position(|w| w == b"-OPALRO").unwrap();
         let mut hostile = top.clone();
         hostile[at] = b'.';
         pack.add_record(ObjectKind::FolderListing, &hostile)
             .unwrap()
     });
     let planted = env.state().1.lines["main"];
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert_eq!(
         text(&out.stderr),
         format!(
-            "error: Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+            "error: Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
              writes, so it can't be used.\n\nhint: Opalro never makes such a save, so another program \
              put it there. Nothing was changed: ask for help before trying to repair it.\n",
             planted.short_hex()

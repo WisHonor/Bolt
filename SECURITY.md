@@ -10,7 +10,7 @@ Please don't describe a vulnerability anywhere public, such as a forum or social
 
 ## What to include
 
-- The version: what `opal --version` prints.
+- The version: what `opalro --version` prints.
 - Your system: Windows, macOS or Linux, and its version.
 - The steps that show the problem, from the start: what you ran, and what happened.
 - If you can share one, a small repository or project that shows it. Strip anything private from it first.
@@ -33,7 +33,7 @@ A vulnerability is anything a repository or project Opalro was given can make Op
 - hang, or exhaust their memory or disk without limit;
 - mislead the person at the terminal, for example by text in a file name or a message that passes for Opalro's own output.
 
-"Given" covers a project copied from someone else (its files, its `opal.toml` and `.opalignore`, and everything in its `.opal` folder) and a Git repository passed to `opal import`. Opalro's own threat model (`docs/security.md`, kept with Opalro's source code) lists the threats Opalro defends against, and how.
+"Given" covers a project copied from someone else (its files, its `opalro.toml` and `.opalroignore`, and everything in its `.opalro` folder) and a Git repository passed to `opalro import`. Opalro's own threat model (`docs/security.md`, kept with Opalro's source code) lists the threats Opalro defends against, and how.
 
 ## What doesn't count
 

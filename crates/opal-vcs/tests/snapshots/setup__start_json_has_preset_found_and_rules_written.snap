@@ -9,15 +9,15 @@ expression: doc
     ],
     "languages": []
   },
-  "opal_json": 1,
+  "opalro_json": 1,
   "position": {
     "line": "main"
   },
   "preset": "game",
   "root": "[redacted]",
   "rules_written": [
-    "opal.toml",
-    ".opalignore"
+    "opalro.toml",
+    ".opalroignore"
   ],
   "save": "[redacted]",
   "warnings": []

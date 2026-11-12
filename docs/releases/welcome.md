@@ -4,7 +4,7 @@ Thank you for trying Opalro.
 
 ## What Opalro is
 
-Opalro keeps every version of your project, the code and the big files together: textures, models, sounds, videos. You save, look back, try ideas on a line of their own, and go back to any save. Almost every command that changes something can be taken back with `opal undo`. When a big file changes, only the parts that changed are stored again. It has its own engine; it is not built on Git, though it can bring in a Git repository.
+Opalro keeps every version of your project, the code and the big files together: textures, models, sounds, videos. You save, look back, try ideas on a line of their own, and go back to any save. Almost every command that changes something can be taken back with `opalro undo`. When a big file changes, only the parts that changed are stored again. It has its own engine; it is not built on Git, though it can bring in a Git repository.
 
 ## It is early
 
@@ -18,12 +18,12 @@ Opalro has been built to never lose or damage your files, and tested hard for it
 
 Anything you like. These four help most:
 
-1. **A first save of a real project with big files.** A game, a film, a design project: whatever you have, as it is. How long did it take, and did `opal status` then say nothing changed?
-2. **Undo after each kind of command that changes something.** After an `opal save`, an `opal goto`, an `opal discard`, an `opal shelf`, an `opal unshelf`, an `opal setup --preset`: run `opal undo` and check that everything is back as it was before that command (after a save, your files stay as they are and show as unsaved again). Then `opal redo`. Commands that only look, such as `opal status`, `opal history` or `opal line`, record nothing, so undo after them takes back the command before.
-3. **An import of one of your Git repositories.** Run `opal import` in a repository you know well, best in a copy of it. Does the history look like Git's? Opalro adds its own `.opal` folder beside `.git` and never changes the Git repository. Git LFS files come in too, once `git lfs fetch --all` has fetched them.
+1. **A first save of a real project with big files.** A game, a film, a design project: whatever you have, as it is. How long did it take, and did `opalro status` then say nothing changed?
+2. **Undo after each kind of command that changes something.** After an `opalro save`, an `opalro goto`, an `opalro discard`, an `opalro shelf`, an `opalro unshelf`, an `opalro setup --preset`: run `opalro undo` and check that everything is back as it was before that command (after a save, your files stay as they are and show as unsaved again). Then `opalro redo`. Commands that only look, such as `opalro status`, `opalro history` or `opalro line`, record nothing, so undo after them takes back the command before.
+3. **An import of one of your Git repositories.** Run `opalro import` in a repository you know well, best in a copy of it. Does the history look like Git's? Opalro adds its own `.opalro` folder beside `.git` and never changes the Git repository. Git LFS files come in too, once `git lfs fetch --all` has fetched them.
 4. **A project in a folder that syncs,** such as OneDrive, Dropbox or iCloud Drive. Save, change, go back, and see whether the sync tool and Opalro get along.
 
-After each, `opal verify` in the project says whether everything Opalro stored is whole.
+After each, `opalro verify` in the project says whether everything Opalro stored is whole.
 
 ## How long it takes
 

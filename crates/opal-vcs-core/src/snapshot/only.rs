@@ -10,7 +10,7 @@ use super::walk::{Handles, holds_own_repository, kept_as_they_were, path_in, wit
 use super::{Child, Folders, Kind, SaveError};
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
-use crate::names::{Given, is_opal_alias, is_git_alias};
+use crate::names::{Given, is_git_alias, is_opal_alias};
 use crate::scope::{Scope, ancestors, within};
 use crate::store::{Store, StoreError};
 

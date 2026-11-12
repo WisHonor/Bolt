@@ -15,12 +15,12 @@ use support::{Env, main_tip, noise, plant_save, text, top_listing};
 #[test]
 fn rt10_1_verify_finds_a_chunk_stored_only_as_a_chunk_list() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     let big = noise(10, 3 << 20);
     let (list, chunks) = support::cut(&big);
     let first_chunk = chunks[0];
@@ -50,15 +50,15 @@ fn rt10_1_verify_finds_a_chunk_stored_only_as_a_chunk_list() {
         top_listing(p, &[("big.bin", list.file, big.len() as u64)])
     });
 
-    let goto = env.opal().args(["goto", "main"]).output().unwrap();
+    let goto = env.opalro().args(["goto", "main"]).output().unwrap();
     eprintln!(
-        "opal goto main: {:?} {}",
+        "opalro goto main: {:?} {}",
         goto.status.code(),
         text(&goto.stderr).trim()
     );
-    let verify = env.opal().arg("verify").output().unwrap();
+    let verify = env.opalro().arg("verify").output().unwrap();
     eprintln!(
-        "opal verify: {:?} {}{}",
+        "opalro verify: {:?} {}{}",
         verify.status.code(),
         text(&verify.stdout).trim(),
         text(&verify.stderr).trim()
@@ -73,12 +73,12 @@ fn rt10_1_verify_finds_a_chunk_stored_only_as_a_chunk_list() {
 #[test]
 fn rt10_2_verify_finds_a_listing_whose_size_isnt_its_files() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     let small = b"hello\n";
     let big = noise(11, 3 << 20);
     plant_save(env.root(), |p| {
@@ -92,15 +92,15 @@ fn rt10_2_verify_finds_a_listing_whose_size_isnt_its_files() {
             ],
         )
     });
-    let goto = env.opal().args(["goto", "main"]).output().unwrap();
+    let goto = env.opalro().args(["goto", "main"]).output().unwrap();
     eprintln!(
-        "opal goto main: {:?} {}",
+        "opalro goto main: {:?} {}",
         goto.status.code(),
         text(&goto.stderr).trim()
     );
-    let verify = env.opal().arg("verify").output().unwrap();
+    let verify = env.opalro().arg("verify").output().unwrap();
     eprintln!(
-        "opal verify: {:?} {}{}",
+        "opalro verify: {:?} {}{}",
         verify.status.code(),
         text(&verify.stdout).trim(),
         text(&verify.stderr).trim()
@@ -118,12 +118,12 @@ fn rt10_3_verify_finds_a_save_past_the_entry_limit() {
     use opal_core::listing::{Entry, EntryKind, Listing};
     use opal_core::pack::ObjectKind;
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     plant_save(env.root(), |p| {
         let x = p.add_content(b"x").unwrap();
         let mut listing = |n: usize, kind, id, size| {
@@ -142,15 +142,15 @@ fn rt10_3_verify_finds_a_save_past_the_entry_limit() {
         let folder = listing(1_000, EntryKind::File, x, 1);
         listing(10_001, EntryKind::Folder, folder, 0)
     });
-    let goto = env.opal().args(["goto", "main"]).output().unwrap();
+    let goto = env.opalro().args(["goto", "main"]).output().unwrap();
     eprintln!(
-        "opal goto main: {:?} {}",
+        "opalro goto main: {:?} {}",
         goto.status.code(),
         text(&goto.stderr).trim()
     );
-    let verify = env.opal().arg("verify").output().unwrap();
+    let verify = env.opalro().arg("verify").output().unwrap();
     eprintln!(
-        "opal verify: {:?} {}{}",
+        "opalro verify: {:?} {}{}",
         verify.status.code(),
         text(&verify.stdout).trim(),
         text(&verify.stderr).trim()

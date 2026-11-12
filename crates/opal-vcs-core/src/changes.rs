@@ -1,4 +1,4 @@
-//! `opal changes`: what changed inside files, line by line (decisions 058 and 064).
+//! `opalro changes`: what changed inside files, line by line (decisions 058 and 064).
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
@@ -225,7 +225,7 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
         let new = on_disk(&mut disk, &c)?;
         each(&c.path, &c, lines(&old, &new)).map_err(Stopped::Each)
     });
-    // A spelling of `.opal` met reading is in the save the project is on, as for `status`.
+    // A spelling of `.opalro` met reading is in the save the project is on, as for `status`.
     walked.map_err(|stopped| match stopped {
         Stopped::Reading(e) => e.in_save(tip, true).into(),
         Stopped::Each(e) => e,
@@ -300,7 +300,7 @@ fn lines<'a>(old: &'a Side, new: &'a Side) -> Lines<'a> {
 /// How long a file's diff may take; crash tests can shorten it.
 fn deadline() -> Duration {
     #[cfg(feature = "fault-injection")]
-    if let Some(ms) = std::env::var("OPAL_DIFF_DEADLINE_MS")
+    if let Some(ms) = std::env::var("OPALRO_DIFF_DEADLINE_MS")
         .ok()
         .and_then(|v| v.parse().ok())
     {

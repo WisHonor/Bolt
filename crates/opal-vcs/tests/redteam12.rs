@@ -66,7 +66,7 @@ fn rt12_1_an_amend_among_many_lines_stays_within_memory() {
 /// RT12-2. A small read of a pack is answered from a 64 KiB block of it, and a read away from the
 /// block held reads a new one. A file whose tiny chunks sit scattered in one pack then costs three
 /// such blocks a chunk (the index's IDs, its lines, the entry): about 200 KB read for each 8-byte
-/// chunk, where main read under 500 bytes, and twice main's time. Measured as the bytes `opal`
+/// chunk, where main read under 500 bytes, and twice main's time. Measured as the bytes `opalro`
 /// read (`rchar`), which the shell that waited for it counts.
 #[cfg(target_os = "linux")]
 #[test]
@@ -76,7 +76,7 @@ fn rt12_2_a_scattered_small_read_costs_a_small_read() {
 
     const CHUNKS: usize = 20_000;
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -108,11 +108,11 @@ fn rt12_2_a_scattered_small_read_costs_a_small_read() {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg("\"$0\" discard >/dev/null 2>&1 || echo failed; grep rchar /proc/$$/io")
-        .arg(assert_cmd::cargo::cargo_bin("opal"))
+        .arg(assert_cmd::cargo::cargo_bin("opalro"))
         .current_dir(env.root())
-        .env("OPAL_USER_NAME", "Test")
-        .env("OPAL_USER_EMAIL", "test@example.com")
-        .env("OPAL_CONFIG_DIR", env.config())
+        .env("OPALRO_USER_NAME", "Test")
+        .env("OPALRO_USER_EMAIL", "test@example.com")
+        .env("OPALRO_CONFIG_DIR", env.config())
         .env("HOME", env.config());
     let said = text(&cmd.output().unwrap().stdout);
     assert!(!said.contains("failed"), "{said}");
@@ -143,13 +143,13 @@ fn rt12_3_goto_of_a_full_id_no_save_has_says_no_save_matches() {
     use opal_core::repo::Repository;
 
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     for n in 0..2 {
         std::fs::write(env.root().join("f"), format!("v{n}")).unwrap();
-        env.opal()
+        env.opalro()
             .args(["save", &format!("s{n}")])
             .assert()
             .success();
@@ -177,12 +177,12 @@ fn rt12_3_goto_of_a_full_id_no_save_has_says_no_save_matches() {
         .try_into()
         .unwrap();
     std::fs::write(
-        env.root().join(".opal/cache/change-ids"),
+        env.root().join(".opalro/cache/change-ids"),
         keyed::seal(&key, &body),
     )
     .unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &stranger.to_hex()])
         .output()
         .unwrap();

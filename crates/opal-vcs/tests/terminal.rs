@@ -1,4 +1,4 @@
-//! What `opal` prints on a terminal, and what it prints when nobody is looking.
+//! What `opalro` prints on a terminal, and what it prints when nobody is looking.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -11,26 +11,26 @@ use support::{Env, text};
 /// The symbols Opalro draws on a terminal that shows them.
 const SYMBOLS: [char; 10] = ['•', '▸', '→', '←', '✓', '✗', '─', '…', '█', '░'];
 
-/// `opal` in `dir` where everything asks for colour and symbols, but no terminal.
+/// `opalro` in `dir` where everything asks for colour and symbols, but no terminal.
 fn opal_in_a_log(env: &Env, dir: &Path) -> assert_cmd::Command {
     let mut cmd = env.opal_in(dir);
     cmd.env("TERM", "xterm-256color")
         .env("LC_ALL", "en_US.UTF-8")
         .env("TERM_PROGRAM", "opal-test")
-        .env("OPAL_ASCII", "0")
+        .env("OPALRO_ASCII", "0")
         .env_remove("NO_COLOR")
-        .env_remove("OPAL_FAKE_TERMINAL");
+        .env_remove("OPALRO_FAKE_TERMINAL");
     cmd
 }
 
-/// `opal` in `dir` on a terminal 80 columns wide that shows colour and symbols. Progress waits
+/// `opalro` in `dir` on a terminal 80 columns wide that shows colour and symbols. Progress waits
 /// ten minutes, so it never comes in first on a slow machine; a test about progress sets its own.
 #[cfg(feature = "fault-injection")]
 fn opal_on_a_terminal(env: &Env, dir: &Path) -> assert_cmd::Command {
     let mut cmd = opal_in_a_log(env, dir);
-    cmd.env("OPAL_FAKE_TERMINAL", "80")
-        .env("OPAL_PROGRESS_QUIET_MS", "600000")
-        .env_remove("OPAL_ASCII");
+    cmd.env("OPALRO_FAKE_TERMINAL", "80")
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
+        .env_remove("OPALRO_ASCII");
     cmd
 }
 
@@ -38,12 +38,12 @@ fn opal_on_a_terminal(env: &Env, dir: &Path) -> assert_cmd::Command {
 #[cfg(feature = "fault-injection")]
 fn project_with_a_change() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
-    env.opal().args(["save", "first"]).assert().success();
+    env.opalro().args(["save", "first"]).assert().success();
     std::fs::write(env.root().join("a.txt"), "abc\n").unwrap();
     env
 }
@@ -59,7 +59,7 @@ fn an_error_is_red_and_its_hint_cyan_after_an_empty_line() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "\x1b[1;31merror:\x1b[0m Not inside an Opalro project.\n\n\x1b[1;36mhint:\x1b[0m Run `opal \
+        "\x1b[1;31merror:\x1b[0m Not inside an Opalro project.\n\n\x1b[1;36mhint:\x1b[0m Run `opalro \
          start` to make this folder an Opalro project.\n"
     );
 }
@@ -86,7 +86,7 @@ fn no_color_turns_colour_off_and_keeps_symbols() {
 fn opal_ascii_turns_symbols_off_and_keeps_colour() {
     let env = project_with_a_change();
     let out = opal_on_a_terminal(&env, env.root())
-        .env("OPAL_ASCII", "1")
+        .env("OPALRO_ASCII", "1")
         .arg("changes")
         .output()
         .unwrap();
@@ -194,7 +194,7 @@ fn without_a_terminal_opals_own_words_are_plain() {
 /// A project whose store holds a damaged copy of the licence it is about to save.
 fn project_with_a_damaged_copy_of_its_licence() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -204,7 +204,7 @@ fn project_with_a_damaged_copy_of_its_licence() -> Env {
     w.add_content(licence).unwrap();
     let mut pack = std::fs::read(w.finish(made.path()).unwrap().unwrap()).unwrap();
     pack[16 + 50] ^= 1; // the first byte after the pack header and the entry header
-    std::fs::write(env.root().join(".opal/store/packs/00.pack"), pack).unwrap();
+    std::fs::write(env.root().join(".opalro/store/packs/00.pack"), pack).unwrap();
     std::fs::write(env.root().join("LICENSE"), licence).unwrap();
     env
 }
@@ -254,20 +254,20 @@ fn a_warning_after_the_answer_on_a_terminal_comes_after_one_empty_line() {
 fn a_failing_command_that_warns_first_starts_with_the_warning() {
     for terminal in [false, true] {
         let env = Env::empty();
-        env.opal()
+        env.opalro()
             .args(["start", "--preset", "custom"])
             .assert()
             .success();
         let first = support::main_tip(&env).to_hex();
         std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
         std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
-        env.opal().args(["save", "Two files"]).assert().success();
+        env.opalro().args(["save", "Two files"]).assert().success();
         // A goto stopped after removing a.txt, then a.txt written again, in the way of finishing
         // it.
         let stopped = env
-            .opal()
+            .opalro()
             .args(["goto", &first])
-            .env("OPAL_FAULT_FAIL", "switch:changed")
+            .env("OPALRO_FAULT_FAIL", "switch:changed")
             .output()
             .unwrap();
         assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
@@ -310,7 +310,7 @@ fn no_progress_reaches_stderr_without_a_terminal() {
                 opal_in_a_log(&env, env.root())
             };
             let out = cmd
-                .env("OPAL_PROGRESS_QUIET_MS", "0")
+                .env("OPALRO_PROGRESS_QUIET_MS", "0")
                 .args(args)
                 .output()
                 .unwrap();
@@ -328,28 +328,28 @@ fn no_progress_reaches_stderr_without_a_terminal() {
     }
 }
 
-/// `opal` in `dir` on a terminal `width` columns wide, without colour or symbols, so that a test
+/// `opalro` in `dir` on a terminal `width` columns wide, without colour or symbols, so that a test
 /// can read the layout.
 #[cfg(feature = "fault-injection")]
 fn opal_at_width(env: &Env, dir: &Path, width: usize) -> assert_cmd::Command {
     let mut cmd = opal_on_a_terminal(env, dir);
-    cmd.env("OPAL_FAKE_TERMINAL", width.to_string())
+    cmd.env("OPALRO_FAKE_TERMINAL", width.to_string())
         .env("NO_COLOR", "1")
-        .env("OPAL_ASCII", "1");
+        .env("OPALRO_ASCII", "1");
     cmd
 }
 
 /// A project just started, with no rule files.
 fn started() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     env
 }
 
-/// `opal <args>` run in a log or on a terminal `width` columns wide: its exit code, then what it
+/// `opalro <args>` run in a log or on a terminal `width` columns wide: its exit code, then what it
 /// printed on stdout and stderr.
 fn output_at(env: &Env, width: Option<usize>, args: &[&str]) -> (Option<i32>, String, String) {
     let mut cmd = match width {
@@ -404,9 +404,9 @@ fn two_saves() -> (Env, String, String) {
     (env, first, second)
 }
 
-/// Whether "Changed your mind? opal undo" ends what was said, as it does on a terminal only.
+/// Whether "Changed your mind? opalro undo" ends what was said, as it does on a terminal only.
 fn offers_undo(said: &str) -> bool {
-    said.ends_with("\nChanged your mind? opal undo\n")
+    said.ends_with("\nChanged your mind? opalro undo\n")
 }
 
 /// The widths a command is tried at: none, then 60, 80 and 120 columns where a terminal can be
@@ -481,7 +481,7 @@ fn a_partial_save_says_what_it_left_out() {
     assert_eq!(
         shown,
         format!(
-            "Saved {} \"Only a\" on main  (1 file)\n\n    Only what you named was saved: opal \
+            "Saved {} \"Only a\" on main  (1 file)\n\n    Only what you named was saved: opalro \
              status lists the changes left out.\n",
             saved_id(&shown)
         )
@@ -567,7 +567,7 @@ fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {
             lines[3].starts_with("  ") && lines[3].ends_with("  First"),
             "{shown}"
         );
-        // The first save, made by `opal start`, has no message.
+        // The first save, made by `opalro start`, has no message.
         assert_eq!(lines.len(), 5, "{shown}");
         match width {
             Some(w) => {
@@ -613,7 +613,7 @@ fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
         );
         assert_eq!(
             said.contains(&format!(
-                "Next: see its lines with: opal changes --save {id}"
+                "Next: see its lines with: opalro changes --save {id}"
             )),
             width.is_some(),
             "{said}"
@@ -627,7 +627,7 @@ fn changes_colours_only_added_removed_and_hunk_lines() {
     let env = started();
     std::fs::write(env.root().join("a.txt"), "a\nb\nc\n").unwrap();
     std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
-    env.opal().args(["save", "First"]).assert().success();
+    env.opalro().args(["save", "First"]).assert().success();
     std::fs::write(env.root().join("a.txt"), "a\nB\nc\n").unwrap();
     std::fs::write(env.root().join("b.txt"), "bb\n").unwrap();
     let out = opal_on_a_terminal(&env, env.root())
@@ -781,7 +781,7 @@ fn goto_says_switched_to_and_how_many_files_it_wrote() {
         shown.ends_with(
             " \"Second\". You are not on a line.\n\n    2 files written.\n    Your unsaved changes \
              in 1 file came along.\n    Saving here asks for a new line's name.\n    To keep \
-             saving on main: opal goto main\n"
+             saving on main: opalro goto main\n"
         ),
         "{shown}"
     );
@@ -925,7 +925,7 @@ fn undo_and_redo_say_what_they_took_back_or_brought_back() {
     put(&env, "a.txt", "again\n");
     let (shown, said) = failing_at(&env, None, &["undo"]);
     assert_eq!(shown, "");
-    assert!(said.contains("opal undo --shelve"), "{said}");
+    assert!(said.contains("opalro undo --shelve"), "{said}");
     let width = *widths().last().unwrap();
     let (shown, said) = run_at(&env, width, &["undo", "--shelve"]);
     assert_eq!(
@@ -933,7 +933,7 @@ fn undo_and_redo_say_what_they_took_back_or_brought_back() {
         "Shelved your unsaved changes in the way on shelf 1.\nUndid discard: 1 file back.\n"
     );
     assert_eq!(
-        said.ends_with("\nNext: bring your changes back with: opal unshelf\n"),
+        said.ends_with("\nNext: bring your changes back with: opalro unshelf\n"),
         width.is_some(),
         "{said:?}"
     );
@@ -1022,7 +1022,7 @@ fn shelf_and_unshelf_say_the_shelfs_number() {
             "Shelved your unsaved changes in 1 file on shelf 1.\n"
         );
         assert_eq!(
-            said.ends_with("\nNext: bring them back with: opal unshelf\n"),
+            said.ends_with("\nNext: bring them back with: opalro unshelf\n"),
             width.is_some(),
             "{said:?}"
         );
@@ -1104,7 +1104,7 @@ fn changed_your_mind_shows_only_on_a_terminal() {
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         text(&out.stderr)
     };
-    let offered = "\nChanged your mind? \x1b[36mopal undo\x1b[0m\n";
+    let offered = "\nChanged your mind? \x1b[36mopalro undo\x1b[0m\n";
     put(&env, "a.txt", "mine\n");
     assert!(on_terminal(&["discard"]).ends_with(offered));
     assert!(on_terminal(&["goto", &first]).ends_with(offered));
@@ -1216,7 +1216,7 @@ fn the_import_summary_fits_60_80_and_120_columns() {
         }
         assert!(said.starts_with("\nwarning: "), "{width}: {said}");
         assert!(
-            said.ends_with("\n\nNext: look around with: opal status\n"),
+            said.ends_with("\n\nNext: look around with: opalro status\n"),
             "{width}: {said}"
         );
     }
@@ -1269,7 +1269,7 @@ fn help_reads_the_same_at_every_width_with_only_its_titles_bold() {
 
 /// The project's `state/head`, which changes when a command records a step.
 fn head_file(env: &Env) -> Vec<u8> {
-    std::fs::read(env.root().join(".opal/state/head")).unwrap()
+    std::fs::read(env.root().join(".opalro/state/head")).unwrap()
 }
 
 #[test]
@@ -1333,11 +1333,11 @@ fn undo_that_shelves_more_than_once_points_at_the_shelf_list() {
         "{shown}"
     );
     assert_eq!(
-        said.ends_with("\nNext: see the shelves with: opal shelf --list\n"),
+        said.ends_with("\nNext: see the shelves with: opalro shelf --list\n"),
         width.is_some(),
         "{said:?}"
     );
-    assert!(!said.contains("opal unshelf"), "{said:?}");
+    assert!(!said.contains("opalro unshelf"), "{said:?}");
 }
 
 #[cfg(feature = "fault-injection")]
@@ -1347,9 +1347,9 @@ fn unshelf_that_only_finishes_a_stopped_switch_offers_no_undo() {
     put(&env, "a.txt", "mine\n");
     run_at(&env, None, &["shelf"]);
     let stopped = env
-        .opal()
+        .opalro()
         .arg("unshelf")
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
@@ -1372,9 +1372,9 @@ fn unshelf_that_only_finishes_a_stopped_switch_offers_no_undo() {
 fn goto_that_finishes_a_stopped_switch_and_is_then_already_there_offers_no_undo() {
     let (env, first, _) = two_saves();
     let stopped = env
-        .opal()
+        .opalro()
         .args(["goto", &first])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
@@ -1500,7 +1500,7 @@ fn an_import_shows_each_pass_on_a_terminal_and_nothing_in_a_log() {
             opal_in_a_log(&env, env.root())
         };
         let out = cmd
-            .env("OPAL_PROGRESS_QUIET_MS", "0")
+            .env("OPALRO_PROGRESS_QUIET_MS", "0")
             .arg("import")
             .output()
             .unwrap();
@@ -1616,7 +1616,7 @@ fn damage_a_pack(env: &Env) {
     rot(&path, &opal_core::id::hash_content(b"damaged on disk\n"));
     let to = env
         .root()
-        .join(".opal/store/packs")
+        .join(".opalro/store/packs")
         .join(path.file_name().unwrap());
     std::fs::copy(&path, to).unwrap();
 }
@@ -1634,7 +1634,7 @@ fn rot(path: &Path, id: &opal_core::id::Id) {
 #[cfg(feature = "fault-injection")]
 fn rot_in_store(env: &Env, id: &opal_core::id::Id) {
     use opal_core::pack::PackReader;
-    for e in std::fs::read_dir(env.root().join(".opal/store/packs")).unwrap() {
+    for e in std::fs::read_dir(env.root().join(".opalro/store/packs")).unwrap() {
         let path = e.unwrap().path();
         if PackReader::open(&path).unwrap().find(id).unwrap().is_some() {
             rot(&path, id);
@@ -1651,7 +1651,7 @@ const HOSTILE_NAME: &str = "evil\u{202e}txt.exe\u{2028}x";
 #[cfg(feature = "fault-injection")]
 const HOSTILE_NAME_SHOWN: &str = "evil\\u{202e}txt.exe\\u{2028}x";
 
-/// `opal <args>` on a terminal with colour, then with `NO_COLOR`: both end with `code`, nothing
+/// `opalro <args>` on a terminal with colour, then with `NO_COLOR`: both end with `code`, nothing
 /// from the project reaches the screen raw, and they print the same once Opalro's own colour codes
 /// are taken out. What the coloured one printed, on stdout and stderr together.
 #[cfg(feature = "fault-injection")]
@@ -1694,14 +1694,14 @@ fn project_text_is_escaped_with_colour_on() {
     std::fs::write(env.root().join(name), &content).unwrap();
     put(
         &env,
-        "opal.toml",
+        "opalro.toml",
         "preset = \"\\u001b[2Jteam\\u202e\"\n[[rule]]\nfiles = [\"\\u001b[2J*.psd\"]\nlockable = \
          true\n",
     );
     let message = format!("{CLEAR}{TITLE}Add it\u{202e}");
     let shown_message = "\\x1b[2J\\x1b]0;pwned\\x07Add it\\u{202e}";
     let saved = opal_in_a_log(&env, env.root())
-        .env("OPAL_USER_NAME", format!("Ada{CLEAR}\u{202e}"))
+        .env("OPALRO_USER_NAME", format!("Ada{CLEAR}\u{202e}"))
         .args(["save", &message])
         .output()
         .unwrap();
@@ -1785,7 +1785,7 @@ fn a_new_file_named_with_an_escape_code_is_shown_escaped_and_never_saved() {
     assert_eq!(support::head(&env).0, before);
 }
 
-/// The rows of `opal line` and `opal history` hold no escape code but Opalro's own: a name that
+/// The rows of `opalro line` and `opalro history` hold no escape code but Opalro's own: a name that
 /// would hold one is refused, read or written, and a name spelled like one shows as its letters.
 #[cfg(feature = "fault-injection")]
 #[test]
@@ -1830,7 +1830,7 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
         state,
         ..entry
     };
-    // Opalro's own commit refuses such a name, so it is stored as a hostile `.opal` could hold it
+    // Opalro's own commit refuses such a name, so it is stored as a hostile `.opalro` could hold it
     // and made current through `state/head`.
     assert!(
         repo.commit(&lock, repo.new_packs().unwrap(), &planted)
@@ -1844,7 +1844,7 @@ fn a_line_name_that_spells_an_escape_code_cannot_recolour_the_row() {
         id = Some(pack.add_record(opal_core::pack::ObjectKind::DiaryEntry, &record));
     });
     let id = id.unwrap().unwrap();
-    std::fs::write(env.root().join(".opal/state/head"), format!("{id}\n")).unwrap();
+    std::fs::write(env.root().join(".opalro/state/head"), format!("{id}\n")).unwrap();
     // The diary's reader refuses the entry, so each command stops, and `undo --list` lists the
     // entries it could read instead.
     for (args, code) in [
@@ -2023,12 +2023,12 @@ fn a_long_line_name_in_a_detail_is_kept_whole_on_a_row_of_its_own() {
         let (new_line, keep_saving) = match width {
             None => (
                 format!("\n    You're on the new line {LONG_LINE}.\n"),
-                format!("\n    To keep saving on {LONG_LINE}: opal goto {LONG_LINE}\n"),
+                format!("\n    To keep saving on {LONG_LINE}: opalro goto {LONG_LINE}\n"),
             ),
             Some(_) => (
                 format!("\n    You're on the new line\n        {LONG_LINE}.\n"),
                 format!(
-                    "\n    To keep saving on\n        {LONG_LINE}:\n        opal goto {LONG_LINE}\n"
+                    "\n    To keep saving on\n        {LONG_LINE}:\n        opalro goto {LONG_LINE}\n"
                 ),
             ),
         };

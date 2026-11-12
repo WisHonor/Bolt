@@ -40,7 +40,7 @@ pub fn probe(tmp: &Dir) -> io::Result<Drive> {
         }
     }
     Err(io::Error::other(
-        "the file Opalro tests the drive with kept disappearing from .opal/tmp, which other Opalro \
+        "the file Opalro tests the drive with kept disappearing from .opalro/tmp, which other Opalro \
          commands clear; run this one again",
     ))
 }

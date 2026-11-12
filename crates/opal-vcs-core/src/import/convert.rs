@@ -48,7 +48,7 @@ const MAX_COMMIT_BYTES: u64 = MAX_EXTRA_VALUE_BYTES as u64 + 1 + MAX_MESSAGE_BYT
 pub(super) const MAX_EXTRA_PARENTS: u64 = 1_000_000;
 
 /// How many of a kind of thing an import leaves out, renames, or warns about, it lists: skipped
-/// entries, names that aren't UTF-8, refs, `.opal` folders, and in its summary, renamed names and
+/// entries, names that aren't UTF-8, refs, `.opalro` folders, and in its summary, renamed names and
 /// skipped tags. The rest are counted.
 pub const MAX_LISTED: usize = 100;
 
@@ -283,7 +283,7 @@ impl TagBudget {
             ),
             hint: Some(
                 "Nothing was changed. Delete tags you don't need with `git tag -d <name>`, then \
-                 run opal import again."
+                 run opalro import again."
                     .to_owned(),
             ),
         })
@@ -820,7 +820,7 @@ impl<'r> Converter<'r> {
 
     /// Reads the Git tree of the folder on top of the stack and judges its names: those that
     /// aren't UTF-8 are left out and listed, for `finish` to stop at (decision 019), dangerous
-    /// ones and spellings of `.opal` skipped (decisions 035 and 019), and one too long, or with a
+    /// ones and spellings of `.opalro` skipped (decisions 035 and 019), and one too long, or with a
     /// path too long, stops the import (decision 051).
     fn read_folder(&mut self, stack: &mut [Frame], walk: &mut Walk<'_>) -> Result<(), ImportError> {
         let Some((id, prefix)) = stack.last().map(|top| (top.git, top.prefix)) else {
@@ -1942,11 +1942,11 @@ mod tests {
         let file = blob(&git, b"x");
         let project = git.tree(&[(b"100644", b"format", file)]);
         let game = git.tree(&[
-            (b"100644", b".OPAL.", file),
-            (b"40000", b".opal", project),
-            (b"100644", ".o\u{200c}pal".as_bytes(), file),
+            (b"100644", b".OPALRO.", file),
+            (b"40000", b".opalro", project),
+            (b"100644", ".o\u{200c}palro".as_bytes(), file),
             (b"100644", b"README", file),
-            (b"100644", b"opal~1", file),
+            (b"100644", b"opalro~1", file),
         ]);
         let id = commit_of(&git, &[(b"40000", b"game", game)]);
         let ((save, counts), store) = convert(dir.path(), "a", |c| {
@@ -1966,10 +1966,10 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "game/.OPAL.",
-                "game/.opal",
-                "game/.o\u{200c}pal",
-                "game/opal~1"
+                "game/.OPALRO.",
+                "game/.opalro",
+                "game/.o\u{200c}palro",
+                "game/opalro~1"
             ]
         );
         assert_eq!(counts.skipped_entry_count, 4);
@@ -2433,7 +2433,7 @@ mod tests {
                 b"m",
                 &[],
             ),
-            usual("other headers", "x-tool opal\n more\n", b"m\n", &[]),
+            usual("other headers", "x-tool opalro\n more\n", b"m\n", &[]),
             usual("an empty message", "", b"", &[]),
             usual("no LF at the end", "", b"no end", &[]),
             odd_author("a -0000 zone", b"A <a@b> 1 -0000"),

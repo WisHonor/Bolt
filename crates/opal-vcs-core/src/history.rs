@@ -45,10 +45,10 @@ impl ResolveError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
-            ResolveError::NotFound(_) => Some("See your saves with: opal history".to_owned()),
+            ResolveError::NotFound(_) => Some("See your saves with: opalro history".to_owned()),
             ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
             ResolveError::LineOrSave { .. } => Some(
-                "To reach the save, type more of its ID; opal history --json gives the whole \
+                "To reach the save, type more of its ID; opalro history --json gives the whole \
                  change ID and fingerprint. Until Opalro can rename lines, that line can't be \
                  reached by this name."
                     .to_owned(),
@@ -930,7 +930,7 @@ mod tests {
     }
 
     fn plant_cache(dir: &std::path::Path, bytes: &[u8]) {
-        std::fs::write(dir.join(".opal/cache/change-ids"), bytes).unwrap();
+        std::fs::write(dir.join(".opalro/cache/change-ids"), bytes).unwrap();
     }
 
     /// Plants `saves` as `main`'s list, sealed with this account's own key.
@@ -977,7 +977,7 @@ mod tests {
         let tip = change("klmnopk");
         // A cache Opalro wrote, its body swapped for the lie and its seal kept.
         assert_eq!(cached_line(&repo), uncached_line(&repo));
-        let path = dir.path().join(".opal/cache/change-ids");
+        let path = dir.path().join(".opalro/cache/change-ids");
         let written = std::fs::read(&path).unwrap();
         let seal = &written[written.len() - crate::keyed::KEY_LEN..];
         let mut edited = lying_cache(&repo).encode();
@@ -1061,7 +1061,7 @@ mod tests {
     fn a_listing_cut_short_reads_no_more_of_the_line() {
         let (_dir, mut repo, ids) = project_with(&vec!["lmno"; 99]);
         cached_line(&repo);
-        // A save the cache doesn't hold yet, as after `opal history | head`.
+        // A save the cache doesn't hold yet, as after `opalro history | head`.
         let newest = plant(&mut repo, &[ids[99]], "lmnp", Some("main"));
         let cold = crate::changeids::ChangeIds::load(&repo);
         assert_ne!(cold.get("main").unwrap()[0].0, newest);
@@ -1433,7 +1433,7 @@ mod tests {
         cached_line(&repo);
         assert_eq!(shown_for(&repo, "main"), (vec![], 0));
         // With the file gone, the line is read again.
-        std::fs::remove_file(dir.path().join(".opal/cache/other-lines")).unwrap();
+        std::fs::remove_file(dir.path().join(".opalro/cache/other-lines")).unwrap();
         assert!(shown_for(&repo, "main").1 >= 20);
     }
 
@@ -1452,7 +1452,7 @@ mod tests {
             })
             .map(|(name, _)| format!("line {name}"))
             .collect();
-        let file = dir.join(".opal/cache/other-lines");
+        let file = dir.join(".opalro/cache/other-lines");
         let kept = std::fs::read(&file).ok();
         let _ = std::fs::remove_file(&file);
         let cold = shown_for(repo, line).0;
@@ -1525,7 +1525,7 @@ mod tests {
         let change_id = repo.store().save(&tip, false).unwrap().change_id;
         // An ID nothing has, and a folder listing's.
         let listing = repo.store().save(&tip, false).unwrap().root;
-        let file = dir.path().join(".opal/cache/other-lines");
+        let file = dir.path().join(".opalro/cache/other-lines");
         cached_line(&repo);
         for wrong in [Id([0x5a; 32]), listing] {
             let mut lie = crate::otherlines::OtherLines::default();
@@ -1556,7 +1556,7 @@ mod tests {
         lie.add(below[1], &[(below[1], change_id)], None);
         lie.add(below[0], &[(below[0], change_id)], None);
         assert!(lie.run(&off[0]).is_none());
-        let file = dir.path().join(".opal/cache/other-lines");
+        let file = dir.path().join(".opalro/cache/other-lines");
         std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
         assert!(shown_for(&repo, "main").0.is_empty());
         // A lie at a line's newest save is believed: the seal is what it is trusted for.

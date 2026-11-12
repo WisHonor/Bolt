@@ -1,5 +1,5 @@
 //! Hostile chunk lists (security.md T9): each case plants a save naming `big.bin`, which a hostile
-//! `.opal` holds through a chunk list no honest writer makes, then runs `goto`, `discard`,
+//! `.opalro` holds through a chunk list no honest writer makes, then runs `goto`, `discard`,
 //! `status`, `changes` and `show` over it. Each refuses, or reads a good copy; nothing wrong
 //! reaches the folder, and nothing outside the project changes.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -27,7 +27,7 @@ fn big() -> Vec<u8> {
     noise(1, SIZE)
 }
 
-/// What a hostile `.opal` holds for `big.bin`: the ID and size its save names it by, and the
+/// What a hostile `.opalro` holds for `big.bin`: the ID and size its save names it by, and the
 /// pack holding the chunk list that is wrong.
 struct Planted {
     file: Id,
@@ -113,10 +113,10 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
             // The damage stops every later try too, so the hint names the way on.
             let hint = doc["error"]["hint"].as_str().unwrap();
             assert!(
-                hint.contains("delete .opal/state/journal: your files stay as they are"),
+                hint.contains("delete .opalro/state/journal: your files stay as they are"),
                 "{hint}"
             );
-            assert!(case.root().join(".opal/state/journal").exists());
+            assert!(case.root().join(".opalro/state/journal").exists());
             assert!(project_entries(&case.env).is_empty());
         }
         Expect::Good { named } => {
@@ -366,10 +366,10 @@ fn a_list_of_the_most_chunks_a_list_may_hold_is_written_out_whole() {
         pack.add_content(b"a").unwrap();
         pack.add_chunk_list(&list).unwrap();
     });
-    // Not held while opal reads its own copy of it, 335 MB.
+    // Not held while opalro reads its own copy of it, 335 MB.
     drop(list);
     let started = Instant::now();
-    let out = case.env.opal().args(["goto", "main"]).output().unwrap();
+    let out = case.env.opalro().args(["goto", "main"]).output().unwrap();
     println!("goto took {:.1} s", started.elapsed().as_secs_f64());
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let written = case.root().join("big.bin");

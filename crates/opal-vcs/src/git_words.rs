@@ -36,30 +36,30 @@ const FILE: &str = "git-words";
 /// The most of `git-words` read.
 const MAX_BYTES: u64 = 4096;
 
-const ADD: &str = "Opalro has no staging step: `opal save` saves every change, new files too.\n\
-                   To save only some files, name them: `opal save \"message\" <paths>`";
+const ADD: &str = "Opalro has no staging step: `opalro save` saves every change, new files too.\n\
+                   To save only some files, name them: `opalro save \"message\" <paths>`";
 const RM_MV: &str = "Delete or move the file itself, as you would any file.\n\
-                     The next `opal save` records it.";
-const RESET: &str = "To take back the last command: `opal undo`\n\
-                     To throw away unsaved changes: `opal discard`\n\
-                     To go to an older save: `opal goto <save>`";
-const RESTORE: &str = "`opal discard <paths>` throws away the unsaved changes in those paths,\n\
-                       new files included, and `opal undo` brings them back.";
-const COMMIT: &str = "To save every change: `opal save \"message\"`\n\
-                      To save only some files and folders: `opal save \"message\" <paths>`";
+                     The next `opalro save` records it.";
+const RESET: &str = "To take back the last command: `opalro undo`\n\
+                     To throw away unsaved changes: `opalro discard`\n\
+                     To go to an older save: `opalro goto <save>`";
+const RESTORE: &str = "`opalro discard <paths>` throws away the unsaved changes in those paths,\n\
+                       new files included, and `opalro undo` brings them back.";
+const COMMIT: &str = "To save every change: `opalro save \"message\"`\n\
+                      To save only some files and folders: `opalro save \"message\" <paths>`";
 const NEW_LINE: &str = "In Opalro, a new line starts with a save made away from a line:\n\
-                        `opal goto <save>`, then `opal save --line <name> \"message\"`";
-const STASH: &str = "`opal shelf` sets your unsaved changes aside, new files too.\n\
-                     `opal unshelf` brings the newest back, `opal unshelf <number>` another.\n\
-                     `opal shelf --list` lists them by that number, which stays with its shelf.";
+                        `opalro goto <save>`, then `opalro save --line <name> \"message\"`";
+const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files too.\n\
+                     `opalro unshelf` brings the newest back, `opalro unshelf <number>` another.\n\
+                     `opalro shelf --list` lists them by that number, which stays with its shelf.";
 const LATER: &str = "Combining lines, tags and seeing who changed each line arrive in v0.2.\n\
-                     Until then, `opal history` lists the saves on your line.";
+                     Until then, `opalro history` lists the saves on your line.";
 const SYNC: &str = "Syncing with a server arrives in Opalro v0.3.\n\
-                    Until then, `opal import` brings a Git repository here into Opalro.";
-const REVERT: &str = "Opalro's word for this is `opal reverse <save>`, which arrives in v0.3.\n\
-                      Until then, `opal undo` takes back your own last step.";
+                    Until then, `opalro import` brings a Git repository here into Opalro.";
+const REVERT: &str = "Opalro's word for this is `opalro reverse <save>`, which arrives in v0.3.\n\
+                      Until then, `opalro undo` takes back your own last step.";
 const CLEAN: &str = "Opalro never deletes files it doesn't keep.\n\
-                     `opal tidy` frees space inside .opal only.";
+                     `opalro tidy` frees space inside .opalro only.";
 
 /// What the command line (without the program's name) means. Only the first argument that
 /// isn't `--json` is looked at as a word; a shortcut runs only in the forms that mean in Opalro
@@ -73,12 +73,12 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         return Typed::Opalro(rest);
     };
     let before = args;
-    let run = |word: &'static str, opal: &[&str], rest: Vec<OsString>| Typed::Shortcut {
+    let run = |word: &'static str, opalro: &[&str], rest: Vec<OsString>| Typed::Shortcut {
         word,
         args: before
             .iter()
             .cloned()
-            .chain(opal.iter().map(OsString::from))
+            .chain(opalro.iter().map(OsString::from))
             .chain(rest)
             .collect(),
     };
@@ -126,7 +126,7 @@ fn stash(
     let (json, words): (Vec<OsString>, Vec<OsString>) =
         rest.into_iter().partition(|a| a == "--json");
     let words: Vec<&str> = words.iter().map(|w| w.to_str().unwrap_or("-")).collect();
-    let (opal, number): (&[&str], _) = match words.as_slice() {
+    let (opalro, number): (&[&str], _) = match words.as_slice() {
         [] | ["push"] => (&["shelf"], None),
         ["pop"] => (&["unshelf"], None),
         ["pop", n] if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
@@ -135,7 +135,7 @@ fn stash(
         ["list"] => (&["shelf", "--list"], None),
         _ => return Typed::Explain(STASH),
     };
-    run("stash", opal, number.into_iter().chain(json).collect())
+    run("stash", opalro, number.into_iter().chain(json).collect())
 }
 
 /// `commit`'s arguments as `save` takes them, or `None` where `commit` is explained instead.
@@ -187,19 +187,19 @@ fn commit_args(rest: Vec<OsString>) -> Option<Vec<OsString>> {
 /// The hint the first use of a shortcut word gets: Opalro's word, and an example.
 pub fn hint(word: &str) -> Option<&'static str> {
     Some(match word {
-        "init" => "in Opalro, init is start: opal start",
-        "commit" => "in Opalro, commit is save, which takes new files too: opal save \"message\"",
-        "diff" => "in Opalro, diff is changes: opal changes",
-        "log" => "in Opalro, log is history: opal history",
-        "checkout" => "in Opalro, checkout is goto: opal goto <line or save>",
-        "switch" => "in Opalro, switch is goto: opal goto <line>",
+        "init" => "in Opalro, init is start: opalro start",
+        "commit" => "in Opalro, commit is save; it takes new files too: opalro save \"message\"",
+        "diff" => "in Opalro, diff is changes: opalro changes",
+        "log" => "in Opalro, log is history: opalro history",
+        "checkout" => "in Opalro, checkout is goto: opalro goto <line or save>",
+        "switch" => "in Opalro, switch is goto: opalro goto <line>",
         "stash" => {
-            "in Opalro, stash is shelf, which takes new files too: opal shelf\n\
-             A shelf keeps the number `opal shelf --list` shows, counted from 1."
+            "in Opalro, stash is shelf, which takes new files too: opalro shelf\n\
+             A shelf keeps the number `opalro shelf --list` shows, counted from 1."
         }
-        "branch" => "in Opalro, branch is line: opal line",
-        "fsck" => "in Opalro, fsck is verify: opal verify",
-        "gc" => "in Opalro, gc is tidy: opal tidy",
+        "branch" => "in Opalro, branch is line: opalro line",
+        "fsck" => "in Opalro, fsck is verify: opalro verify",
+        "gc" => "in Opalro, gc is tidy: opalro tidy",
         _ => return None,
     })
 }
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn each_row_of_the_table_runs_its_opal_command() {
-        for (typed, word, opal) in [
+        for (typed, word, opalro) in [
             ("init", "init", "start"),
             ("diff a.txt", "diff", "changes a.txt"),
             ("log", "log", "history"),
@@ -374,13 +374,13 @@ mod tests {
             ("fsck", "fsck", "verify"),
             ("gc", "gc", "tidy"),
         ] {
-            assert_eq!(runs(typed), (word.to_owned(), opal.to_owned()), "{typed}");
+            assert_eq!(runs(typed), (word.to_owned(), opalro.to_owned()), "{typed}");
         }
     }
 
     #[test]
     fn commit_runs_save_only_with_a_message_or_with_options_alone() {
-        for (typed, opal) in [
+        for (typed, opalro) in [
             ("commit -m x", "save -- x"),
             ("commit --message x", "save -- x"),
             ("commit --message=x", "save -- x"),
@@ -401,7 +401,7 @@ mod tests {
             // Without a message, -a is passed on, for save to refuse.
             ("commit -a", "save -a"),
         ] {
-            assert_eq!(runs(typed).1, opal, "{typed}");
+            assert_eq!(runs(typed).1, opalro, "{typed}");
         }
         for typed in [
             "commit x",
@@ -509,8 +509,11 @@ mod tests {
     fn every_shortcut_word_has_a_hint_naming_its_opal_command() {
         for word in SHORTCUTS {
             let hint = hint(word).unwrap();
-            assert!(hint.starts_with(&format!("in Opalro, {word} is ")), "{hint}");
-            assert!(hint.split_once(": ").unwrap().1.starts_with("opal "));
+            assert!(
+                hint.starts_with(&format!("in Opalro, {word} is ")),
+                "{hint}"
+            );
+            assert!(hint.split_once(": ").unwrap().1.starts_with("opalro "));
         }
         assert_eq!(hint("save"), None);
         assert_eq!(hint("restore"), None);

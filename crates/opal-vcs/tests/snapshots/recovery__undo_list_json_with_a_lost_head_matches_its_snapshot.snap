@@ -22,6 +22,6 @@ expression: masked(doc)
     }
   ],
   "head_lost": true,
-  "opal_json": 1,
+  "opalro_json": 1,
   "warnings": []
 }

@@ -1,4 +1,4 @@
-//! `opal undo` and `opal redo`, end to end.
+//! `opalro undo` and `opalro redo`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use support::{Env, changed, files, head, holding, main_tip, masked, saved_files,
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -27,9 +27,9 @@ fn project(entries: &[(&str, &str)]) -> Env {
     env
 }
 
-/// `opal <args>`, which must succeed; what it printed.
+/// `opalro <args>`, which must succeed; what it printed.
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -39,9 +39,9 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// `opal <args>`, which must fail; what it said, on stdout then stderr.
+/// `opalro <args>`, which must fail; what it said, on stdout then stderr.
 fn refused(env: &Env, args: &[&str]) -> (String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -52,7 +52,7 @@ fn refused(env: &Env, args: &[&str]) -> (String, String) {
 }
 
 fn json(env: &Env, args: &[&str]) -> serde_json::Value {
-    let out = env.opal().args(args).arg("--json").output().unwrap();
+    let out = env.opalro().args(args).arg("--json").output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
@@ -70,7 +70,7 @@ fn entry(env: &Env, id: Id) -> DiaryEntry {
 }
 
 fn journal_exists(env: &Env) -> bool {
-    env.root().join(".opal/state/journal").exists()
+    env.root().join(".opalro/state/journal").exists()
 }
 
 const ONE: &[(&str, &str)] = &[("a.txt", "a1\n"), ("b.txt", "b1\n"), ("dir/c.txt", "c1\n")];
@@ -112,7 +112,7 @@ fn undo_json_leaves_the_change_id_cache_as_it_was() {
     let env = project(&[("a.txt", "a\n")]);
     write(&env, "a.txt", "A\n");
     ok(&env, &["save", "Change a"]);
-    let cache = env.root().join(".opal/cache/change-ids");
+    let cache = env.root().join(".opalro/cache/change-ids");
     let before = fs::read(&cache).unwrap();
     // The cache knows main at the save undone, so naming that save, which the document never
     // does, would read the line from where main went back to, and write it again.
@@ -207,7 +207,7 @@ fn undo_of_a_discard_stops_when_the_file_was_edited_again() {
     let (at, _) = head(&env);
     let (_, said) = refused(&env, &["undo"]);
     assert!(said.contains("a.txt"), "{said}");
-    assert!(said.contains("opal undo --shelve"), "{said}");
+    assert!(said.contains("opalro undo --shelve"), "{said}");
     assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"again\n");
     assert_eq!(head(&env).0, at);
 }
@@ -271,7 +271,10 @@ fn undo_shelve_stops_at_an_ignored_file_in_the_way_and_stores_nothing() {
     let (_, said) = refused(&env, &["undo", "--shelve"]);
     assert!(said.contains("out.txt"), "{said}");
     assert!(said.contains("can't set them aside"), "{said}");
-    assert!(said.contains("then run opal undo --shelve again"), "{said}");
+    assert!(
+        said.contains("then run opalro undo --shelve again"),
+        "{said}"
+    );
     assert_eq!(files(env.root()), folder);
     assert_eq!(env.standing(), (at, packs));
     assert!(state(&env).shelves.is_empty());
@@ -297,9 +300,9 @@ fn undo_and_redo_keep_shelves_but_their_own() {
 fn running_undo_again_after_a_stop_finishes_it_and_takes_no_further_step() {
     let (env, _, goto) = after_a_goto();
     let out = env
-        .opal()
+        .opalro()
         .arg("undo")
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -307,7 +310,7 @@ fn running_undo_again_after_a_stop_finishes_it_and_takes_no_further_step() {
     assert_eq!(head(&env).0, goto);
     let said = ok(&env, &["undo"]);
     assert!(said.contains("Finished"), "{said}");
-    assert!(said.contains("opal undo again"), "{said}");
+    assert!(said.contains("opalro undo again"), "{said}");
     let (_, newest) = head(&env);
     assert_eq!(newest.action, Action::Undo(goto));
     assert_eq!(newest.parent, Some(goto));
@@ -318,7 +321,7 @@ fn running_undo_again_after_a_stop_finishes_it_and_takes_no_further_step() {
 #[test]
 fn undo_with_nothing_to_undo_says_so_and_succeeds() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -403,7 +406,7 @@ fn an_undo_that_stops_part_way_says_why_and_what_it_took_when_stdout_fails() {
     }
 }
 
-/// `opal undo 2` after a discard, which undoes the discard and then stops on a.txt, with every
+/// `opalro undo 2` after a discard, which undoes the discard and then stops on a.txt, with every
 /// flush after a head move failing and `stdout` as its output: how it ended, and its stderr.
 #[cfg(feature = "fault-injection")]
 fn undo_two_unflushed(stdout: impl FnOnce(&Env) -> std::process::Stdio) -> (Option<i32>, String) {
@@ -414,7 +417,7 @@ fn undo_two_unflushed(stdout: impl FnOnce(&Env) -> std::process::Stdio) -> (Opti
     let out = env
         .opal_process_in(env.root())
         .args(["undo", "2"])
-        .env("OPAL_FAULT_FAIL", "head:renamed")
+        .env("OPALRO_FAULT_FAIL", "head:renamed")
         .stdout(stdout(&env))
         .output()
         .unwrap();
@@ -426,7 +429,7 @@ fn undo_two_unflushed(stdout: impl FnOnce(&Env) -> std::process::Stdio) -> (Opti
 fn an_undo_that_stops_part_way_warns_once_of_a_step_it_couldnt_flush_whatever_stdout_does() {
     let warned_once = |(code, said): (Option<i32>, String)| {
         assert_eq!(code, Some(1), "{said}");
-        let unflushed = "warning: The command happened, but Opalro couldn't flush .opal/state";
+        let unflushed = "warning: The command happened, but Opalro couldn't flush .opalro/state";
         assert_eq!(said.matches(unflushed).count(), 1, "{said}");
     };
     warned_once(undo_two_unflushed(|_| std::process::Stdio::piped()));
@@ -467,9 +470,9 @@ fn an_undo_stopped_at_every_write_is_finished_by_the_next_command() {
         let env = Env::empty();
         copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .arg("undo")
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
@@ -534,9 +537,9 @@ fn an_undo_shelve_stopped_anywhere_is_finished_by_the_next_command() {
         let env = Env::empty();
         copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .args(["undo", "--shelve"])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
@@ -617,7 +620,7 @@ fn an_undo_with_a_file_held_open_is_finished_by_the_next_command() {
 fn undo_json_lists_the_steps_taken() {
     let (env, one, goto) = after_a_goto();
     let doc = json(&env, &["undo", "2"]);
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     assert_eq!(doc["finished"], false);
     assert_eq!(doc["shelved"], serde_json::json!([]));
     assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
@@ -648,7 +651,7 @@ fn undo_json_lists_the_steps_taken() {
 
     // A failure is a document of its own that still lists the steps taken.
     write(&env, "b.txt", "mine\n");
-    let out = env.opal().args(["redo", "2", "--json"]).output().unwrap();
+    let out = env.opalro().args(["redo", "2", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["redone"].as_array().unwrap().len(), 0, "{doc}");
@@ -662,7 +665,7 @@ fn a_redo_that_fails_after_a_step_lists_that_step_in_its_document() {
     ok(&env, &["undo", "2"]);
     write(&env, "b.txt", "mine\n");
     // The save comes back; the goto after it would write over b.txt.
-    let out = env.opal().args(["redo", "2", "--json"]).output().unwrap();
+    let out = env.opalro().args(["redo", "2", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let redone = doc["redone"].as_array().unwrap();
@@ -686,7 +689,7 @@ fn diary(env: &Env) -> Vec<Id> {
     ids
 }
 
-/// The first `digits` hex digits of `id`, as `opal undo --to` takes them.
+/// The first `digits` hex digits of `id`, as `opalro undo --to` takes them.
 fn start_of(id: Id, digits: usize) -> String {
     id.to_hex()[..digits].to_owned()
 }
@@ -731,7 +734,7 @@ fn the_list_shows_redo_steps_then_undo_steps_numbered_from_now() {
         first.ends_with("  start: the diary's first entry, which can't be undone"),
         "{said}"
     );
-    // `opal redo` brings back the step numbered redo 1, and `opal undo` takes the one numbered
+    // `opalro redo` brings back the step numbered redo 1, and `opalro undo` takes the one numbered
     // undo 1.
     assert!(ok(&env, &["redo"]).contains("\"Add c\""));
     ok(&env, &["undo"]);
@@ -773,7 +776,7 @@ fn the_list_shows_at_most_20_undo_steps_and_says_when_there_are_more() {
     assert!(lines[19].starts_with("  undo 20  "), "{said}");
     assert_eq!(
         lines[20],
-        "  and more: opal undo --list --all shows the whole diary"
+        "  and more: opalro undo --list --all shows the whole diary"
     );
     let doc = json(&env, &["undo", "--list"]);
     assert_eq!(doc["undo"].as_array().unwrap().len(), 20, "{doc}");
@@ -874,7 +877,7 @@ fn undo_to_a_cleared_step_keeps_the_shelves() {
     let (_, said) = refused(&env, &["undo", "--to", &to]);
     assert!(said.contains("b.txt"), "{said}");
     assert!(
-        said.contains(&format!("opal undo --to {to} --shelve")),
+        said.contains(&format!("opalro undo --to {to} --shelve")),
         "{said}"
     );
     assert_eq!(env.standing(), standing);
@@ -947,7 +950,7 @@ fn undo_to_needs_at_least_8_hex_digits_and_exactly_one_match() {
         &["undo", "--all"],
         &["redo", "--to", hex],
     ] {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
 }
@@ -1000,7 +1003,7 @@ fn undo_list_json_has_both_lists() {
     }
     ok(&env, &["undo"]);
     let doc = json(&env, &["undo", "--list"]);
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     assert_eq!(doc["more"], false);
     assert_eq!(doc["warnings"], serde_json::json!([]));
     let listed = |list: &serde_json::Value| -> Vec<String> {
@@ -1052,7 +1055,7 @@ fn undo_to_that_stops_on_the_way_says_how_far_it_got() {
     assert!(out.contains("\n    discard: "), "{out}");
     assert!(said.contains("a.txt"), "{said}");
     assert!(
-        said.contains(&format!("opal undo --to {to} --shelve")),
+        said.contains(&format!("opalro undo --to {to} --shelve")),
         "{said}"
     );
     assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"mine\n");
@@ -1065,9 +1068,9 @@ fn undo_to_after_a_stop_finishes_it_and_takes_no_step() {
     let (env, one, goto) = after_a_goto();
     let files_step = diary(&env)[2];
     let out = env
-        .opal()
+        .opalro()
         .arg("undo")
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -1075,7 +1078,7 @@ fn undo_to_after_a_stop_finishes_it_and_takes_no_step() {
     let to = start_of(files_step, 8);
     let said = ok(&env, &["undo", "--to", &to]);
     assert!(said.contains("Finished the undo of goto"), "{said}");
-    let again = format!("Running opal undo --to {to} again goes on from there.");
+    let again = format!("Running opalro undo --to {to} again goes on from there.");
     assert!(said.contains(&again), "{said}");
     assert_eq!(head(&env).1.action, Action::Undo(goto));
     assert_eq!(files(env.root()), holding(TWO));
@@ -1148,7 +1151,7 @@ fn undo_and_redo_json_match_their_snapshots() {
     // A goto, so the steps move where the project is and write files.
     ok(&env, &["goto", &one.to_hex()]);
     let doc = |args: &[&str]| -> serde_json::Value {
-        let out = env.opal().args(args).arg("--json").output().unwrap();
+        let out = env.opalro().args(args).arg("--json").output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),

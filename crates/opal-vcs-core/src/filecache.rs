@@ -1,4 +1,4 @@
-//! The file-state cache, `.opal/cache/files` (storage-format.md section 10): each file's kind,
+//! The file-state cache, `.opalro/cache/files` (storage-format.md section 10): each file's kind,
 //! size, modified time, file ID and content ID, so that a file whose details still match needn't
 //! be read. Only ever a hint: one that is missing, sealed by another key, edited or unreadable is
 //! empty.
@@ -397,7 +397,7 @@ impl FileCache {
     }
 }
 
-/// The drive's own "now": the modified time of a file written in `.opal/tmp`, since a network or
+/// The drive's own "now": the modified time of a file written in `.opalro/tmp`, since a network or
 /// FAT drive's clock and resolution may differ from this computer's.
 pub fn drive_now(repo: &Repository) -> Result<i128, RepoError> {
     let tmp = repo.tmp_folder();
@@ -493,7 +493,7 @@ mod tests {
     const THEN: i128 = 1_700_000_000 * SECOND + 123_456_789;
 
     fn stored(dir: &tempfile::TempDir) -> std::path::PathBuf {
-        dir.path().join(".opal").join("cache").join("files")
+        dir.path().join(".opalro").join("cache").join("files")
     }
 
     #[test]
@@ -739,7 +739,7 @@ mod tests {
 
     /// The stored file's ID, which a write through `tmp/` and a rename changes, and its bytes.
     fn on_disk(dir: &tempfile::TempDir) -> ((u64, u128), Vec<u8>) {
-        let cache = opal_platform::dir::Dir::open_top(&dir.path().join(".opal").join("cache"));
+        let cache = opal_platform::dir::Dir::open_top(&dir.path().join(".opalro").join("cache"));
         let meta = cache.unwrap().metadata(OsStr::new(FILE)).unwrap();
         (meta.file_id, std::fs::read(stored(dir)).unwrap())
     }

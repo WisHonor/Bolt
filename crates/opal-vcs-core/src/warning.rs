@@ -26,19 +26,19 @@ pub const CHANGED_FILES_NOT_COUNTED: &str = "changed_files_not_counted";
 pub const GITIGNORE_SKIPPED: &str = "gitignore_skipped";
 /// Entries this computer doesn't hold as they are were kept as the last save has them.
 pub const KEPT_AS_THEY_WERE: &str = "kept_as_they_were";
-/// A save left out entries whose names Git treats as `.git`, or Opalro as `.opal`.
+/// A save left out entries whose names Git treats as `.git`, or Opalro as `.opalro`.
 pub const GIT_NAMES_LEFT_OUT: &str = "git_names_left_out";
 /// A save took changes to files an ignore rule matches, which stay saved because the last save
 /// holds them.
 pub const IGNORED_CHANGES_SAVED: &str = "ignored_changes_saved";
-/// A save took new or changed files that `.gitignore` keeps out but `.opalignore` takes back.
+/// A save took new or changed files that `.gitignore` keeps out but `.opalroignore` takes back.
 pub const GITIGNORED_FILES_SAVED: &str = "gitignored_files_saved";
 /// The project opens only from an administrator terminal.
 pub const ELEVATED_ONLY: &str = "elevated_only";
 /// `start` made the project but couldn't read its first save back to show it.
 pub const FIRST_SAVE_NOT_READ: &str = "first_save_not_read";
-/// Git checked out a folder named `.opal` below the top of the project.
-pub const NESTED_OPAL_FOLDER: &str = "nested_opal_folder";
+/// Git checked out a folder named `.opalro` below the top of the project.
+pub const NESTED_OPALRO_FOLDER: &str = "nested_opal_folder";
 /// The Git repository has a grafts file, which the import ignored.
 pub const GRAFTS_IGNORED: &str = "grafts_ignored";
 /// Imported commits whose `change-id` header gives a change ID another commit has too took their
@@ -72,9 +72,9 @@ pub const SWITCH_FINISHED: &str = "switch_finished";
 pub const SWITCH_DROPPED: &str = "switch_dropped";
 /// A file's diff ran out of time, so its changes show in bigger pieces than they could.
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
-/// The project's `opal.toml` couldn't be used at all, so Opalro's own values apply.
+/// The project's `opalro.toml` couldn't be used at all, so Opalro's own values apply.
 pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
-/// Parts of `opal.toml` couldn't be used and were passed over; the rest of it counts.
+/// Parts of `opalro.toml` couldn't be used and were passed over; the rest of it counts.
 pub const RULES_IGNORED: &str = "rules_ignored";
 /// `tidy` passed over a diary cut off from the current entry that names an entry the store lacks,
 /// keeping what it reached from its end.

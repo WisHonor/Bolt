@@ -468,7 +468,7 @@ fn files_are_read_as_git_reads_them() {
         seed ^= seed << 17;
         usize::try_from(seed % u64::try_from(below).unwrap()).unwrap()
     };
-    let count = std::env::var("OPAL_GIT_CONFIG_CASES").map_or(150, |n| n.parse().unwrap());
+    let count = std::env::var("OPALRO_GIT_CONFIG_CASES").map_or(150, |n| n.parse().unwrap());
     for _ in 0..count {
         let mut text = Vec::new();
         for _ in 0..1 + random(14) {

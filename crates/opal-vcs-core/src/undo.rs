@@ -1,6 +1,6 @@
-//! `opal undo` and `opal redo`: stepping back and forth through the commands the diary records,
+//! `opalro undo` and `opalro redo`: stepping back and forth through the commands the diary records,
 //! with what each did to the folder written back or written again; the lists of those steps, and
-//! `opal undo --to`, which goes to any entry, and picks up a lost `head`.
+//! `opalro undo --to`, which goes to any entry, and picks up a lost `head`.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashSet};

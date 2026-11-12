@@ -6,7 +6,7 @@ publish.workspace = true
 license-file.workspace = true
 
 [[bin]]
-name = "opal"
+name = "opalro"
 path = "src/main.rs"
 
 [features]

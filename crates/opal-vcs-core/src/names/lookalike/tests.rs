@@ -4,34 +4,34 @@ use crate::names::{NameError, validate_name};
 #[test]
 fn every_opal_spelling_is_refused() {
     for bad in [
-        ".opal",
-        ".OPAL",
-        ".Opal",
-        ".opal.",
-        ".opal ",
-        ".opal. .",
-        "opal~1",
-        "OPAL~1",
-        "opal~4",
-        ".opal\\x",
-        ".OPAL.\\x",
-        "opal~1\\x",
-        ".opal::$INDEX_ALLOCATION",
-        ".opal:stream",
-        ".o\u{200C}pal",
-        "\u{FEFF}.opal",
+        ".opalro",
+        ".OPALRO",
+        ".Opalro",
+        ".opalro.",
+        ".opalro ",
+        ".opalro. .",
+        "opalro~1",
+        "OPALRO~1",
+        "opalro~4",
+        ".opalro\\x",
+        ".OPALRO.\\x",
+        "opalro~1\\x",
+        ".opalro::$INDEX_ALLOCATION",
+        ".opalro:stream",
+        ".o\u{200C}palro",
+        "\u{FEFF}.opalro",
     ] {
         assert_eq!(validate_name(bad), Err(NameError::OpalSpelling), "{bad:?}");
         assert!(is_opal_alias(bad), "{bad:?}");
     }
     for ok in [
-        ".opalignore",
-        "opal.toml",
-        ".opals",
-        "opal",
-        "opal~5",
-        "opal~12",
-        "x\\.opal",
+        ".opalroignore",
+        "opalro.toml",
+        ".opalros",
+        "opalro",
+        "opalro~5",
+        "opalro~12",
+        "x\\.opalro",
     ] {
         assert_eq!(validate_name(ok), Ok(()), "{ok}");
         assert!(!is_opal_alias(ok), "{ok}");
@@ -90,7 +90,7 @@ fn every_git_spelling_is_spotted() {
         ".git2",
         "xgit~1",
         "a.git",
-        ".opal",
+        ".opalro",
         ".gi",
         "git~2",
         "git~10",

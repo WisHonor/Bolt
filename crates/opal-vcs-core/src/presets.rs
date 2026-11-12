@@ -1,4 +1,4 @@
-//! The presets: what Code and Game write in `opal.toml` and `.opalignore`
+//! The presets: what Code and Game write in `opalro.toml` and `.opalroignore`
 //! (docs/storage-format.md section 12), and the look at a folder that suggests one.
 
 use std::ffi::OsString;
@@ -16,7 +16,7 @@ pub enum Preset {
 }
 
 impl Preset {
-    /// The name `--preset` takes and `opal.toml` records.
+    /// The name `--preset` takes and `opalro.toml` records.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -46,7 +46,7 @@ pub enum Engine {
 impl Engine {
     pub const ALL: [Engine; 3] = [Engine::Unity, Engine::Unreal, Engine::Godot];
 
-    /// The name the `.opalignore` block's first line gives it.
+    /// The name the `.opalroignore` block's first line gives it.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -115,7 +115,7 @@ impl Language {
         Language::Gradle,
     ];
 
-    /// The name the `.opalignore` block's first line gives it.
+    /// The name the `.opalroignore` block's first line gives it.
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
@@ -160,11 +160,11 @@ const DEEPEST: usize = 128;
 #[derive(Clone, Debug)]
 pub struct Looked {
     pub found: Found,
-    /// The size of the files below the top, leaving out `.git`, `.opal` and the engines' caches.
+    /// The size of the files below the top, leaving out `.git`, `.opalro` and the engines' caches.
     pub bytes: u64,
     /// False when the look stopped early or passed over a folder, so `bytes` is a floor.
     pub counted_all: bool,
-    /// Whether the top folder holds an entry named `opal.toml`, of any kind.
+    /// Whether the top folder holds an entry named `opalro.toml`, of any kind.
     pub has_rules_file: bool,
 }
 
@@ -174,11 +174,11 @@ pub struct Looked {
 pub fn look(top: &Dir) -> io::Result<Looked> {
     let entries = top.entries()?;
     let found = found_in(top, &entries);
-    let has_rules_file = entries.iter().any(|e| e.name == "opal.toml");
+    let has_rules_file = entries.iter().any(|e| e.name == "opalro.toml");
     let left_out = |e: &DirEntry| {
         let name = e.name.as_encoded_bytes();
         name == b".git"
-            || name == b".opal"
+            || name == b".opalro"
             || (e.kind == EntryType::Dir
                 && found.engines.iter().any(|engine| {
                     engine
@@ -331,7 +331,7 @@ pub fn suggested(found: &Found) -> Preset {
     }
 }
 
-/// The `opal.toml` a preset writes; `None` for Custom, which writes none.
+/// The `opalro.toml` a preset writes; `None` for Custom, which writes none.
 #[must_use]
 pub fn opal_toml(preset: Preset, found: &Found) -> Option<String> {
     match preset {
@@ -354,9 +354,9 @@ const START_MARK: &[u8] = b"# >>> Opalro preset";
 const END_MARK: &[u8] = b"# <<< Opalro preset";
 const BOM: &[u8] = b"\xef\xbb\xbf";
 
-/// The block of lines a preset writes in `.opalignore`, marks included; `None` for Custom.
+/// The block of lines a preset writes in `.opalroignore`, marks included; `None` for Custom.
 #[must_use]
-pub fn opalignore_block(preset: Preset, found: &Found) -> Option<String> {
+pub fn opalroignore_block(preset: Preset, found: &Found) -> Option<String> {
     let (names, lines): (Vec<&str>, String) = match preset {
         Preset::Code => {
             let languages = Language::ALL
@@ -384,7 +384,7 @@ pub fn opalignore_block(preset: Preset, found: &Found) -> Option<String> {
         format!(" ({})", names.join(", "))
     };
     Some(format!(
-        "# >>> Opalro preset: {}{found}, version 1. `opal setup` rewrites the lines down to the end \
+        "# >>> Opalro preset: {}{found}, version 1. `opalro setup` rewrites the lines down to the end \
          mark.\n{lines}# <<< Opalro preset\n",
         preset.name()
     ))
@@ -397,7 +397,7 @@ struct Block {
     lines: usize,
 }
 
-/// The first block in `text`, a `.opalignore` without its byte order mark. A start line with no
+/// The first block in `text`, a `.opalroignore` without its byte order mark. A start line with no
 /// end line after it is an ordinary comment.
 fn first_block(text: &[u8]) -> Option<Block> {
     let mut start = None;
@@ -423,10 +423,10 @@ fn first_block(text: &[u8]) -> Option<Block> {
     None
 }
 
-/// A `.opalignore` with the first block replaced by `block`, added at the top, or removed. `None`:
+/// A `.opalroignore` with the first block replaced by `block`, added at the top, or removed. `None`:
 /// no file is left.
 #[must_use]
-pub fn edit_opalignore(before: Option<&[u8]>, block: Option<&str>) -> Option<Vec<u8>> {
+pub fn edit_opalroignore(before: Option<&[u8]>, block: Option<&str>) -> Option<Vec<u8>> {
     let Some(before) = before else {
         return block.map(|b| b.as_bytes().to_vec());
     };
@@ -463,8 +463,8 @@ pub fn edit_opalignore(before: Option<&[u8]>, block: Option<&str>) -> Option<Vec
 
 /// How many lines the first block holds between its marks; `None` when there is no block.
 #[must_use]
-pub fn block_lines(opalignore: &[u8]) -> Option<usize> {
-    let text = opalignore.strip_prefix(BOM).unwrap_or(opalignore);
+pub fn block_lines(opalroignore: &[u8]) -> Option<usize> {
+    let text = opalroignore.strip_prefix(BOM).unwrap_or(opalroignore);
     first_block(text).map(|b| b.lines)
 }
 
@@ -591,7 +591,7 @@ mod tests {
         };
         let full = &every_found()[1];
         for preset in [Preset::Code, Preset::Game] {
-            let block = opalignore_block(preset, full).unwrap();
+            let block = opalroignore_block(preset, full).unwrap();
             assert!(lines_of(&block).count() > 0);
             for line in lines_of(&block) {
                 let mut m = Matcher::new(drive);
@@ -616,7 +616,7 @@ mod tests {
                 composes_unicode: false,
             };
             for preset in [Preset::Code, Preset::Game] {
-                let block = opalignore_block(preset, full).unwrap();
+                let block = opalroignore_block(preset, full).unwrap();
                 let mut m = Matcher::new(drive);
                 m.enter("", vec![Rules::parse(block.as_bytes(), "", false)]);
                 for ext in ["obj", "exe", "dll", "png", "log", "tmp"] {
@@ -725,7 +725,7 @@ mod tests {
         write("Assets/Hero.png", 10);
         write("Assets/Deep/er/still.wav", 20);
         write(".git/objects/pack", 1000);
-        write(".opal/packs/pack", 1000);
+        write(".opalro/packs/pack", 1000);
         write("Library/cache", 1000);
         write("temp/cache", 1000);
         write(".godot/cache", 400);
@@ -739,8 +739,8 @@ mod tests {
         fs::remove_file(top.join("ProjectSettings/ProjectVersion.txt")).unwrap();
         assert_eq!(look_in(top).bytes, 10 + 20 + 2000 + 400);
 
-        // An opal.toml of any kind is seen.
-        fs::create_dir(top.join("opal.toml")).unwrap();
+        // An opalro.toml of any kind is seen.
+        fs::create_dir(top.join("opalro.toml")).unwrap();
         assert!(look_in(top).has_rules_file);
     }
 
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn block_lines_counts_between_the_marks() {
         let full = &every_found()[1];
-        let block = opalignore_block(Preset::Game, full).unwrap();
+        let block = opalroignore_block(Preset::Game, full).unwrap();
         let file = format!("mine/\n{block}more/\n");
         assert_eq!(
             block_lines(file.as_bytes()),

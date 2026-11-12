@@ -1,4 +1,4 @@
-//! The walk of the project folder for `opal save`: what the ignore rules let in, what the last
+//! The walk of the project folder for `opalro save`: what the ignore rules let in, what the last
 //! save holds along the way, and the entries a save keeps as they were, in folders gone from disk
 //! too. Each folder is opened from the one above it, a name at a time, never through a link
 //! (decision 048).
@@ -20,7 +20,7 @@ use crate::id::Id;
 use crate::ignore::{Decision, InForce, Matcher, Rules};
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{
-    Listed, holdable_here, is_opal_alias, is_git_alias, listed_hints, own_folder, validate_name,
+    Listed, holdable_here, is_git_alias, is_opal_alias, listed_hints, own_folder, validate_name,
 };
 use crate::repo::RepoError;
 use crate::store::{Peeked, Store, StoreError};
@@ -37,12 +37,12 @@ fn shown(rel: &Path) -> String {
 }
 
 /// Whether the folder `dir` holds a Git repository or Opalro project of its own: an entry named
-/// `.git` of any kind (a worktree's or submodule's is a file), or a `.opal` folder. Where the
+/// `.git` of any kind (a worktree's or submodule's is a file), or a `.opalro` folder. Where the
 /// drive ignores letter case, `.GIT` is found as `.git` (decision 046).
 pub(super) fn holds_own_repository(dir: &Dir) -> bool {
     dir.metadata(OsStr::new(".git")).is_ok()
         || dir
-            .metadata(OsStr::new(".opal"))
+            .metadata(OsStr::new(".opalro"))
             .is_ok_and(|m| m.kind == EntryType::Dir)
 }
 
@@ -62,7 +62,7 @@ mod asked {
         *n = (n.0 + lookups, n.1 + opens);
     }
 
-    /// A look for a repository there, which asks for `.git`, then `.opal`.
+    /// A look for a repository there, which asks for `.git`, then `.opalro`.
     pub(super) fn lookup(folder: PathBuf) {
         note(folder, 2, 0);
     }
@@ -184,7 +184,7 @@ pub(super) mod ahead_seen {
 /// Whether the walk keeps `name`, met as a folder when `is_dir`, without asking the ignore rules,
 /// in a folder that isn't held: the base save holds it there as `saved`, a file or link, and
 /// it is one still. The rules only warn about such a file, and only if it changed, so they are
-/// asked then. A `.git` or `.opal` spelling is always judged.
+/// asked then. A `.git` or `.opalro` spelling is always judged.
 fn kept_unasked(name: &str, is_dir: bool, saved: Option<&Entry>) -> bool {
     !is_dir
         && saved.is_some_and(|e| e.kind != EntryKind::Folder)
@@ -205,7 +205,7 @@ pub(super) struct Late {
 pub(super) struct Noted {
     /// Files and links an ignore rule matches, kept because the base save holds them.
     ignored: HashSet<String>,
-    /// Files and links kept that Git's rules alone would leave out: a `.opalignore` line takes
+    /// Files and links kept that Git's rules alone would leave out: a `.opalroignore` line takes
     /// them back, or a folder they are in.
     gitignored: HashSet<String>,
     /// For each folder that isn't held, by project path, the rules to ask about what it kept
@@ -236,7 +236,7 @@ impl Noted {
         {
             let verdict = late.rules.verdict(c.rel.as_bytes(), false);
             // As `judged` and `saved_before` note it.
-            return if verdict.opal == Decision::Ignored {
+            return if verdict.opalro == Decision::Ignored {
                 (!late.nested_held).then_some(Note::Ignored)
             } else if late.git_held || verdict.git == Decision::Ignored {
                 Some(Note::GitIgnored)
@@ -731,7 +731,7 @@ struct WalkState {
     problem: Option<SaveError>,
     /// One for each `.gitignore` skipped.
     warnings: Vec<Warning>,
-    /// What the save leaves out because Git treats its name as `.git`, or Opalro as `.opal`: from
+    /// What the save leaves out because Git treats its name as `.git`, or Opalro as `.opalro`: from
     /// the folder, and from the base save.
     git_names: Named,
     /// Folders that hold a repository or project of their own (decision 046), for the warning.
@@ -750,7 +750,7 @@ struct WalkState {
     /// Files and links an ignore rule matches, kept because the base save holds them.
     ignored: HashSet<String>,
     /// Folders the walk keeps that Git would leave out, with all they hold: the `.gitignore`
-    /// lines alone ignore them, or a folder they are in, and a `.opalignore` line takes them back.
+    /// lines alone ignore them, or a folder they are in, and a `.opalroignore` line takes them back.
     git_held: HashSet<String>,
     /// Files and links the walk keeps that Git would leave out, in the same way.
     gitignored: HashSet<String>,
@@ -938,7 +938,7 @@ impl WalkState {
     }
 
     /// Puts the rules of the ignore files in the folder `rel` in force: its `.gitignore`, then its
-    /// `.opalignore`, whose lines come later so they can add to Git's rules or undo them. At the
+    /// `.opalroignore`, whose lines come later so they can add to Git's rules or undo them. At the
     /// top, Git's personal lists come first, as in Git: the user's own `own_list`, then
     /// `.git/info/exclude` (decision 047). An ignore file `hints` rules out isn't looked for.
     fn enter(
@@ -961,7 +961,7 @@ impl WalkState {
         let gitignore_why = "Git skips a linked .gitignore too";
         let files = [
             (".gitignore", Some(gitignore_why), hints.gitignore),
-            (".opalignore", None, hints.opalignore),
+            (".opalroignore", None, hints.opalroignore),
         ];
         for (name, why, _) in files.into_iter().filter(|(_, _, there)| *there) {
             let name = OsStr::new(name);
@@ -1067,7 +1067,7 @@ impl WalkState {
     /// The rules of the ignore file `name` in the folder `up`, for the project's `folder`, or none
     /// if there isn't one. Read through `safe_fs`. One of Git's lists (`why` says why one is
     /// skipped) that isn't a regular file is skipped with a warning, as Git skips a linked
-    /// `.gitignore`; for a `.opalignore` (`why` is `None`) that stops the save. A folder Opalro may
+    /// `.gitignore`; for a `.opalroignore` (`why` is `None`) that stops the save. A folder Opalro may
     /// not look into is `Unreadable`.
     fn file_rules(
         &mut self,
@@ -1248,12 +1248,12 @@ impl WalkState {
         verdicts::note(&self.root);
         // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
         let verdict = self.matcher.verdict(met.bytes, is_dir);
-        if verdict.opal == Decision::Ignored {
+        if verdict.opalro == Decision::Ignored {
             return self.saved_before(folder, met, is_dir);
         }
         let git_ignores = within.git_held || verdict.git == Decision::Ignored;
         // After the rules, so an ignored one stays out without a word, unless the base save held
-        // it: `Base` dropped and named those. No save holds a `.opal` spelling.
+        // it: `Base` dropped and named those. No save holds a `.opalro` spelling.
         if met
             .name
             .is_some_and(|n| is_git_alias(n) || is_opal_alias(n))
@@ -1277,10 +1277,10 @@ impl WalkState {
                                 .map(|e| (e.name.as_os_str(), e.short_name.as_deref())),
                         );
                         #[cfg(test)]
-                        if hints.git || hints.opal {
+                        if hints.git || hints.opalro {
                             asked::lookup(self.root.join(rel));
                         }
-                        let nested = (hints.git || hints.opal) && holds_own_repository(&dir);
+                        let nested = (hints.git || hints.opalro) && holds_own_repository(&dir);
                         self.listed = Some((met.rel.to_owned(), dir, entries));
                         nested
                     }
@@ -1372,7 +1372,7 @@ pub(super) struct Scan {
     /// What the walk noted for the warnings about files the ignore rules match.
     pub(super) noted: Noted,
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Opalro as
-    /// `.opal` left out.
+    /// `.opalro` left out.
     pub(super) warnings: Vec<Warning>,
 }
 
@@ -1881,7 +1881,7 @@ fn walk_folders(
                 // says that Opalro can't save it yet.
                 EntryType::Other if cfg!(windows) => Kind::File,
                 // shortcut: sockets, pipes and devices are skipped silently; revisit with
-                // `opal status`.
+                // `opalro status`.
                 EntryType::Other => return Ok(None),
             };
             limits.add(1).map_err(too_large)?;
@@ -1941,14 +1941,15 @@ fn send_job(job: &mut Option<Job>, send: &SyncSender<Job>) {
     }
 }
 
-/// Says the save left out entries whose names Git treats as `.git` or Opalro as `.opal`, naming the
+/// Says the save left out entries whose names Git treats as `.git` or Opalro as `.opalro`, naming the
 /// first few.
 fn git_names_left_out(names: &Named) -> Warning {
     let count = names.count;
     let (what, next) = if count == 1 {
         (
-            "1 entry whose name Git or Opalro keep for themselves, with everything in it".to_owned(),
-            "If Git uses it (a submodule's or worktree's .git file), list it in .opalignore to \
+            "1 entry whose name Git or Opalro keep for themselves, with everything in it"
+                .to_owned(),
+            "If Git uses it (a submodule's or worktree's .git file), list it in .opalroignore to \
              leave it out without this warning; otherwise rename it to save it.",
         )
     } else {
@@ -1957,14 +1958,14 @@ fn git_names_left_out(names: &Named) -> Warning {
                 "{count} entries whose names Git or Opalro keep for themselves, with everything in \
                  them"
             ),
-            "If Git uses them (a submodule's or worktree's .git file), list them in .opalignore to \
+            "If Git uses them (a submodule's or worktree's .git file), list them in .opalroignore to \
              leave them out without this warning; otherwise rename them to save them.",
         )
     };
-    // Every invisible character shown, so a spelling can be told from `.git` or `.opal` itself.
+    // Every invisible character shown, so a spelling can be told from `.git` or `.opalro` itself.
     let first = names.first.iter().map(|path| escape_all(path));
     let message = format!(
-        "Left out {what}:{}\nSuch names stand for .git or .opal (some spellings only on Windows or \
+        "Left out {what}:{}\nSuch names stand for .git or .opalro (some spellings only on Windows or \
          macOS), so Opalro leaves them out of saves, as it does on import. {next}",
         listed(first, count)
     );
@@ -1979,15 +1980,15 @@ fn nested_projects_left_out(named: &Named) -> Warning {
         format!(
             "1 folder holds a Git repository or Opalro project of its own, so saves take nothing new \
              from it:{listed}\nGit and Jujutsu leave such folders out too. To save its files, \
-             remove its .git or .opal; to leave it out without this warning, list it in \
-             .opalignore."
+             remove its .git or .opalro; to leave it out without this warning, list it in \
+             .opalroignore."
         )
     } else {
         format!(
             "{} folders hold a Git repository or Opalro project of their own, so saves take nothing \
              new from them:{listed}\nGit and Jujutsu leave such folders out too. To save a \
-             folder's files, remove its .git or .opal; to leave it out without this warning, list \
-             it in .opalignore.",
+             folder's files, remove its .git or .opalro; to leave it out without this warning, list \
+             it in .opalroignore.",
             named.count
         )
     };
@@ -2218,15 +2219,15 @@ mod tests {
     }
 
     #[test]
-    fn opalignore_git_and_opal_folders_are_skipped() {
+    fn opalroignore_git_and_opal_folders_are_skipped() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"*.tmp\nLibrary/\n");
+        write(root, ".opalroignore", b"*.tmp\nLibrary/\n");
         write(root, "a.tmp", b"x");
         write(root, "keep.txt", b"x");
         write(root, "Library/x", b"x");
         write(root, ".git/config", b"x");
-        write(root, "sub/.opalignore", b"local.txt\n");
+        write(root, "sub/.opalroignore", b"local.txt\n");
         write(root, "sub/local.txt", b"x");
         write(root, "local.txt", b"x");
         let id = saved_root(save_now(&mut repo).unwrap());
@@ -2235,32 +2236,32 @@ mod tests {
         assert_eq!(
             paths,
             [
-                ".opalignore",
+                ".opalroignore",
                 "keep.txt",
                 "local.txt",
                 "sub",
-                "sub/.opalignore"
+                "sub/.opalroignore"
             ]
         );
     }
 
     #[test]
-    fn opalignore_rules_work_as_in_git() {
+    fn opalroignore_rules_work_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();
         // A byte order mark is not part of the first pattern, and the last match wins. `build/` is
         // folders only, nothing returns from inside an ignored folder, and `.git` stays out.
         let top = "\u{feff}*.log\n!keep.log\nbuild/\n!build/keep.txt\n!.git/\n";
-        write(root, ".opalignore", top.as_bytes());
+        write(root, ".opalroignore", top.as_bytes());
         write(root, "a.log", b"x");
         write(root, "keep.log", b"x");
         write(root, "build/out.bin", b"x");
         write(root, "build/keep.txt", b"x");
         write(root, "src/build", b"a file, not a folder");
         write(root, ".git/config", b"x");
-        // The nearest .opalignore decides first: `sub` takes one .log file back, and the top
+        // The nearest .opalroignore decides first: `sub` takes one .log file back, and the top
         // one still ignores the other.
-        write(root, "sub/.opalignore", b"!debug.log\n");
+        write(root, "sub/.opalroignore", b"!debug.log\n");
         write(root, "sub/debug.log", b"x");
         write(root, "sub/other.log", b"x");
         let id = saved_root(save_now(&mut repo).unwrap());
@@ -2269,12 +2270,12 @@ mod tests {
         assert_eq!(
             paths,
             [
-                ".opalignore",
+                ".opalroignore",
                 "keep.log",
                 "src",
                 "src/build",
                 "sub",
-                "sub/.opalignore",
+                "sub/.opalroignore",
                 "sub/debug.log"
             ]
         );
@@ -2290,12 +2291,12 @@ mod tests {
     fn an_escaped_bang_ignores_a_name_that_begins_with_one() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"\\!name\n");
+        write(root, ".opalroignore", b"\\!name\n");
         write(root, "!name", b"ignored");
         write(root, "sub/!name", b"ignored");
         write(root, "name", b"kept");
         let saved = save_now(&mut repo).unwrap();
-        assert_eq!(saved_paths(&repo, saved), [".opalignore", "name", "sub"]);
+        assert_eq!(saved_paths(&repo, saved), [".opalroignore", "name", "sub"]);
     }
 
     /// A line with a slash in it counts from the folder of its own file, not from the project, so
@@ -2304,8 +2305,8 @@ mod tests {
     fn anchored_rules_in_a_nested_ignore_file_start_at_its_folder() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, "sub/.opalignore", b"/only.txt\nmid/dir.txt\n");
-        write(root, "sub/deeper/.opalignore", b"/here.txt\n");
+        write(root, "sub/.opalroignore", b"/only.txt\nmid/dir.txt\n");
+        write(root, "sub/deeper/.opalroignore", b"/here.txt\n");
         let ignored = ["sub/only.txt", "sub/mid/dir.txt", "sub/deeper/here.txt"];
         let kept = [
             "only.txt",
@@ -2335,23 +2336,23 @@ mod tests {
     fn nothing_is_taken_back_from_inside_an_ignored_folder() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"build/\n!keep\n");
-        write(root, "build/.opalignore", b"!keep\n");
+        write(root, ".opalroignore", b"build/\n!keep\n");
+        write(root, "build/.opalroignore", b"!keep\n");
         write(root, "build/keep", b"x");
         write(root, "build/deep/keep", b"x");
         write(root, "other/keep", b"x");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [".opalignore", "other", "other/keep"]
+            [".opalroignore", "other", "other/keep"]
         );
     }
 
     #[test]
-    fn opalignore_ignores_letter_case_where_git_does() {
+    fn opalroignore_ignores_letter_case_where_git_does() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"*.env\nsecrets/\n*.LOG\n");
+        write(root, ".opalroignore", b"*.env\nsecrets/\n*.LOG\n");
         write(root, "PROD.ENV", b"x");
         write(root, "Secrets/key.pem", b"x");
         write(root, "debug.LOG", b"x");
@@ -2360,10 +2361,10 @@ mod tests {
         // Git sets core.ignorecase where the drive ignores letter case, as Windows' and macOS's
         // do; elsewhere a pattern matches exactly.
         let want: &[&str] = if this_drive().ignores_case {
-            &[".opalignore", "keep.txt"]
+            &[".opalroignore", "keep.txt"]
         } else {
             &[
-                ".opalignore",
+                ".opalroignore",
                 "PROD.ENV",
                 "Secrets",
                 "Secrets/key.pem",
@@ -2377,15 +2378,15 @@ mod tests {
     fn a_name_taken_back_with_a_pattern_keeps_its_letter_case_where_case_is_ignored() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"*.env\n!keep.env\n");
+        write(root, ".opalroignore", b"*.env\n!keep.env\n");
         write(root, "KEEP.ENV", b"x");
         write(root, "OTHER.ENV", b"x");
         write(root, "plain.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         let want: &[&str] = if this_drive().ignores_case {
-            &[".opalignore", "KEEP.ENV", "plain.txt"]
+            &[".opalroignore", "KEEP.ENV", "plain.txt"]
         } else {
-            &[".opalignore", "KEEP.ENV", "OTHER.ENV", "plain.txt"]
+            &[".opalroignore", "KEEP.ENV", "OTHER.ENV", "plain.txt"]
         };
         assert_eq!(saved_paths(&repo, saved), want);
     }
@@ -2444,9 +2445,9 @@ mod tests {
             warnings[0].message,
             "Left out 4 entries whose names Git or Opalro keep for themselves, with everything in \
              them:\n  .g\\u{200c}it\n  a/.git\\u{feff}\n  git~1\n  sub/git~1\nSuch names stand for \
-             .git or .opal (some spellings only on Windows or macOS), so Opalro leaves them out of \
+             .git or .opalro (some spellings only on Windows or macOS), so Opalro leaves them out of \
              saves, as it does on import. If Git uses them (a submodule's or worktree's .git \
-             file), list them in .opalignore to leave them out without this warning; otherwise \
+             file), list them in .opalroignore to leave them out without this warning; otherwise \
              rename them to save them."
         );
         // Said again when nothing changed, since they are still there.
@@ -2563,9 +2564,9 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             "Left out 1 entry whose name Git or Opalro keep for themselves, with everything in it:\n  \
-             sub/git~1\nSuch names stand for .git or .opal (some spellings only on Windows or \
+             sub/git~1\nSuch names stand for .git or .opalro (some spellings only on Windows or \
              macOS), so Opalro leaves them out of saves, as it does on import. If Git uses it (a \
-             submodule's or worktree's .git file), list it in .opalignore to leave it out without \
+             submodule's or worktree's .git file), list it in .opalroignore to leave it out without \
              this warning; otherwise rename it to save it."
         );
     }
@@ -2574,14 +2575,14 @@ mod tests {
     fn a_opal_spelling_is_left_out_of_a_save_with_a_warning() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        // Below the top, where `opal~1` isn't the short name of the project's own `.opal` on
+        // Below the top, where `opalro~1` isn't the short name of the project's own `.opalro` on
         // Windows; Windows drops a trailing dot, so there it takes a character macOS ignores.
         let dotted = if cfg!(windows) {
-            ".o\u{200c}pal"
+            ".o\u{200c}palro"
         } else {
-            ".opal."
+            ".opalro."
         };
-        write(root, "sub/opal~1/x", b"x");
+        write(root, "sub/opalro~1/x", b"x");
         write(root, &format!("sub/{dotted}/y"), b"y");
         write(root, "sub/keep.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
@@ -2590,7 +2591,7 @@ mod tests {
         let kinds: Vec<&str> = warnings.iter().map(|w| w.kind).collect();
         assert_eq!(kinds, ["git_names_left_out"]);
         let shown = escape_all(&format!("sub/{dotted}"));
-        let listed = format!(":\n  {shown}\n  sub/opal~1\nSuch names");
+        let listed = format!(":\n  {shown}\n  sub/opalro~1\nSuch names");
         assert!(warnings[0].message.contains(&listed), "{warnings:?}");
     }
 
@@ -2600,16 +2601,16 @@ mod tests {
         let root = dir.path();
         write(root, "keep.txt", b"x");
         if this_drive().ignores_case {
-            // The project's own folder spelled `.OPAL`, which this drive takes for `.opal`.
+            // The project's own folder spelled `.OPALRO`, which this drive takes for `.opalro`.
             drop(repo);
-            fs::rename(root.join(".opal"), root.join(".OPAL")).unwrap();
+            fs::rename(root.join(".opalro"), root.join(".OPALRO")).unwrap();
             let mut repo = Repository::open(root).unwrap();
             let saved = save_now(&mut repo).unwrap();
             assert!(warnings_of(&saved).is_empty(), "{saved:?}");
             assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
         } else {
             // Where letter case counts it is another folder, which is left out and named.
-            write(root, ".OPAL/x", b"x");
+            write(root, ".OPALRO/x", b"x");
             let saved = save_now(&mut repo).unwrap();
             let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
             assert_eq!(kinds, ["git_names_left_out"]);
@@ -2628,7 +2629,7 @@ mod tests {
         write(root, "wt/src/main.rs", b"fn main() {}\n");
         write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
         write(root, "clone/readme.md", b"x");
-        write(root, "game/.opal/format", b"opal-repository 1\n");
+        write(root, "game/.opalro/format", b"opal-repository 1\n");
         write(root, "game/level.bin", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
@@ -2639,8 +2640,8 @@ mod tests {
             warnings[0].message,
             "3 folders hold a Git repository or Opalro project of their own, so saves take nothing \
              new from them:\n  clone\n  game\n  wt\nGit and Jujutsu leave such folders out too. To \
-             save a folder's files, remove its .git or .opal; to leave it out without this \
-             warning, list it in .opalignore."
+             save a folder's files, remove its .git or .opalro; to leave it out without this \
+             warning, list it in .opalroignore."
         );
         let again = save_now(&mut repo).unwrap();
         assert!(
@@ -2667,8 +2668,8 @@ mod tests {
             warnings_of(&saved)[0].message,
             "1 folder holds a Git repository or Opalro project of its own, so saves take nothing new \
              from it:\n  lib\nGit and Jujutsu leave such folders out too. To save its files, \
-             remove its .git or .opal; to leave it out without this warning, list it in \
-             .opalignore."
+             remove its .git or .opalro; to leave it out without this warning, list it in \
+             .opalroignore."
         );
         let tree = saved_tree(repo.store(), saved_root(saved));
         assert_eq!(tree.keys().collect::<Vec<_>>(), ["lib", "lib/a.txt"]);
@@ -2693,7 +2694,7 @@ mod tests {
         dir.metadata(OsStr::new(name)).is_ok()
     }
 
-    /// The names asked for `.git` and `.opal` in a folder of plain ASCII names: none on Windows,
+    /// The names asked for `.git` and `.opalro` in a folder of plain ASCII names: none on Windows,
     /// whose listing shows short names, and both elsewhere, where it doesn't.
     const PLAIN_LOOKUPS: usize = if cfg!(windows) { 0 } else { 2 };
 
@@ -2732,7 +2733,7 @@ mod tests {
         write(root, "wt/.git", b"gitdir: /elsewhere\n");
         write(root, "wt/a.txt", b"x");
         write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
-        write(root, "game/.opal/format", b"opal-repository 1\n");
+        write(root, "game/.opalro/format", b"opal-repository 1\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);
@@ -2807,7 +2808,7 @@ mod tests {
     fn a_opal_file_is_not_a_project() {
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, "sub/.opal", b"x");
+        write(root, "sub/.opalro", b"x");
         write(root, "sub/x.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         let kinds: Vec<&str> = warnings_of(&saved).iter().map(|w| w.kind).collect();
@@ -2821,21 +2822,21 @@ mod tests {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, "sub/.gitignore", b"*.log\n");
-        write(root, "sub/.opalignore", b"*.tmp\n");
+        write(root, "sub/.opalroignore", b"*.tmp\n");
         write(root, "sub/a.log", b"x");
         write(root, "sub/b.tmp", b"x");
         write(root, "sub/c.txt", b"x");
-        write(root, "only/.opalignore", b"*.tmp\n");
+        write(root, "only/.opalroignore", b"*.tmp\n");
         write(root, "only/b.tmp", b"x");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
             [
                 "only",
-                "only/.opalignore",
+                "only/.opalroignore",
                 "sub",
                 "sub/.gitignore",
-                "sub/.opalignore",
+                "sub/.opalroignore",
                 "sub/c.txt"
             ]
         );
@@ -3105,7 +3106,7 @@ mod tests {
     }
 
     #[test]
-    fn braces_in_opalignore_are_literal_as_in_git() {
+    fn braces_in_opalroignore_are_literal_as_in_git() {
         let (dir, mut repo) = project();
         let root = dir.path();
         let patterns = [
@@ -3114,7 +3115,7 @@ mod tests {
             "x{y",            // an unclosed brace is no error
             "}",
         ];
-        write(root, ".opalignore", patterns.join("\n").as_bytes());
+        write(root, ".opalroignore", patterns.join("\n").as_bytes());
         for name in ["{prod,dev}.env", "{kept}.txt", "x{y", "}"] {
             write(root, name, b"ignored");
         }
@@ -3124,7 +3125,7 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [".opalignore", "dev.env", "kept.txt", "prod.env", "xy"]
+            [".opalroignore", "dev.env", "kept.txt", "prod.env", "xy"]
         );
     }
 
@@ -3143,7 +3144,7 @@ mod tests {
             "cafe\u{301}.txt",  // decomposed, and used as written
             "\\B.md",           // where letter case is ignored, Git leaves this capital alone
         ];
-        write(root, ".opalignore", lines.join("\n").as_bytes());
+        write(root, ".opalroignore", lines.join("\n").as_bytes());
         for name in [
             "x.pyc", "x.pyo", "1.log", "a.log", "a/b", "trail", "bar[", "x.tmp", "B.md",
         ] {
@@ -3154,7 +3155,7 @@ mod tests {
         let drive = this_drive();
         let saved = save_now(&mut repo).unwrap();
         let mut want = vec![
-            ".opalignore",
+            ".opalroignore",
             "1.log",
             "a",
             "a/b",
@@ -3176,27 +3177,27 @@ mod tests {
     }
 
     #[test]
-    fn the_scan_stops_at_the_first_opalignore_problem() {
+    fn the_scan_stops_at_the_first_opalroignore_problem() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         // The top file leaves no room for another below it.
         write(
             root,
-            ".opalignore",
+            ".opalroignore",
             &comment_of(safe_fs::MAX_IGNORE_IN_FORCE_BYTES),
         );
-        write(root, "a/.opalignore", b"#\n");
-        write(root, "b/.opalignore", b"#\n");
+        write(root, "a/.opalroignore", b"#\n");
+        write(root, "b/.opalroignore", b"#\n");
         let mut rules =
             WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         assert!(!rules.keeps(&root.join("a"), true));
-        // Past the first problem nothing is kept, and no other .opalignore is read.
+        // Past the first problem nothing is kept, and no other .opalroignore is read.
         assert!(!rules.keeps(&root.join("b"), true));
         assert!(!rules.keeps(&root.join("c.txt"), false));
         let Some(SaveError::Ignore { detail }) = rules.problem else {
             panic!("no problem kept");
         };
-        assert!(detail.starts_with("a/.opalignore: "), "{detail}");
+        assert!(detail.starts_with("a/.opalroignore: "), "{detail}");
         assert_eq!(rules.read, safe_fs::MAX_IGNORE_IN_FORCE_BYTES);
     }
 
@@ -3205,7 +3206,7 @@ mod tests {
         // As in Git, which matches bytes and folds only ASCII letters.
         let (dir, mut repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", "?.txt\nä.md\n".as_bytes());
+        write(root, ".opalroignore", "?.txt\nä.md\n".as_bytes());
         write(root, "a.txt", b"x");
         write(root, "ä.txt", b"x");
         write(root, "one/ä.md", b"x");
@@ -3213,7 +3214,7 @@ mod tests {
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [".opalignore", "one", "two", "two/Ä.md", "ä.txt"]
+            [".opalroignore", "one", "two", "two/Ä.md", "ä.txt"]
         );
     }
 
@@ -3221,8 +3222,8 @@ mod tests {
     fn a_folders_ignore_rules_end_with_the_folder() {
         let (dir, repo) = project();
         let root = dir.path();
-        write(root, ".opalignore", b"*.log\n");
-        write(root, "a/.opalignore", b"!x.log\n");
+        write(root, ".opalroignore", b"*.log\n");
+        write(root, "a/.opalroignore", b"!x.log\n");
         fs::create_dir(root.join("b")).unwrap();
         let mut base = newest(&repo);
         let mut rules =
@@ -3263,9 +3264,9 @@ mod tests {
         write(dir.path(), "secret.key", b"x");
         write(dir.path(), "m", b"x");
         write(dir.path(), "z", b"x");
-        write(dir.path(), ".opalignore", b"secret.key\n[z-a]\n");
+        write(dir.path(), ".opalroignore", b"secret.key\n[z-a]\n");
         let saved = save_now(&mut repo).unwrap();
-        assert_eq!(saved_paths(&repo, saved), [".opalignore", "m"]);
+        assert_eq!(saved_paths(&repo, saved), [".opalroignore", "m"]);
     }
 
     /// The save must stop with `Ignore` naming the top folder's ignore file `name` by its project
@@ -3283,16 +3284,16 @@ mod tests {
     }
 
     #[test]
-    fn symlinked_opalignore_stops_the_save() {
+    fn symlinked_opalroignore_stops_the_save() {
         let (dir, mut repo) = project();
         let outside = tempfile::tempdir().unwrap();
         let patterns = outside.path().join("patterns");
         fs::write(&patterns, b"*.key\n").unwrap();
         write(dir.path(), "secret.key", b"x");
-        if !crate::test_support::symlink(&patterns, &dir.path().join(".opalignore")) {
+        if !crate::test_support::symlink(&patterns, &dir.path().join(".opalroignore")) {
             return;
         }
-        let detail = assert_ignore_problem(&mut repo, ".opalignore");
+        let detail = assert_ignore_problem(&mut repo, ".opalroignore");
         assert!(detail.contains("regular file"), "{detail}");
         assert!(!detail.contains(dir.path().to_str().unwrap()), "{detail}");
     }
@@ -3300,7 +3301,7 @@ mod tests {
     #[test]
     fn an_oversized_ignore_file_stops_the_save() {
         // Only a .gitignore that isn't a regular file is skipped.
-        for name in [".gitignore", ".opalignore"] {
+        for name in [".gitignore", ".opalroignore"] {
             let (dir, mut repo) = project();
             // One comment line, 1 MiB + 1 byte with its newline.
             let mut big = vec![b'#'; 1 << 20];
@@ -3312,7 +3313,7 @@ mod tests {
         }
     }
 
-    /// A `.opalignore` of `len` bytes that holds no pattern.
+    /// A `.opalroignore` of `len` bytes that holds no pattern.
     fn comment_of(len: u64) -> Vec<u8> {
         vec![b'#'; usize::try_from(len).unwrap()]
     }
@@ -3326,38 +3327,38 @@ mod tests {
     }
 
     #[test]
-    fn opalignore_files_in_force_at_one_folder_total_at_most_one_mebibyte() {
+    fn opalroignore_files_in_force_at_one_folder_total_at_most_one_mebibyte() {
         let (dir, repo) = project();
         let root = dir.path();
         let half = safe_fs::MAX_IGNORE_IN_FORCE_BYTES / 2;
-        write(root, ".opalignore", &comment_of(half));
-        write(root, "a/.opalignore", &comment_of(half));
+        write(root, ".opalroignore", &comment_of(half));
+        write(root, "a/.opalroignore", &comment_of(half));
         // `a`'s file is not in force at `b`, so the two folders do not add up.
-        write(root, "b/.opalignore", &comment_of(half));
+        write(root, "b/.opalroignore", &comment_of(half));
         assert!(walk_project(&repo, SaveLimits::default()).is_ok());
         // Six bytes more below `a` put it past the limit; its pattern is never read.
-        write(root, "a/x/.opalignore", b"[z-a]\n");
+        write(root, "a/x/.opalroignore", b"[z-a]\n");
         let detail = walk_problem(&repo);
-        assert!(detail.starts_with("a/x/.opalignore: "), "{detail}");
+        assert!(detail.starts_with("a/x/.opalroignore: "), "{detail}");
         assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
         assert!(!detail.contains("[z-a]"), "{detail}");
     }
 
     #[test]
-    fn one_save_reads_at_most_sixteen_mebibytes_of_opalignore_files() {
+    fn one_save_reads_at_most_sixteen_mebibytes_of_opalroignore_files() {
         let (dir, repo) = project();
         let root = dir.path();
         // As big as a file may be, and not UTF-8: Git reads such a file all the same.
         let mut each = comment_of(safe_fs::MAX_IGNORE_FILE_BYTES - 1);
         each.push(0xff);
         for i in 0..safe_fs::MAX_IGNORE_SAVE_BYTES / safe_fs::MAX_IGNORE_FILE_BYTES {
-            write(root, &format!("d{i}/.opalignore"), &each);
+            write(root, &format!("d{i}/.opalroignore"), &each);
         }
         assert!(walk_project(&repo, SaveLimits::default()).is_ok());
-        write(root, "e/.opalignore", &comment_of(1));
+        write(root, "e/.opalroignore", &comment_of(1));
         // Whichever file the walk reaches last is the one that goes over.
         let detail = walk_problem(&repo);
-        assert!(detail.contains("/.opalignore: "), "{detail}");
+        assert!(detail.contains("/.opalroignore: "), "{detail}");
         assert!(detail.contains("larger than 16777216 bytes"), "{detail}");
     }
 
@@ -3370,7 +3371,7 @@ mod tests {
             .map(|i| format!("Assets/Textures/Characters/Hero/diffuse_{i:05}.png\n"))
             .collect();
         text.push_str(&"?".repeat(300_000));
-        write(dir.path(), ".opalignore", text.as_bytes());
+        write(dir.path(), ".opalroignore", text.as_bytes());
         let hero = "Assets/Textures/Characters/Hero";
         write(dir.path(), &format!("{hero}/diffuse_00042.png"), b"x");
         write(dir.path(), &format!("{hero}/normal_00042.png"), b"x");
@@ -3378,7 +3379,7 @@ mod tests {
         assert_eq!(
             saved_paths(&repo, saved),
             [
-                ".opalignore",
+                ".opalroignore",
                 "Assets",
                 "Assets/Textures",
                 "Assets/Textures/Characters",
@@ -3390,11 +3391,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn opalignore_pipe_stops_the_save_without_hanging() {
+    fn opalroignore_pipe_stops_the_save_without_hanging() {
         let (dir, mut repo) = project();
         write(dir.path(), "sub/secret.key", b"x");
         let made = std::process::Command::new("mkfifo")
-            .arg(dir.path().join("sub/.opalignore"))
+            .arg(dir.path().join("sub/.opalroignore"))
             .status()
             .unwrap();
         assert!(made.success());
@@ -3409,7 +3410,7 @@ mod tests {
             .expect("the save hung on a named pipe");
         match result {
             Err(SaveError::Ignore { detail }) => assert!(
-                detail.starts_with("sub/.opalignore is not a regular file"),
+                detail.starts_with("sub/.opalroignore is not a regular file"),
                 "{detail}"
             ),
             other => panic!("{other:?}"),
@@ -3417,28 +3418,28 @@ mod tests {
     }
 
     #[test]
-    fn a_opalignore_that_isnt_utf8_is_read_as_git_reads_it() {
+    fn a_opalroignore_that_isnt_utf8_is_read_as_git_reads_it() {
         let (dir, mut repo) = project();
         write(dir.path(), "secret.key", b"x");
         write(dir.path(), "keep.txt", b"x");
         // Git reads bytes: a line that isn't UTF-8 stops nothing, and those after it apply.
-        write(dir.path(), ".opalignore", b"# \xff\n\xff*\nsecret.key\n");
+        write(dir.path(), ".opalroignore", b"# \xff\n\xff*\nsecret.key\n");
         let saved = save_now(&mut repo).unwrap();
-        assert_eq!(saved_paths(&repo, saved), [".opalignore", "keep.txt"]);
+        assert_eq!(saved_paths(&repo, saved), [".opalroignore", "keep.txt"]);
     }
 
     #[cfg(unix)]
     #[test]
-    fn opalignore_that_is_a_folder_stops_the_save() {
+    fn opalroignore_that_is_a_folder_stops_the_save() {
         let (dir, mut repo) = project();
         write(dir.path(), "secret.key", b"x");
-        fs::create_dir(dir.path().join(".opalignore")).unwrap();
-        assert_ignore_problem(&mut repo, ".opalignore");
+        fs::create_dir(dir.path().join(".opalroignore")).unwrap();
+        assert_ignore_problem(&mut repo, ".opalroignore");
     }
 
     #[test]
     fn an_unreadable_ignore_file_stops_the_save() {
-        for name in [".gitignore", ".opalignore"] {
+        for name in [".gitignore", ".opalroignore"] {
             let (dir, mut repo) = project();
             let head = repo.head().unwrap();
             let rel = format!("sub/{name}");
@@ -3474,7 +3475,7 @@ mod tests {
     }
 
     #[test]
-    fn gitignore_rules_apply_like_opalignore_rules() {
+    fn gitignore_rules_apply_like_opalroignore_rules() {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, ".gitignore", b"*.log\n!keep.log\nbuild/\n");
@@ -3493,17 +3494,17 @@ mod tests {
     }
 
     #[test]
-    fn opalignore_lines_come_after_gitignore_lines() {
+    fn opalroignore_lines_come_after_gitignore_lines() {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, ".gitignore", b"*.log\n");
-        write(root, ".opalignore", b"!keep.log\n");
+        write(root, ".opalroignore", b"!keep.log\n");
         write(root, "keep.log", b"x");
         write(root, "other.log", b"x");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
             saved_paths(&repo, saved),
-            [".gitignore", ".opalignore", "keep.log"]
+            [".gitignore", ".opalroignore", "keep.log"]
         );
     }
 
@@ -3567,11 +3568,11 @@ mod tests {
         let head = repo.head().unwrap();
         // Each is well within its own limit; together they are past the limit for one folder.
         write(dir.path(), ".gitignore", &comment_of(600 * 1024));
-        write(dir.path(), ".opalignore", &comment_of(600 * 1024));
+        write(dir.path(), ".opalroignore", &comment_of(600 * 1024));
         match save_now(&mut repo) {
-            // The .opalignore is read second, so it is the one that goes over.
+            // The .opalroignore is read second, so it is the one that goes over.
             Err(SaveError::Ignore { detail }) => {
-                assert!(detail.starts_with(".opalignore: "), "{detail}");
+                assert!(detail.starts_with(".opalroignore: "), "{detail}");
                 assert!(detail.contains("larger than 1048576 bytes"), "{detail}");
             }
             other => panic!("{:?}", other.map(|_| ())),
@@ -3631,7 +3632,7 @@ mod tests {
         // save for its size.
         write(root, "Library/.gitignore", b"!new.txt\n");
         let too_big = comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1);
-        write(root, "Library/.opalignore", &too_big);
+        write(root, "Library/.opalroignore", &too_big);
         write(root, "Library/new.txt", b"x");
         let saved = save_now(&mut repo).unwrap();
         assert_eq!(
@@ -3721,17 +3722,17 @@ mod tests {
     }
 
     #[test]
-    fn what_opalignore_takes_back_from_gitignore_is_warned_about_when_new_or_changed() {
+    fn what_opalroignore_takes_back_from_gitignore_is_warned_about_when_new_or_changed() {
         let (dir, mut repo) = project();
         let root = dir.path();
         write(root, ".env", b"API_KEY=put-yours-here\n");
         write(root, "secrets/old.key", b"1");
         save_now(&mut repo).unwrap();
-        // Git keeps out `.env`, every `.pem` and `secrets/`, which .opalignore takes back.
+        // Git keeps out `.env`, every `.pem` and `secrets/`, which .opalroignore takes back.
         write(root, ".gitignore", b".env\n*.pem\nsecrets/\n*.log\n");
         write(
             root,
-            ".opalignore",
+            ".opalroignore",
             b"!.env\n!*.pem\n!secrets/\n!notes.txt\n",
         );
         // Unchanged, they say nothing.
@@ -3750,7 +3751,7 @@ mod tests {
             [
                 ".env",
                 ".gitignore",
-                ".opalignore",
+                ".opalroignore",
                 "deploy.pem",
                 "notes.txt",
                 "secrets",
@@ -3762,10 +3763,10 @@ mod tests {
         assert_eq!(warnings[0].kind, "gitignored_files_saved");
         assert_eq!(
             warnings[0].message,
-            "Saved 3 new or changed files that .gitignore keeps out but .opalignore takes back:\n  \
+            "Saved 3 new or changed files that .gitignore keeps out but .opalroignore takes back:\n  \
              .env\n  deploy.pem\n  secrets/new.key\nGit would leave such changes out unless the \
              files were added (with `git add -f` if Git doesn't track them yet). If they \
-             shouldn't be saved, remove the .opalignore lines that take them back and move them \
+             shouldn't be saved, remove the .opalroignore lines that take them back and move them \
              out of the project folder; this save keeps them."
         );
     }
@@ -3930,7 +3931,7 @@ mod tests {
         write(dir.path(), "sub/a.txt", b"x");
         // Read, it would stop the save for its size.
         let too_big = comment_of(safe_fs::MAX_IGNORE_FILE_BYTES + 1);
-        write(dir.path(), "sub/.opalignore", &too_big);
+        write(dir.path(), "sub/.opalroignore", &too_big);
         write(dir.path(), "new.txt", b"x");
         let saved = saved_top(&mut repo);
         let names: Vec<&str> = saved.entries().iter().map(|e| e.name.as_str()).collect();
@@ -4636,7 +4637,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(err.hint().unwrap().contains(".opalignore"));
+        assert!(err.hint().unwrap().contains(".opalroignore"));
     }
 
     #[test]
@@ -4671,9 +4672,9 @@ mod tests {
         };
         assert!(detail.contains("longer than 13 bytes"), "{detail}");
         assert!(detail.ends_with("ab\\u{202e}/cd/e.txt"), "{detail}");
-        assert!(err.hint().unwrap().contains(".opalignore"), "{err:?}");
+        assert!(err.hint().unwrap().contains(".opalroignore"), "{err:?}");
         // What a save leaves out is no part of it.
-        write(dir.path(), ".opalignore", "ab\u{202e}/\n".as_bytes());
+        write(dir.path(), ".opalroignore", "ab\u{202e}/\n".as_bytes());
         assert!(within(13).is_ok());
 
         // The last save's paths, through 255-byte names this system holds: `a`'s link is 3,845
@@ -4690,7 +4691,7 @@ mod tests {
         );
         let scan = walk_project(&repo, SaveLimits::default()).unwrap();
         let top: Vec<&str> = scan.folders[""].iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(top, [".opalignore", "a"]);
+        assert_eq!(top, [".opalroignore", "a"]);
 
         // A folder kept as it was counts its paths against the new save's limit, as its depth.
         let deep = format!("Docs/{}x", below(16));
@@ -4773,7 +4774,7 @@ mod tests {
         );
     }
 
-    /// Runs `f` on a thread with a stack of `bytes`. Windows' main thread, where `opal` runs a
+    /// Runs `f` on a thread with a stack of `bytes`. Windows' main thread, where `opalro` runs a
     /// save, has 1 MiB.
     fn on_a_stack_of<T: Send>(bytes: usize, f: impl FnOnce() -> T + Send) -> T {
         std::thread::scope(|scope| {
@@ -4810,7 +4811,7 @@ mod tests {
     // The deepest real folders a save takes, 2,048 levels of `d` whose last path is 4,095 bytes
     // (a path's limit comes before the 4,096 levels), take several seconds per test on Windows,
     // the one system that makes them, so these run on request (and in CI on Windows only), on a
-    // 1 MiB stack like `opal`'s main thread. Run with:
+    // 1 MiB stack like `opalro`'s main thread. Run with:
     // `cargo test -p opal-vcs-core --all-features --lib -- --ignored real_folders`
     const DEEPEST: usize = MAX_PATH_BYTES.div_ceil(2);
 
@@ -4934,7 +4935,7 @@ mod tests {
                 .write_all(b"bottom")
                 .unwrap();
         }
-        // Counted on this thread, beside the folders of `.opal` the project holds open, so the
+        // Counted on this thread, beside the folders of `.opalro` the project holds open, so the
         // walk runs here rather than on the thread of its own a save gives it.
         let drive = this_drive();
         let before = open_count::now();
@@ -5076,7 +5077,7 @@ mod tests {
             look_at(job)
         };
         open_at_send(Arc::clone(&gate), threads * (1 + WAITING_PER_LOOKER) + 1);
-        // Counted on this thread, which the walk runs on, beside the folders of `.opal`.
+        // Counted on this thread, which the walk runs on, beside the folders of `.opalro`.
         let drive = this_drive();
         let mut base = newest(&repo);
         let (top, dropped) = base.listing(base.root).unwrap();
@@ -5098,7 +5099,7 @@ mod tests {
     fn a_folder_opal_cant_open_is_a_folder_to_the_ignore_rules() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write(root, ".opalignore", b"cloud/\n");
+        write(root, ".opalroignore", b"cloud/\n");
         let mut rules =
             WalkState::new(root, this_drive(), Listing::empty(), Vec::new(), None).unwrap();
         // Neither is on disk, so a walk that opened one would have a problem.
@@ -5373,7 +5374,7 @@ mod tests {
             write(root, name, b"x");
         }
         save_now(&mut repo).unwrap();
-        write(root, ".opalignore", b"skip/\n");
+        write(root, ".opalroignore", b"skip/\n");
         let seen = same_either_way(root, MAX_SAVE_ENTRIES);
         assert!(seen.started && seen.ended, "{seen:?}");
     }
@@ -5482,7 +5483,7 @@ mod tests {
         while let Some(dir) = next.pop() {
             for e in fs::read_dir(&dir).unwrap() {
                 let path = e.unwrap().path();
-                if path.is_dir() && !path.ends_with(".opal") {
+                if path.is_dir() && !path.ends_with(".opalro") {
                     found.push(path.clone());
                     next.push(path);
                 }

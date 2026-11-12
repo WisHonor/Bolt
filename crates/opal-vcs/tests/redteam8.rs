@@ -34,9 +34,9 @@ fn repository(lfs: Option<&Path>) -> Env {
     env
 }
 
-/// `opal import` with `vars` set too: its exit code and what it printed on stderr.
+/// `opalro import` with `vars` set too: its exit code and what it printed on stderr.
 fn import(env: &Env, vars: &[(&str, &Path)]) -> (Option<i32>, String) {
-    let mut cmd = env.opal();
+    let mut cmd = env.opalro();
     cmd.arg("import");
     for (key, value) in vars {
         cmd.env(key, value);
@@ -98,7 +98,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_opal_can
     let vars = [("GIT_CONFIG_GLOBAL", global.as_path())];
     let (code, err) = import(&env, &vars);
     eprintln!(
-        "GIT_CONFIG_GLOBAL: Git LFS: {}\nopal import: {code:?}\n{err}",
+        "GIT_CONFIG_GLOBAL: Git LFS: {}\nopalro import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
     if code != Some(0) || saved_files(&env, main_tip(&env))["a.bin"] != b"the real picture\n" {
@@ -114,7 +114,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_opal_can
     let vars = [("GIT_CONFIG_GLOBAL", global.as_path())];
     let (code, err) = import(&env, &vars);
     eprintln!(
-        "GIT_CONFIG_GLOBAL elsewhere: Git LFS: {}\nopal import: {code:?}\n{err}",
+        "GIT_CONFIG_GLOBAL elsewhere: Git LFS: {}\nopalro import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
     if code == Some(0) || !elsewhere_stop(&err, &global.display().to_string()) {
@@ -130,7 +130,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_opal_can
     let vars = [("GIT_CONFIG_SYSTEM", system.as_path())];
     let (code, err) = import(&env, &vars);
     eprintln!(
-        "system settings: Git LFS: {}\nopal import: {code:?}\n{err}",
+        "system settings: Git LFS: {}\nopalro import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
     // Git tidies the path GIT_CONFIG_SYSTEM gives, `\` to `/` on Windows, and so does Opalro.
@@ -150,7 +150,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_opal_can
     ];
     let (code, err) = import(&env, &vars);
     eprintln!(
-        "GIT_CONFIG_NOSYSTEM: Git LFS: {}\nopal import: {code:?}\n{err}",
+        "GIT_CONFIG_NOSYSTEM: Git LFS: {}\nopalro import: {code:?}\n{err}",
         git_lfs_objects(&env, &vars)
     );
     if code != Some(0) || saved_files(&env, main_tip(&env))["a.bin"] != b"the real picture\n" {
@@ -171,7 +171,7 @@ fn rt8_1_lfs_storage_is_read_where_git_reads_it_and_the_stop_says_where_opal_can
     fs::write(env.config().join(".gitconfig"), include).unwrap();
     let (code, err) = import(&env, &[]);
     eprintln!(
-        "includeIf: Git LFS: {}\nopal import: {code:?}\n{err}",
+        "includeIf: Git LFS: {}\nopalro import: {code:?}\n{err}",
         git_lfs_objects(&env, &[])
     );
     let says = "A Git setting Opalro doesn't read (the system's Git settings, or an [includeIf] \
@@ -225,18 +225,18 @@ fn rt8_2_a_save_leaves_out_what_gits_own_ignore_list_leaves_out() {
         git_untracked(env.root(), home, &global)
     );
 
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "First"])
         .env("GIT_CONFIG_GLOBAL", &global)
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    eprintln!("opal save: {}{}", text(&out.stdout), text(&out.stderr));
+    eprintln!("opalro save: {}{}", text(&out.stdout), text(&out.stderr));
     let saved = saved_files(&env, main_tip(&env));
     let names: Vec<&String> = saved.keys().collect();
     eprintln!("saved: {names:?}");
@@ -274,7 +274,7 @@ fn rt8_3_a_blob_git_lfs_reads_as_a_pointer_never_comes_in_silently_as_text() {
         );
     }
 
-    let out = env.opal().args(["--json", "import"]).output().unwrap();
+    let out = env.opalro().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let warned = doc["warnings"]
@@ -284,7 +284,7 @@ fn rt8_3_a_blob_git_lfs_reads_as_a_pointer_never_comes_in_silently_as_text() {
         .any(|w| w["message"].as_str().unwrap_or("").contains("a.bin"));
     let saved = saved_files(&env, main_tip(&env));
     eprintln!(
-        "opal import: a.bin saved as {} bytes, the picture: {}; warned: {warned}; warnings: {}",
+        "opalro import: a.bin saved as {} bytes, the picture: {}; warned: {warned}; warnings: {}",
         saved["a.bin"].len(),
         saved["a.bin"] == picture,
         doc["warnings"]

@@ -239,7 +239,7 @@ pub fn top_folder(dir: &Path) -> Listing {
 /// Files by path, with what each holds.
 pub type Files = BTreeMap<String, Vec<u8>>;
 
-/// Every file below `dir` but `.opal` and `.git` at the top, by path, with what it holds.
+/// Every file below `dir` but `.opalro` and `.git` at the top, by path, with what it holds.
 pub fn files(dir: &Path) -> Files {
     let mut found = BTreeMap::new();
     let mut folders = vec![(dir.to_path_buf(), String::new())];
@@ -247,7 +247,7 @@ pub fn files(dir: &Path) -> Files {
         for e in std::fs::read_dir(&at).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && (name == ".opal" || name == ".git") {
+            if rel.is_empty() && (name == ".opalro" || name == ".git") {
                 continue;
             }
             let path = if rel.is_empty() {
@@ -279,9 +279,9 @@ pub fn write(env: &Env, path: &str, bytes: impl AsRef<[u8]>) {
     std::fs::write(at, bytes).unwrap();
 }
 
-/// What `opal status` finds changed.
+/// What `opalro status` finds changed.
 pub fn changed(env: &Env) -> Vec<String> {
-    let out = env.opal().args(["status", "--json"]).output().unwrap();
+    let out = env.opalro().args(["status", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     doc["changes"]
@@ -440,7 +440,7 @@ pub fn entries_with_bytes(path: &Path) -> Vec<(IndexEntry, Id)> {
 /// The kind of each copy of `id` in the store of the project at `root`, a pack at a time.
 pub fn copies_of(root: &Path, id: &Id) -> Vec<ObjectKind> {
     let mut kinds = Vec::new();
-    for pack in std::fs::read_dir(root.join(".opal/store/packs")).unwrap() {
+    for pack in std::fs::read_dir(root.join(".opalro/store/packs")).unwrap() {
         let path = pack.unwrap().path();
         if path.extension().is_some_and(|e| e == "pack")
             && let Some(copy) = PackReader::open(&path).unwrap().find(id).unwrap()
@@ -461,7 +461,7 @@ pub fn ada() -> Person {
     }
 }
 
-/// `opal save <message>` in the project at `root`, run by Ada in the test's own process.
+/// `opalro save <message>` in the project at `root`, run by Ada in the test's own process.
 pub fn save_here(root: &Path, message: &str) -> Result<SaveOutcome, SaveError> {
     let mut repo = Repository::open(root).unwrap();
     let who = ada();
@@ -557,25 +557,25 @@ pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id 
     }
 }
 
-/// Stores a listing holding the folder `.OPAL`, with `inside` in it. No listing Opalro makes holds
-/// one, so it is spelled `-OPAL`, then the bytes are changed.
+/// Stores a listing holding the folder `.OPALRO`, with `inside` in it. No listing Opalro makes holds
+/// one, so it is spelled `-OPALRO`, then the bytes are changed.
 pub fn holding_opal_spelling(pack: &mut PackSet, inside: Id) -> Id {
     let listing = Listing::new(vec![Entry {
-        name: "-OPAL".into(),
+        name: "-OPALRO".into(),
         kind: EntryKind::Folder,
         id: inside,
         size: 0,
     }])
     .unwrap()
     .encode();
-    let at = listing.windows(5).position(|w| w == b"-OPAL").unwrap();
+    let at = listing.windows(7).position(|w| w == b"-OPALRO").unwrap();
     let mut hostile = listing;
     hostile[at] = b'.';
     pack.add_record(ObjectKind::FolderListing, &hostile)
         .unwrap()
 }
 
-/// Stores a top listing holding `files` and a `.git` folder that holds a spelling of `.opal`, and
+/// Stores a top listing holding `files` and a `.git` folder that holds a spelling of `.opalro`, and
 /// returns its ID. A folder walk never reads `.git`, so the bad listing is first met comparing
 /// the save with the folder, or with another save.
 pub fn with_opal_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])]) -> Id {
@@ -601,15 +601,15 @@ pub fn with_opal_spelling_under_git(pack: &mut PackSet, files: &[(&str, &[u8])])
 }
 
 /// A started project at its first save, not on a line, with `saves` planted on `main` one after
-/// another, each holding its entries as for [`listings`]; their IDs. `opal goto` then writes each.
+/// another, each holding its entries as for [`listings`]; their IDs. `opalro goto` then writes each.
 pub fn planted_saves(saves: &[&[(&str, EntryKind, &[u8])]]) -> (Env, Vec<Id>) {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     let mut ids = Vec::new();
     for entries in saves {
         plant_save(env.root(), |pack| listings(pack, entries));
@@ -746,7 +746,7 @@ pub fn add_pack(root: &Path, add: impl FnOnce(&mut PackSet)) -> Vec<PathBuf> {
 
 // Commands that run under a limit: of time, or of memory.
 
-/// `opal <args>` in `dir`, as the test user with its settings in `config`, with its address space
+/// `opalro <args>` in `dir`, as the test user with its settings in `config`, with its address space
 /// capped at `cap_kb`, so a runaway allocation aborts instead of taking the whole machine down.
 /// Where the cap isn't enforced (macOS), a test that relies on it proves nothing.
 #[cfg(unix)]
@@ -756,21 +756,21 @@ pub fn opal_capped_at(config: &Path, dir: &Path, cap_kb: u32, args: &[&str]) -> 
         .arg(format!(
             "ulimit -v {cap_kb} 2>/dev/null; exec \"$0\" \"$@\""
         ))
-        .arg(assert_cmd::cargo::cargo_bin("opal"))
+        .arg(assert_cmd::cargo::cargo_bin("opalro"))
         .args(args)
         .current_dir(dir);
     as_test_user(&mut cmd, config);
     cmd
 }
 
-/// `opal <args>` in `dir`, as the test user with its settings in `config`, allowed at most `most`
+/// `opalro <args>` in `dir`, as the test user with its settings in `config`, allowed at most `most`
 /// open files at once.
 #[cfg(unix)]
 pub fn opal_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str]) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
         .arg(format!("ulimit -n {most} && exec \"$0\" \"$@\""))
-        .arg(assert_cmd::cargo::cargo_bin("opal"))
+        .arg(assert_cmd::cargo::cargo_bin("opalro"))
         .args(args)
         .current_dir(dir);
     as_test_user(&mut cmd, config);
@@ -779,10 +779,10 @@ pub fn opal_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str])
 
 /// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
 fn as_test_user(cmd: &mut Command, config: &Path) {
-    cmd.env("OPAL_USER_NAME", "Test")
-        .env("OPAL_USER_EMAIL", "test@example.com")
-        .env_remove("OPAL_FAULT_AT")
-        .env("OPAL_CONFIG_DIR", config)
+    cmd.env("OPALRO_USER_NAME", "Test")
+        .env("OPALRO_USER_EMAIL", "test@example.com")
+        .env_remove("OPALRO_FAULT_AT")
+        .env("OPALRO_CONFIG_DIR", config)
         // Git's own settings and ignore list are found from here (decision 047), and only here.
         .env("HOME", config)
         .env("XDG_CONFIG_HOME", config);
@@ -919,20 +919,20 @@ impl Env {
         self.work.path()
     }
 
-    /// `opal`, run in `dir` as the test user.
+    /// `opalro`, run in `dir` as the test user.
     pub fn opal_in(&self, dir: &Path) -> Opalro {
         Opalro::from_std(self.opal_process_in(dir))
     }
 
     /// `opal_in` as a process of the standard library, for a test that spawns it.
     pub fn opal_process_in(&self, dir: &Path) -> Command {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("opal"));
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("opalro"));
         cmd.current_dir(dir);
         as_test_user(&mut cmd, self.config.path());
         cmd
     }
 
-    pub fn opal(&self) -> Opalro {
+    pub fn opalro(&self) -> Opalro {
         self.opal_in(self.root())
     }
 
@@ -974,16 +974,16 @@ impl Env {
         self.git(&["rev-parse", "HEAD"])
     }
 
-    /// Runs `opal import` and fails the test unless it worked; returns what it printed.
+    /// Runs `opalro import` and fails the test unless it worked; returns what it printed.
     pub fn import(&self) -> (String, String) {
-        let out = self.opal().arg("import").output().unwrap();
+        let out = self.opalro().arg("import").output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         (text(&out.stdout), text(&out.stderr))
     }
 
-    /// Runs `opal import`, which must fail, and returns its error output.
+    /// Runs `opalro import`, which must fail, and returns its error output.
     pub fn refused_import(&self) -> String {
-        let out = self.opal().arg("import").output().unwrap();
+        let out = self.opalro().arg("import").output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
         // It had nothing to show, so stdout gets nothing, not even a heading.
         assert_eq!(text(&out.stdout), "", "{}", text(&out.stderr));
@@ -997,9 +997,9 @@ impl Env {
         (repo, state)
     }
 
-    /// `opal save` with these arguments, whatever happens.
+    /// `opalro save` with these arguments, whatever happens.
     pub fn save(&self, args: &[&str]) -> Output {
-        self.opal().arg("save").args(args).output().unwrap()
+        self.opalro().arg("save").args(args).output().unwrap()
     }
 
     /// The newest diary entry and the packs in the store: a save that wrote nothing leaves both

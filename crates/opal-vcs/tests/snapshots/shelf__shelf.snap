@@ -5,7 +5,7 @@ expression: "doc(&[\"shelf\", \"Mine\"])"
 {
   "changed_again": false,
   "not_written": [],
-  "opal_json": 1,
+  "opalro_json": 1,
   "placeholders": [],
   "removed": 3,
   "shelf": {

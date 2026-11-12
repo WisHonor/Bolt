@@ -38,7 +38,7 @@ fn head(root: &Path) -> Id {
 }
 
 fn pack_files(root: &Path) -> Vec<OsString> {
-    let mut names: Vec<OsString> = std::fs::read_dir(root.join(".opal/store/packs"))
+    let mut names: Vec<OsString> = std::fs::read_dir(root.join(".opalro/store/packs"))
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
@@ -85,11 +85,11 @@ fn an_early_flush_that_fails_stops_a_goto() {
     let said = format!("{:?}", done.map(|_| ()));
     assert!(said.contains("injected fault at flush:early"), "{said}");
     assert!(!big.exists());
-    assert!(dir.path().join(".opal/state/journal").exists());
+    assert!(dir.path().join(".opalro/state/journal").exists());
     // The next command finishes the switch.
     save_here(dir.path(), "Next").unwrap();
     assert_eq!(id_of(&big), id);
-    assert!(!dir.path().join(".opal/state/journal").exists());
+    assert!(!dir.path().join(".opalro/state/journal").exists());
 }
 
 /// One pack as stored: each entry's ID, kind, offset, stored size and a fingerprint of its
@@ -98,7 +98,7 @@ type PackAsStored = (Vec<(Id, ObjectKind, u64, u64, Id)>, Vec<u64>);
 
 /// The packs in the store of the project at `root`, as stored.
 fn packs_as_stored(root: &Path) -> Vec<PackAsStored> {
-    let mut packs: Vec<PackAsStored> = std::fs::read_dir(root.join(".opal/store/packs"))
+    let mut packs: Vec<PackAsStored> = std::fs::read_dir(root.join(".opalro/store/packs"))
         .unwrap()
         .map(|pack| {
             let entries = entries_with_bytes(&pack.unwrap().path());

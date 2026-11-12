@@ -101,7 +101,7 @@ fn a_read_only_big_file_with_unsaved_work_is_never_lost() {
     perms.set_readonly(true);
     fs::set_permissions(&big, perms).unwrap();
 
-    let out = env.opal().arg("discard").output().unwrap();
+    let out = env.opalro().arg("discard").output().unwrap();
     if out.status.code() == Some(0) {
         assert_eq!(id_of(&big), hash_content(&saved));
         ok(&env, env.root(), &["undo"]);
@@ -116,7 +116,7 @@ fn a_read_only_big_file_with_unsaved_work_is_never_lost() {
 /// A folder name as long as Windows lets a test make in one step.
 const LONG: &str = "a-folder-name-long-enough-to-pass-max-path";
 
-/// A project folder's path just under 260 characters, so that what Opalro writes in `.opal/tmp`,
+/// A project folder's path just under 260 characters, so that what Opalro writes in `.opalro/tmp`,
 /// the files in it, and Git LFS's objects in `.git/lfs/objects` are over. Its parent is made.
 fn deep_folder(base: &Path) -> PathBuf {
     let mut deep = base.to_path_buf();
@@ -130,7 +130,7 @@ fn deep_folder(base: &Path) -> PathBuf {
 }
 
 /// Paths past MAX_PATH below the project: an import of a big Git LFS file, the first save's stop
-/// at its pointer, and the `opal discard` it names, which writes the file back through `.opal/tmp`.
+/// at its pointer, and the `opalro discard` it names, which writes the file back through `.opalro/tmp`.
 /// Git itself can't work that deep, so the repository is made at a short path, then moved there.
 #[test]
 fn a_project_whose_files_pass_max_path_imports_and_writes_back_git_lfs_files() {

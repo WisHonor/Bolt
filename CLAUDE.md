@@ -24,7 +24,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 1. Never lose or corrupt user data: atomic writes, repository locking, hash verification on every read and every received object, crash safety.
 2. Security by design: treat every repository and server as potentially malicious.
 3. Testability: unit, round-trip, property-based, differential vs. Git, crash, fuzz, malicious-repo corpus; CI on Windows, macOS and Linux.
-4. Provable claims: reproducible benchmarks vs. Git, `opal verify`, a documented storage format spec.
+4. Provable claims: reproducible benchmarks vs. Git, `opalro verify`, a documented storage format spec.
 5. Correct first, fast second: measure before optimizing.
 
 ## Engineering rules (decision 022)

@@ -151,7 +151,7 @@ jobs:
       - name: Build
         run: |
           cargo build --release --locked -p opal-vcs --target "$TARGET"
-          bin="target/$TARGET/release/opal$EXE"
+          bin="target/$TARGET/release/opalro$EXE"
           if [ "$RUNNER_OS" = Linux ]; then
             ldd --version | head -n 1
             echo "Newest glibc symbol it needs: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
@@ -207,21 +207,21 @@ jobs:
               exit 1
             fi
           done
-          bash "$check" "target/$TARGET/release/opal$EXE"
+          bash "$check" "target/$TARGET/release/opalro$EXE"
       - name: Smoke test
         run: |
-          bin="$GITHUB_WORKSPACE/target/$TARGET/release/opal$EXE"
+          bin="$GITHUB_WORKSPACE/target/$TARGET/release/opalro$EXE"
           scratch=$(mktemp -d)
           if command -v cygpath > /dev/null; then scratch=$(cygpath -m "$scratch"); fi
-          export OPAL_CONFIG_DIR="$scratch/config"
-          unset OPAL_USER_NAME OPAL_USER_EMAIL
-          mkdir "$OPAL_CONFIG_DIR" "$scratch/project"
+          export OPALRO_CONFIG_DIR="$scratch/config"
+          unset OPALRO_USER_NAME OPALRO_USER_EMAIL
+          mkdir "$OPALRO_CONFIG_DIR" "$scratch/project"
           printf '[user]\nname = "Release Smoke Test"\nemail = "smoke@example.invalid"\n' \
-            > "$OPAL_CONFIG_DIR/config.toml"
+            > "$OPALRO_CONFIG_DIR/config.toml"
           cd "$scratch/project"
           set -x
           said=$("$bin" --version)
-          [ "$said" = "opal $VERSION" ]
+          [ "$said" = "opalro $VERSION" ]
           "$bin" start --preset custom
           echo "Hello" > hello.txt
           "$bin" save "First"
@@ -239,11 +239,11 @@ jobs:
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage/docs"
           gh run download "$RUN_ID" --repo "$REPO" --name third-party-licenses --dir "$stage"
-          cp "target/$TARGET/release/opal$EXE" "$stage/"
+          cp "target/$TARGET/release/opalro$EXE" "$stage/"
           cp README.md USER-AGREEMENT.md "$stage/"
           cp docs/guide.md "$stage/docs/"
           archive="opalro-$VERSION-$TARGET.$EXT"
-          files=("opal$EXE" README.md docs/guide.md USER-AGREEMENT.md
+          files=("opalro$EXE" README.md docs/guide.md USER-AGREEMENT.md
                  THIRD-PARTY-LICENSES.html THIRD-PARTY-LICENSES-RUST.html)
           # Not -F: with -i it aborts in Git for Windows' grep.
           s=0
@@ -446,7 +446,7 @@ jobs:
       - name: What the program declares, against what the guide says it needs
         if: runner.os != 'Windows'
         run: |
-          bin="$RUNNER_TEMP/pkg/opal"
+          bin="$RUNNER_TEMP/pkg/opalro"
           if [ "$RUNNER_OS" = Linux ]; then
             grep -qF 'glibc 2.34 or newer' docs/guide.md
             newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
@@ -472,13 +472,13 @@ jobs:
         run: bash .github/release/make-git-repo.sh "$RUNNER_TEMP/repo"
       - name: The clean-machine script
         if: runner.os != 'Windows'
-        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/opal" "$VERSION" "$RUNNER_TEMP/repo"
+        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/opalro" "$VERSION" "$RUNNER_TEMP/repo"
       - name: The clean-machine script
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\clean-machine.ps1 `
-            -Opalro $env:RUNNER_TEMP\pkg\opal.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
+            -Opalro $env:RUNNER_TEMP\pkg\opalro.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
           exit $LASTEXITCODE
       - name: In bare containers
         if: matrix.containers && runner.os != 'Windows'
@@ -488,7 +488,7 @@ jobs:
           cp -R "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/repo" .github/release/clean-machine.sh "$mount/"
           for image in $CONTAINERS; do
             echo "::group::$image"
-            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/opal "$VERSION" /w/repo
+            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/opalro "$VERSION" /w/repo
             echo "::endgroup::"
           done
       - name: In bare containers
@@ -504,7 +504,7 @@ jobs:
           foreach ($image in $env:CONTAINERS -split ' ') {
             Write-Host "::group::$image"
             docker run --rm -v "${mount}:C:\w" $image powershell -NoProfile -ExecutionPolicy Bypass `
-              -File C:\w\clean-machine.ps1 -Opalro C:\w\pkg\opal.exe -Version $env:VERSION -GitRepo C:\w\repo
+              -File C:\w\clean-machine.ps1 -Opalro C:\w\pkg\opalro.exe -Version $env:VERSION -GitRepo C:\w\repo
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Host '::endgroup::'
           }
@@ -569,13 +569,13 @@ jobs:
           fi
       - name: The tries
         if: runner.os != 'Windows'
-        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/opal"
+        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/opalro"
       - name: The tries
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\ordinary-computers.ps1 `
-            -Opalro $env:RUNNER_TEMP\pkg\opal.exe
+            -Opalro $env:RUNNER_TEMP\pkg\opalro.exe
           exit $LASTEXITCODE
 
   # The only job that may write, a draft release: only on a hand start from main, never elsewhere.

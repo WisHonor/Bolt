@@ -1,4 +1,4 @@
-//! `opal save --amend`, end to end.
+//! `opalro save --amend`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -14,7 +14,7 @@ use support::{Env, changed, files, head, holding, main_tip, saved_files, text, w
 /// A project with `entries` saved on `main` as "Files".
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -25,9 +25,9 @@ fn project(entries: &[(&str, &str)]) -> Env {
     env
 }
 
-/// `opal <args>`, which must succeed; what it printed.
+/// `opalro <args>`, which must succeed; what it printed.
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -37,10 +37,10 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// `opal <args>`, which must fail and change nothing; what it said on stderr.
+/// `opalro <args>`, which must fail and change nothing; what it said on stderr.
 fn refused(env: &Env, args: &[&str]) -> String {
     let before = env.standing();
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -52,7 +52,7 @@ fn refused(env: &Env, args: &[&str]) -> String {
 }
 
 fn json(env: &Env, args: &[&str]) -> Value {
-    let out = env.opal().args(args).arg("--json").output().unwrap();
+    let out = env.opalro().args(args).arg("--json").output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
@@ -69,9 +69,9 @@ fn amend_replaces_the_newest_save_keeping_change_id_parents_and_author() {
     write(&env, "a.txt", "A\n");
     write(&env, "b.txt", "b\n");
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "--amend", "Files, and b"])
-        .env("OPAL_USER_NAME", "Grace")
+        .env("OPALRO_USER_NAME", "Grace")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -163,7 +163,8 @@ fn amend_with_nothing_new_says_so() {
     let said = ok(&env, &["save", "--amend", "Files"]);
     assert!(said.starts_with("Nothing to amend: "), "{said}");
     let doc = json(&env, &["save", "--amend"]);
-    let nothing = json!({"opal_json": 1, "result": "nothing_changed", "paths": [], "warnings": []});
+    let nothing =
+        json!({"opalro_json": 1, "result": "nothing_changed", "paths": [], "warnings": []});
     assert_eq!(doc, nothing);
     // With paths, only what they name counts.
     write(&env, "b.txt", "b\n");
@@ -185,7 +186,7 @@ fn amend_at_a_save_is_refused() {
     write(&env, "a.txt", "c\n");
     let err = refused(&env, &["save", "--amend", "C"]);
     assert!(err.contains("You're at a save, not on a line"), "{err}");
-    assert!(err.contains("opal goto <line>"), "{err}");
+    assert!(err.contains("opalro goto <line>"), "{err}");
     assert_eq!(fs::read(env.root().join("a.txt")).unwrap(), b"c\n");
     // An amend never makes a line, so --line is a mistake on the command line.
     let out = env.save(&["--amend", "--line", "x", "C"]);
@@ -374,15 +375,15 @@ fn an_amend_stopped_at_every_write_leaves_the_old_save_on_the_line() {
         let env = Env::empty();
         support::copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .args(["save", "--amend", "New"])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
         // An amend never writes into the folder.
         assert_eq!(files(env.root()), edited, "fault {n}");
-        let packs = env.root().join(".opal/store/packs");
+        let packs = env.root().join(".opalro/store/packs");
         let report = opal_core::verify::verify_store(&packs);
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
         let tip = main_tip(&env);

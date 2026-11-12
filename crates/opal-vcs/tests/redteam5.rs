@@ -12,7 +12,7 @@ use support::{Env, text};
 
 fn project() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -25,7 +25,7 @@ fn set_time(path: &Path, time: SystemTime) {
 }
 
 fn json(env: &Env, args: &[&str]) -> serde_json::Value {
-    let out = env.opal().arg("--json").args(args).output().unwrap();
+    let out = env.opalro().arg("--json").args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -38,7 +38,7 @@ fn walk(dir: &Path) -> Vec<(String, String)> {
             let e = e.unwrap();
             let p = e.path();
             let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
-            if rel.starts_with(".opal") {
+            if rel.starts_with(".opalro") {
                 continue;
             }
             if e.file_type().unwrap().is_dir() {
@@ -88,14 +88,14 @@ fn rt5_1_a_file_renamed_over_a_saved_one_is_seen_and_never_lost() {
         "XXXX",
         SystemTime::now() - Duration::from_secs(3600),
     );
-    env.opal().args(["save", "First"]).assert().success();
+    env.opalro().args(["save", "First"]).assert().success();
     let first = json(&env, &["status"])["save"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     // Unpacked from one archive: both files have its one time.
     write_at(&env, "a.txt", "AAAA", one_time());
-    env.opal()
+    env.opalro()
         .args(["save", "Second", "a.txt"])
         .assert()
         .success();
@@ -114,7 +114,7 @@ fn rt5_1_a_file_renamed_over_a_saved_one_is_seen_and_never_lost() {
             .collect()
     };
     let shown = paths(&after);
-    let out = env.opal().args(["goto", &first]).output().unwrap();
+    let out = env.opalro().args(["goto", &first]).output().unwrap();
     let survived = kept(&env, "a.txt", b"KKKK");
     assert!(
         shown.iter().any(|c| c.contains("a.txt")) && survived,
@@ -133,18 +133,18 @@ fn rt5_2_an_ignored_file_in_a_folder_becoming_a_file_is_in_the_way() {
     fs::write(env.root().join(".gitignore"), "*.o\n").unwrap();
     fs::create_dir(env.root().join("d")).unwrap();
     fs::write(env.root().join("d/f"), "f").unwrap();
-    env.opal().args(["save", "A"]).assert().success();
+    env.opalro().args(["save", "A"]).assert().success();
     let a = json(&env, &["status"])["save"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     fs::remove_dir_all(env.root().join("d")).unwrap();
     fs::write(env.root().join("d"), "file d").unwrap();
-    env.opal().args(["save", "B"]).assert().success();
-    env.opal().args(["goto", &a]).assert().success();
+    env.opalro().args(["save", "B"]).assert().success();
+    env.opalro().args(["goto", &a]).assert().success();
     // A build output, ignored, made before the goto.
     fs::write(env.root().join("d/x.o"), "build").unwrap();
-    let out = env.opal().args(["goto", "main"]).output().unwrap();
+    let out = env.opalro().args(["goto", "main"]).output().unwrap();
     let said = text(&out.stderr) + &text(&out.stdout);
     let status = json(&env, &["status"]);
     let whole = if out.status.success() {
@@ -182,7 +182,7 @@ fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
     env.git(&["checkout", "-q", "main"]);
     env.git(&["branch", "-q", "-D", "side"]);
     env.import();
-    let history = text(&env.opal().args(["history"]).output().unwrap().stdout);
+    let history = text(&env.opalro().args(["history"]).output().unwrap().stdout);
     let shown = history
         .lines()
         .find(|l| l.contains("Fix the security bug"))
@@ -191,7 +191,7 @@ fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
     assert!(shown.contains(short), "{history}");
     // The user copies the change ID history shows for the fix: it names the line too, so goto
     // refuses it, naming both, and changes nothing.
-    let out = env.opal().args(["goto", short]).output().unwrap();
+    let out = env.opalro().args(["goto", short]).output().unwrap();
     let said = text(&out.stderr);
     let now = fs::read_to_string(env.root().join("app.txt")).unwrap();
     assert!(
@@ -199,11 +199,14 @@ fn rt5_3_goto_by_the_change_id_history_shows_reaches_that_save() {
             && now == "newer\n"
             && said.contains("name of a line")
             && said.contains(&letters),
-        "history shows: {shown}\nopal goto {short}: {}{said}app.txt now holds: {now:?}",
+        "history shows: {shown}\nopalro goto {short}: {}{said}app.txt now holds: {now:?}",
         text(&out.stdout)
     );
     // One more letter reaches the save.
-    env.opal().args(["goto", &letters[..5]]).assert().success();
+    env.opalro()
+        .args(["goto", &letters[..5]])
+        .assert()
+        .success();
     let now = fs::read_to_string(env.root().join("app.txt")).unwrap();
     assert_eq!(now, "safe version\n");
 }
@@ -220,18 +223,18 @@ fn rt5_4_goto_never_changes_a_file_outside_through_a_hard_link() {
     let tool = env.root().join("tool.sh");
     fs::write(&tool, "#!/bin/sh\necho hi\n").unwrap();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
-    env.opal().args(["save", "Plain"]).assert().success();
+    env.opalro().args(["save", "Plain"]).assert().success();
     let plain = json(&env, &["status"])["save"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-    env.opal().args(["save", "Executable"]).assert().success();
-    env.opal().args(["goto", &plain]).assert().success();
+    env.opalro().args(["save", "Executable"]).assert().success();
+    env.opalro().args(["goto", &plain]).assert().success();
     // The user keeps one copy of the script, linked into the project.
     fs::remove_file(&tool).unwrap();
     fs::hard_link(&theirs, &tool).unwrap();
-    let out = env.opal().args(["goto", "main"]).output().unwrap();
+    let out = env.opalro().args(["goto", "main"]).output().unwrap();
     let mode = fs::metadata(&theirs).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode,
@@ -251,13 +254,13 @@ fn rt5_5_a_file_copied_over_a_saved_one_keeping_its_time_is_seen_and_never_lost(
         "XXXX",
         SystemTime::now() - Duration::from_secs(3600),
     );
-    env.opal().args(["save", "First"]).assert().success();
+    env.opalro().args(["save", "First"]).assert().success();
     let first = json(&env, &["status"])["save"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     write_at(&env, "a.txt", "AAAA", one_time());
-    env.opal()
+    env.opalro()
         .args(["save", "Second", "a.txt"])
         .assert()
         .success();
@@ -267,7 +270,7 @@ fn rt5_5_a_file_copied_over_a_saved_one_keeping_its_time_is_seen_and_never_lost(
     write_at(&env, "a.txt", "KKKK", one_time());
     let after = json(&env, &["status"]);
     let shown = after["changes"].to_string();
-    let out = env.opal().args(["goto", &first]).output().unwrap();
+    let out = env.opalro().args(["goto", &first]).output().unwrap();
     let survived = kept(&env, "a.txt", b"KKKK");
     assert!(
         shown.contains("a.txt") && survived,
@@ -285,17 +288,17 @@ fn rt5_6_a_folder_becoming_a_file_in_another_case_is_not_in_its_own_way() {
     let env = project();
     fs::create_dir(env.root().join("d")).unwrap();
     fs::write(env.root().join("d/f"), "f").unwrap();
-    env.opal().args(["save", "A"]).assert().success();
+    env.opalro().args(["save", "A"]).assert().success();
     let a = json(&env, &["status"])["save"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
     fs::remove_dir_all(env.root().join("d")).unwrap();
     fs::write(env.root().join("D"), "file D").unwrap();
-    env.opal().args(["save", "B"]).assert().success();
-    env.opal().args(["goto", &a]).assert().success();
+    env.opalro().args(["save", "B"]).assert().success();
+    env.opalro().args(["goto", &a]).assert().success();
     // Nothing unsaved, nothing ignored: the folder d holds only the saved d/f.
-    let out = env.opal().args(["goto", "main"]).output().unwrap();
+    let out = env.opalro().args(["goto", "main"]).output().unwrap();
     assert!(
         out.status.success() && fs::read(env.root().join("D")).is_ok_and(|b| b == b"file D"),
         "goto: {:?} {}\nfolder now: {:?}",

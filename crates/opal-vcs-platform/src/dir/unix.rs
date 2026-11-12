@@ -118,7 +118,7 @@ pub(super) fn create_new(dir: &OwnedFd, name: &OsStr, executable: bool) -> io::R
     // The umask may have taken bits away. A drive that can't hold modes (FAT, say) refuses: the
     // new, empty file goes again, so trying once more doesn't find it in the way.
     if let Err(e) = rustix::fs::fchmod(&fd, mode(executable)) {
-        // By name, as Unix can't remove through a handle: Opalro makes files only in `.opal/tmp`,
+        // By name, as Unix can't remove through a handle: Opalro makes files only in `.opalro/tmp`,
         // under random names no other program writes there.
         let _ = rustix::fs::unlinkat(dir, name, AtFlags::empty());
         return Err(e.into());

@@ -5,7 +5,7 @@ expression: "discard_json(&env, &[])"
 {
   "folders": 0,
   "not_written": [],
-  "opal_json": 1,
+  "opalro_json": 1,
   "placeholders": [],
   "removed_paths": [
     "n.txt"

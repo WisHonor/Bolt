@@ -1,4 +1,4 @@
-//! `opal changes`, end to end.
+//! `opalro changes`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -12,20 +12,20 @@ use support::{Env, text};
 /// A started project with `files` saved.
 fn project(files: &[(&str, &[u8])]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     for (name, bytes) in files {
         fs::write(env.root().join(name), bytes).unwrap();
     }
-    env.opal().args(["save", "Files"]).assert().success();
+    env.opalro().args(["save", "Files"]).assert().success();
     env
 }
 
-/// `opal changes` with `args`, which must succeed; returns what it printed.
+/// `opalro changes` with `args`, which must succeed; returns what it printed.
 fn changes(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().arg("changes").args(args).output().unwrap();
+    let out = env.opalro().arg("changes").args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     text(&out.stdout)
 }
@@ -84,9 +84,9 @@ fn a_slow_diff_is_cut_at_its_deadline_and_said() {
     let env = project(&[("a.txt", numbered(1..=50).as_bytes())]);
     env.overwrite("a.txt", &numbered(1..=50).replace("line 25\n", "x\n"));
     let out = env
-        .opal()
+        .opalro()
         .arg("changes")
-        .env("OPAL_DIFF_DEADLINE_MS", "0")
+        .env("OPALRO_DIFF_DEADLINE_MS", "0")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -133,7 +133,7 @@ fn nothing_matching_is_said_plainly() {
         "{save}"
     );
     env.overwrite("a.txt", "a\n");
-    env.opal().args(["save", "A"]).assert().success();
+    env.opalro().args(["save", "A"]).assert().success();
     assert!(changes(&env, &[]).starts_with("Nothing changed since "));
     env.overwrite("a.txt", "b\n");
     let none = changes(&env, &["nothere.txt"]);
@@ -187,7 +187,7 @@ fn control_characters_in_lines_are_escaped() {
 fn changes_of_a_save_compare_with_its_first_parent() {
     let env = project(&[("a.txt", b"first\n")]);
     env.overwrite("a.txt", "second\n");
-    env.opal().args(["save", "Second"]).assert().success();
+    env.opalro().args(["save", "Second"]).assert().success();
     env.overwrite("a.txt", "unsaved\n");
     let out = changes(&env, &["--save", "main"]);
     assert!(out.contains("-first\n+second\n"), "{out}");
@@ -208,7 +208,7 @@ fn only_line_endings_changed_is_said() {
     );
     // Both ways at once names no way.
     env.overwrite("a.txt", "one\r\ntwo\n");
-    env.opal().args(["save", "Mixed"]).assert().success();
+    env.opalro().args(["save", "Mixed"]).assert().success();
     env.overwrite("a.txt", "one\ntwo\r\n");
     let out = changes(&env, &[]);
     assert!(out.contains("(only line endings changed)\n"), "{out}");
@@ -220,7 +220,7 @@ fn changes_json_matches_its_snapshot() {
     env.overwrite("a.txt", "one\n2\nthree\n");
     fs::write(env.root().join("b.bin"), b"\0\0").unwrap();
     fs::write(env.root().join("c.txt"), "new").unwrap();
-    let out = env.opal().args(["--json", "changes"]).output().unwrap();
+    let out = env.opalro().args(["--json", "changes"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let mut doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let redact = |v: &mut serde_json::Value| *v = "[redacted]".into();
@@ -246,7 +246,7 @@ fn a_pair_of_lines_that_differ_only_in_their_ending_is_marked() {
         "{out}"
     );
     // In JSON both lines of the pair say so, and no other line has the field.
-    let out = env.opal().args(["--json", "changes"]).output().unwrap();
+    let out = env.opalro().args(["--json", "changes"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let marked: Vec<(&str, &str, Option<bool>)> = doc["changes"][0]["hunks"][0]["lines"]
@@ -304,7 +304,7 @@ fn a_stdout_that_fails_mid_document_ends_it_with_the_error_on_stderr() {
 #[test]
 fn a_spelling_of_opal_in_the_save_you_are_on_is_told_as_that_saves() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -313,13 +313,13 @@ fn a_spelling_of_opal_in_the_save_you_are_on_is_told_as_that_saves() {
     });
     let on = support::main_tip(&env);
     fs::write(env.root().join("a.txt"), "a\n").unwrap();
-    let out = env.opal().args(["changes", "--json"]).output().unwrap();
+    let out = env.opalro().args(["changes", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         doc["error"]["message"],
         format!(
-            "Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+            "Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
              writes, so it can't be used.",
             on.short_hex()
         ),

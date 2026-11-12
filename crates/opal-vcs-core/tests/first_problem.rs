@@ -42,7 +42,7 @@ fn save_removing(lay_out: impl FnOnce(&Path), gone: &str) -> Result<SaveOutcome,
 fn too_large_rules(root: &Path, rel: &str) {
     fs::create_dir(root.join(rel)).unwrap();
     fs::write(
-        root.join(rel).join(".opalignore"),
+        root.join(rel).join(".opalroignore"),
         vec![b'#'; (1 << 20) + 1],
     )
     .unwrap();
@@ -73,7 +73,7 @@ fn the_first_problem_by_path_is_the_one_reported() {
     );
     match saved {
         Err(SaveError::Ignore { detail }) => {
-            assert!(detail.starts_with("a/.opalignore"), "{detail}")
+            assert!(detail.starts_with("a/.opalroignore"), "{detail}")
         }
         other => panic!("{:?}", other.map(|_| ())),
     }

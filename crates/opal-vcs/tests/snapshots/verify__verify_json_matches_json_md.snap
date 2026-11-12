@@ -10,7 +10,7 @@ expression: found
     "message": "[redacted]"
   },
   "objects": 8,
-  "opal_json": 1,
+  "opalro_json": 1,
   "packs": 3,
   "problems": [
     {

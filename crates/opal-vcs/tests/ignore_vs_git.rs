@@ -25,7 +25,7 @@ use unicode_normalization::UnicodeNormalization;
 struct Tree {
     files: Vec<String>,
     /// Rule file text by folder (`""` is the top one), written as `.gitignore` for Git and
-    /// `.opalignore` for Opalro.
+    /// `.opalroignore` for Opalro.
     rules: BTreeMap<String, Vec<u8>>,
 }
 
@@ -66,7 +66,7 @@ const PIECES: &[&str] = &[
     "\\ ",
 ];
 const BEFORE: &[&str] = &["", "", "", "!", "/", "**/", "!/"];
-/// For a `.opalignore` beside a `.gitignore`: mostly lines that take a path back.
+/// For a `.opalroignore` beside a `.gitignore`: mostly lines that take a path back.
 const TAKE_BACK: &[&str] = &["!", "!", "!", "!/", "!**/", ""];
 const AFTER: &[&str] = &["", "", "", "/", "  ", "\\ ", "/**", "*", "\\"];
 
@@ -275,12 +275,12 @@ fn ignore_tree() -> impl Strategy<Value = Tree> {
         })
 }
 
-/// A tree and the `.opalignore` texts to lay beside its `.gitignore` files, by folder.
+/// A tree and the `.opalroignore` texts to lay beside its `.gitignore` files, by folder.
 type WithOpalignore = (Tree, BTreeMap<String, Vec<u8>>);
 
-/// Trees of `ignore_tree`'s kind with a `.opalignore` of lines that mostly take paths back in
+/// Trees of `ignore_tree`'s kind with a `.opalroignore` of lines that mostly take paths back in
 /// some folders, `.gitignore` or not.
-fn tree_with_opalignore() -> impl Strategy<Value = WithOpalignore> {
+fn tree_with_opalroignore() -> impl Strategy<Value = WithOpalignore> {
     ignore_tree()
         .prop_flat_map(|tree| {
             let texts: Vec<_> = folders_of(&tree.files)
@@ -294,19 +294,19 @@ fn tree_with_opalignore() -> impl Strategy<Value = WithOpalignore> {
             (Just(tree), texts)
         })
         .prop_map(|(tree, texts)| {
-            let opalignore = texts
+            let opalroignore = texts
                 .into_iter()
                 .filter_map(|(folder, text)| Some((folder, text?)))
                 .collect();
-            (tree, opalignore)
+            (tree, opalroignore)
         })
 }
 
-/// The tree with a `.opalignore` beside every `.gitignore`, the same lines in both.
+/// The tree with a `.opalroignore` beside every `.gitignore`, the same lines in both.
 fn write_tree(root: &Path, tree: &Tree) {
     write_for_git(root, tree);
     for (folder, text) in &tree.rules {
-        std::fs::write(root.join(folder).join(".opalignore"), text).unwrap();
+        std::fs::write(root.join(folder).join(".opalroignore"), text).unwrap();
     }
 }
 
@@ -392,7 +392,7 @@ fn every_path(tree: &Tree) -> Vec<(String, bool)> {
     let mut files = tree.files.clone();
     for folder in tree.rules.keys() {
         files.push(join(folder, ".gitignore"));
-        files.push(join(folder, ".opalignore"));
+        files.push(join(folder, ".opalroignore"));
     }
     let mut out: Vec<(String, bool)> = folders_of(&files)
         .into_iter()
@@ -451,10 +451,10 @@ fn walk_verdict_with(
 }
 
 /// `walk_verdict` for Opalro's verdict from the `.gitignore` lines alone, with each folder's
-/// `.opalignore` in the matcher after its `.gitignore`, as a save puts them.
+/// `.opalroignore` in the matcher after its `.gitignore`, as a save puts them.
 fn git_only_verdict(
     gitignore: &BTreeMap<String, Vec<u8>>,
-    opalignore: &BTreeMap<String, Vec<u8>>,
+    opalroignore: &BTreeMap<String, Vec<u8>>,
     drive: Drive,
     path: &str,
     is_dir: bool,
@@ -467,7 +467,7 @@ fn git_only_verdict(
         if let Some(text) = gitignore.get(&folder) {
             level.push(Rules::parse(text, &folder, true));
         }
-        if let Some(text) = opalignore.get(&folder) {
+        if let Some(text) = opalroignore.get(&folder) {
             level.push(Rules::parse(text, &folder, false));
         }
         if !level.is_empty() {
@@ -593,11 +593,11 @@ proptest! {
         }
     }
 
-    /// Where a `.opalignore` line takes back what a `.gitignore` line keeps out, Opalro still says
+    /// Where a `.opalroignore` line takes back what a `.gitignore` line keeps out, Opalro still says
     /// what Git says of the `.gitignore` files alone, which are all Git is given.
     #[test]
-    fn git_only_verdicts_match_check_ignore_beside_opalignore_lines(
-        (tree, opalignore) in tree_with_opalignore()
+    fn git_only_verdicts_match_check_ignore_beside_opalroignore_lines(
+        (tree, opalroignore) in tree_with_opalroignore()
     ) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -608,7 +608,7 @@ proptest! {
         let says = check_ignore(root, drive, &paths);
         for ((path, is_dir), (git_says, why)) in paths.iter().zip(says) {
             prop_assert_eq!(
-                git_only_verdict(&tree.rules, &opalignore, drive, path, *is_dir),
+                git_only_verdict(&tree.rules, &opalroignore, drive, path, *is_dir),
                 git_says,
                 "{:?}: {}",
                 path,

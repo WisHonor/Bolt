@@ -21,7 +21,7 @@ use support::{Env, changed, copy_dir, main_tip, text};
 /// it.
 fn project(files: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -31,7 +31,7 @@ fn project(files: &[(&str, &str)]) -> Env {
         fs::write(&at, bytes).unwrap();
         set_time(&at, SystemTime::now() - Duration::from_secs(3600));
     }
-    env.opal().args(["save", "Files"]).assert().success();
+    env.opalro().args(["save", "Files"]).assert().success();
     env
 }
 
@@ -59,7 +59,7 @@ fn look(env: &Env, name: &str) -> EntryMeta {
         .unwrap()
 }
 
-/// The cache key `opal` made in the test user's settings folder.
+/// The cache key `opalro` made in the test user's settings folder.
 fn user_key(env: &Env) -> [u8; KEY_LEN] {
     fs::read(env.config().join(keyed::KEY_FILE))
         .unwrap()
@@ -90,14 +90,14 @@ fn drive_time(env: &Env) -> i128 {
 }
 
 fn change_ids_cache(root: &Path) -> std::path::PathBuf {
-    root.join(".opal/cache/change-ids")
+    root.join(".opalro/cache/change-ids")
 }
 
 /// A started project with `count` saves on `main`, each adding a file; their IDs and change IDs,
-/// oldest first. `opal history` has filled the change-ID cache.
+/// oldest first. `opalro history` has filled the change-ID cache.
 fn saves(count: usize) -> (Env, Vec<(Id, String)>) {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -105,14 +105,14 @@ fn saves(count: usize) -> (Env, Vec<(Id, String)>) {
     for n in 0..count {
         add_save(&env, n, &mut made);
     }
-    env.opal().arg("history").assert().success();
+    env.opalro().arg("history").assert().success();
     assert!(change_ids_cache(env.root()).is_file());
     (env, made)
 }
 
 fn add_save(env: &Env, n: usize, made: &mut Vec<(Id, String)>) {
     support::write(env, &format!("f{n}.txt"), format!("file {n}"));
-    env.opal()
+    env.opalro()
         .args(["save", &format!("Save {n}")])
         .assert()
         .success();
@@ -193,7 +193,7 @@ fn same_in_both(env: &Env, copies: &Copies, commands: &[&[&str]]) {
             )
         };
         let (expected, got) = (run(without), run(with));
-        assert_eq!(got, expected, "opal {args:?}");
+        assert_eq!(got, expected, "opalro {args:?}");
     }
 }
 
@@ -327,7 +327,7 @@ fn a_stale_cache_is_only_trusted_file_by_file() {
 }
 
 fn cache_of(env: &Env) -> std::path::PathBuf {
-    env.root().join(".opal/cache/files")
+    env.root().join(".opalro/cache/files")
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn a_file_changed_within_two_seconds_is_read_again() {
     // Its time a minute ahead, so it is too new to trust however slowly the save runs: the cache
     // the save leaves doesn't vouch for it.
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -347,7 +347,7 @@ fn a_file_changed_within_two_seconds_is_read_again() {
         &env.root().join("old.txt"),
         SystemTime::now() - Duration::from_secs(3600),
     );
-    env.opal().args(["save", "Fresh"]).assert().success();
+    env.opalro().args(["save", "Fresh"]).assert().success();
     let sealed = fs::read(cache_of(&env)).unwrap();
     let body = keyed::open_sealed(&user_key(&env), &sealed).unwrap();
     let cache = FileCache::decode(body).unwrap();
@@ -363,9 +363,9 @@ fn status_after_goto_reads_what_goto_wrote() {
     let env = project(&[("a.txt", "one")]);
     let first = main_tip(&env);
     fs::write(env.root().join("a.txt"), "two").unwrap();
-    env.opal().args(["save", "Two"]).assert().success();
+    env.opalro().args(["save", "Two"]).assert().success();
     let started = std::time::Instant::now();
-    env.opal()
+    env.opalro()
         .args(["goto", &first.to_hex()])
         .assert()
         .success();
@@ -415,7 +415,7 @@ fn a_damaged_second_copy_of_a_listing_reads_the_same_every_time() {
     // Which copy is read first rests on the packs' names, so this pins only that every run prints
     // the same.
     let status = || {
-        let out = env.opal().arg("status").output().unwrap();
+        let out = env.opalro().arg("status").output().unwrap();
         (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
     let first = status();
@@ -424,7 +424,7 @@ fn a_damaged_second_copy_of_a_listing_reads_the_same_every_time() {
         assert_eq!(status(), first);
     }
     support::write(&env, "c/w", "changed");
-    env.opal().args(["save", "Changed"]).assert().success();
+    env.opalro().args(["save", "Changed"]).assert().success();
 }
 
 /// Tests that change the disk at a point the walk reaches on a thread of its own. That point is
@@ -568,7 +568,7 @@ mod mid_walk {
             found.warnings
         );
         // Left out from now on, as a project of its own, with what was saved of it kept.
-        let out = env.opal().args(["--json", "status"]).output().unwrap();
+        let out = env.opalro().args(["--json", "status"]).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(doc["changes"], serde_json::json!([]), "{doc}");

@@ -1,4 +1,4 @@
-//! What `opal undo --list` shows people: the steps redo can bring back, where you are, then the
+//! What `opalro undo --list` shows people: the steps redo can bring back, where you are, then the
 //! steps undo can take, in columns.
 
 use std::io::{self, Write};
@@ -70,7 +70,7 @@ pub fn write_list(
         writeln!(out, "{}", row(step))?;
     }
     if more {
-        let all = s.paint(Role::Command, "opal undo --list --all");
+        let all = s.paint(Role::Command, "opalro undo --list --all");
         writeln!(out, "  and more: {all} shows the whole diary")?;
     }
     Ok(())

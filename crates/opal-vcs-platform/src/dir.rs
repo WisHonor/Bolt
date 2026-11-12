@@ -173,7 +173,7 @@ impl Dir {
     /// Makes `name` a link to `target`, unless something already has that name. Windows needs to
     /// know whether it is a folder link (`to_dir`), and Developer Mode or an administrator to make
     /// one at all: without them the system's error comes back. Windows makes links only by path,
-    /// so there the link is made in `scratch` (`.opal/tmp`, on the same drive) under a name from
+    /// so there the link is made in `scratch` (`.opalro/tmp`, on the same drive) under a name from
     /// `crate::temp_name`, and moved to `name` once `scratch` shows it holds `target`; an absolute
     /// target must therefore be written as Windows stores it (`C:\x`, no `.`, `..` or `/`). If
     /// Opalro stops before the move, or the link can't be opened or removed again, it stays in

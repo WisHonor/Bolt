@@ -1,4 +1,4 @@
-//! The switch journal, `.opal/state/journal` (storage-format.md section 10): every change a switch
+//! The switch journal, `.opalro/state/journal` (storage-format.md section 10): every change a switch
 //! of the folder to another save will make, written before the first one so that the next command
 //! after a crash can finish it. It drives writes into the user's folder, so reading it trusts
 //! nothing: the checksum first, then every path against the name rules. A command that only reads
@@ -462,11 +462,11 @@ mod tests {
             "..".to_owned(),
             "a/../b".into(),
             ".".into(),
-            ".opal/x".into(),
-            "a/.opal".into(),
-            ".OPAL/x".into(),
-            ".Opal./x".into(),
-            "OPAL~1/x".into(),
+            ".opalro/x".into(),
+            "a/.opalro".into(),
+            ".OPALRO/x".into(),
+            ".Opalro./x".into(),
+            "OPALRO~1/x".into(),
             "/a".into(),
             "a/".into(),
             "a//b".into(),
@@ -497,10 +497,10 @@ mod tests {
         assert_eq!(Journal::read(&repo).unwrap(), None);
         sample().write(&repo, &lock).unwrap();
         assert_eq!(Journal::read(&repo).unwrap(), Some(sample()));
-        let on_disk = dir.path().join(".opal/state/journal");
+        let on_disk = dir.path().join(".opalro/state/journal");
         assert_eq!(std::fs::read(&on_disk).unwrap(), sample().encode());
         // Nothing left behind in `tmp/`.
-        let tmp = std::fs::read_dir(dir.path().join(".opal/tmp")).unwrap();
+        let tmp = std::fs::read_dir(dir.path().join(".opalro/tmp")).unwrap();
         assert_eq!(tmp.count(), 0);
 
         let mut unsorted = sample();
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn a_huge_journal_is_read_only_as_far_as_its_front() {
         let (dir, repo) = project();
-        let on_disk = dir.path().join(".opal/state/journal");
+        let on_disk = dir.path().join(".opalro/state/journal");
         assert_eq!(Journal::read_front(&repo).unwrap(), None);
         // A good front, then a hole far bigger than the front: only the front is read.
         let mut front = sample().encode();

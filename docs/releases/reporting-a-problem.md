@@ -4,17 +4,17 @@ Write to support@opalro.com. Every report helps, even "this felt wrong" or "I ex
 
 ## What to send
 
-- **The version:** what `opal --version` prints, such as `opal 0.1.0`.
+- **The version:** what `opalro --version` prints, such as `opalro 0.1.0`.
 - **Your system and its version:** Windows 11 24H2, macOS 15.1, Ubuntu 24.04, and so on. On Linux, also the first line `ldd --version` prints.
 - **What you typed:** the command, exactly, and what you did just before if it matters.
 - **What it printed:** all of it, copied as text rather than a screenshot when you can.
-- **What `opal verify` says,** run in the project's folder. It checks that everything Opalro stored is whole, and changes none of your files or saves.
-- **If it helps, the same command with `--json`,** such as `opal status --json`. It prints the same result as one block of text that is easy to read back exactly.
+- **What `opalro verify` says,** run in the project's folder. It checks that everything Opalro stored is whole, and changes none of your files or saves.
+- **If it helps, the same command with `--json`,** such as `opalro status --json`. It prints the same result as one block of text that is easy to read back exactly.
 - What you expected to happen instead.
 
 ## What not to send
 
-- **No private files.** Never send a project, its `.opal` folder or a file from it unless you are sure nothing in it is private. A small made-up project that shows the same problem is best.
+- **No private files.** Never send a project, its `.opalro` folder or a file from it unless you are sure nothing in it is private. A small made-up project that shows the same problem is best.
 - **Strip names.** Opalro's output holds file names, folder paths, and the name and email of whoever saved. Replace any you would rather keep to yourself (`C:\Users\ana\clients\acme` can become `C:\Users\me\project`), and say that you did.
 
 ## A security problem

@@ -8,7 +8,7 @@ expression: shown
   "chunk_files_over": 1048576,
   "has_rules_file": true,
   "ignore_block_lines": 4,
-  "opal_json": 1,
+  "opalro_json": 1,
   "preset": "code",
   "rules": [],
   "warnings": []

@@ -15,7 +15,7 @@ use crate::pack::MAX_RECORD_SIZE;
 /// A ref an import brings in: its Git name, the name it takes in Opalro, and what it points at.
 pub(super) struct Named {
     pub(super) git: Vec<u8>,
-    pub(super) opal: String,
+    pub(super) opalro: String,
     pub(super) target: GitId,
 }
 
@@ -81,12 +81,12 @@ impl Names {
         let lines = named(&refs.branches, Rules::Line, "line", &mut renamed);
         let server_names: Vec<&[u8]> = by_server.keys().copied().collect();
         let mut servers = BTreeMap::new();
-        for ((git, own), opal) in by_server.iter().zip(rename(&server_names, Rules::Line)) {
-            if opal.as_bytes() != *git {
+        for ((git, own), opalro) in by_server.iter().zip(rename(&server_names, Rules::Line)) {
+            if opalro.as_bytes() != *git {
                 renamed.push(Renaming {
                     kind: "server",
                     git: lossy(git),
-                    opal: opal.clone(),
+                    opalro: opalro.clone(),
                 });
             }
             let mut own_renamed = Vec::new();
@@ -94,16 +94,16 @@ impl Names {
             // Shown as each tool shows a server's branch.
             renamed.extend(own_renamed.into_iter().map(|line| Renaming {
                 git: format!("{}/{}", lossy(git), line.git),
-                opal: format!("{}@{opal}", line.opal),
+                opalro: format!("{}@{opalro}", line.opalro),
                 ..line
             }));
-            servers.insert(opal, own);
+            servers.insert(opalro, own);
         }
         // Saves' IDs are all 32 bytes, so the server-lines record's size is known already.
         let size = servers.iter().fold(
             ServerLines::head_len(servers.len() as u64),
             |size, (server, own): (&String, &Vec<Named>)| {
-                let lines = own.iter().map(|line| line.opal.as_str());
+                let lines = own.iter().map(|line| line.opalro.as_str());
                 size.saturating_add(ServerLines::server_len(server, lines))
             },
         );
@@ -131,20 +131,20 @@ fn named(
     renamed: &mut Vec<Renaming>,
 ) -> Vec<Named> {
     let names: Vec<&[u8]> = refs.iter().map(|(name, _)| name.as_slice()).collect();
-    let opal = rename(&names, rules);
+    let opalro = rename(&names, rules);
     refs.iter()
-        .zip(opal)
-        .map(|((git, target), opal)| {
-            if opal.as_bytes() != git.as_slice() {
+        .zip(opalro)
+        .map(|((git, target), opalro)| {
+            if opalro.as_bytes() != git.as_slice() {
                 renamed.push(Renaming {
                     kind,
                     git: lossy(git),
-                    opal: opal.clone(),
+                    opalro: opalro.clone(),
                 });
             }
             Named {
                 git: git.clone(),
-                opal,
+                opalro,
                 target: *target,
             }
         })
@@ -333,10 +333,10 @@ mod tests {
         names.sort();
         let names: Vec<&[u8]> = names.iter().map(|name| name.as_bytes()).collect();
         let began = Instant::now();
-        let opal = rename(&names, Rules::Line);
+        let opalro = rename(&names, Rules::Line);
         let took = began.elapsed();
         assert!(took < Duration::from_secs(1), "{took:?}");
-        let (upper, lower) = opal.split_at(pairs as usize);
+        let (upper, lower) = opalro.split_at(pairs as usize);
         for (kept, name) in upper.iter().zip(&names) {
             assert_eq!(kept.as_bytes(), *name);
         }
@@ -377,21 +377,21 @@ mod tests {
             )
         ) {
             let names: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
-            let opal = rename(&names, Rules::Line);
+            let opalro = rename(&names, Rules::Line);
             let mut folded = HashSet::new();
-            for name in &opal {
+            for name in &opalro {
                 prop_assert!(crate::diary::validate_line_name(name).is_ok(), "{name}");
                 prop_assert!(folded.insert(name.to_lowercase()), "{name}");
             }
             let mut first = HashSet::new();
-            for (git, name) in names.iter().zip(&opal) {
+            for (git, name) in names.iter().zip(&opalro) {
                 let valid = std::str::from_utf8(git)
                     .is_ok_and(|git| crate::diary::validate_line_name(git).is_ok());
                 if valid && first.insert(String::from_utf8_lossy(git).to_lowercase()) {
                     prop_assert_eq!(name.as_bytes(), *git);
                 }
             }
-            prop_assert_eq!(rename(&names, Rules::Line), opal);
+            prop_assert_eq!(rename(&names, Rules::Line), opalro);
         }
     }
 

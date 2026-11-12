@@ -1,4 +1,4 @@
-//! Whether Windows or macOS would take a name for `.git`, `.gitmodules` or `.opal`.
+//! Whether Windows or macOS would take a name for `.git`, `.gitmodules` or `.opalro`.
 //!
 //! NTFS drops a `:stream` suffix and trailing dots and spaces, ignores ASCII letter case, and
 //! answers to 8.3 short names. HFS+ ignores letter case and skips the characters Apple's TN1150
@@ -21,7 +21,7 @@ pub fn is_git_alias(name: &str) -> bool {
         })
 }
 
-/// Whether some Windows or macOS drive could take `name` for `.opal`: its part before any `/` or
+/// Whether some Windows or macOS drive could take `name` for `.opalro`: its part before any `/` or
 /// `\`, without the characters HFS+ ignores, as NTFS opens it.
 pub fn is_opal_alias(name: &str) -> bool {
     if !may_spell(name, b'o') {
@@ -34,7 +34,7 @@ pub fn is_opal_alias(name: &str) -> bool {
         Cow::Borrowed(part)
     };
     let part = ntfs_form(&kept);
-    part.eq_ignore_ascii_case(".opal") || short_name(part, b"opal", b'1'..=b'4')
+    part.eq_ignore_ascii_case(".opalro") || short_name(part, b"opalro", b'1'..=b'4')
 }
 
 /// Whether `name` is NTFS's hashed short name with this six-byte start (two letters of the long

@@ -12,7 +12,7 @@ expression: json
     "count": 0
   },
   "lines": 2,
-  "opal_json": 1,
+  "opalro_json": 1,
   "position": {
     "line": "main"
   },
@@ -20,7 +20,7 @@ expression: json
     {
       "git": "feature+x",
       "kind": "line",
-      "opal": "feature-x"
+      "opalro": "feature-x"
     }
   ],
   "server_lines": 1,
@@ -29,8 +29,8 @@ expression: json
     "count": 1,
     "first": [
       {
-        "commit": "3b0c5a80dfceb3df41a83b515a028775d9bdb227",
-        "path": "sub/.opal"
+        "commit": "077c835598881e96755928687ae57711c6b5bf6d",
+        "path": "sub/.opalro"
       }
     ]
   },
@@ -50,7 +50,7 @@ expression: json
   "warnings": [
     {
       "kind": "nested_opal_folder",
-      "message": "Git checked out a folder named .opal at `sub/.opal`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it."
+      "message": "Git checked out a folder named .opalro at `sub/.opalro`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it."
     },
     {
       "kind": "grafts_ignored",

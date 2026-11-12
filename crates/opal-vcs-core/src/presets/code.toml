@@ -1,5 +1,5 @@
 # Opalro project rules, written by the Code preset (version 1).
-# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.
+# This file is the project's rules: edit it freely. `opalro setup` shows how Opalro reads it.
 preset = "code"
 
 # A file of this size or more is stored in chunks, so a changed part is stored once.

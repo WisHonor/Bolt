@@ -78,12 +78,12 @@ fn this_drive(repo: &mut Repository) -> Drive {
     drive::probe(repo.tmp_folder()).unwrap()
 }
 
-/// The names in the folder `dir`, `.opal` aside, sorted.
+/// The names in the folder `dir`, `.opalro` aside, sorted.
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != ".opal")
+        .filter(|n| n != ".opalro")
         .collect();
     names.sort();
     names
@@ -137,9 +137,9 @@ fn a_planted_save_naming_git_or_opal_spellings_writes_none_of_them() {
         target: to.1,
         from: to.1,
         actions: [
-            ".OPAL/x",
-            ".opal/tmp/x",
-            "opal~1",
+            ".OPALRO/x",
+            ".opalro/tmp/x",
+            "opalro~1",
             ".git",
             "a/.Git",
             "a/git~1/hooks/x",
@@ -158,8 +158,8 @@ fn a_planted_save_naming_git_or_opal_spellings_writes_none_of_them() {
     assert_eq!(done.written, 0);
     assert!(kinds(&done.warnings).contains(&warning::NOT_WRITTEN_HERE));
     assert_eq!(names_in(dir.path()), ["ok.txt", "sub"]);
-    assert!(!dir.path().join(".opal/x").exists());
-    assert!(!dir.path().join(".opal/tmp/x").exists());
+    assert!(!dir.path().join(".opalro/x").exists());
+    assert!(!dir.path().join(".opalro/tmp/x").exists());
 }
 
 /// Makes `link` a link to the folder `target` that this account can make: a symlink on Unix,
@@ -505,7 +505,7 @@ fn a_file_saved_while_its_new_contents_are_written_is_left() {
     let done = raced(&mut repo, a.0, b, "switch:written", "x", b"mxn");
     assert_eq!(done.changed_since_plan, ["x"]);
     assert_eq!(fs::read(dir.path().join("x")).unwrap(), b"mxn");
-    assert!(names_in(&dir.path().join(".opal/tmp")).is_empty());
+    assert!(names_in(&dir.path().join(".opalro/tmp")).is_empty());
 }
 
 #[cfg(feature = "fault-injection")]
@@ -690,14 +690,14 @@ fn unsaved_work_in_the_way_collides_and_the_rest_comes_along() {
 fn nothing_below_a_folder_in_the_way_is_planned() {
     let (dir, mut repo) = project();
     let empty = current_save(&repo).unwrap();
-    let a = planted(&mut repo, &files(&[(".opalignore", b"build/\n")]));
+    let a = planted(&mut repo, &files(&[(".opalroignore", b"build/\n")]));
     switch(&mut repo, empty, a);
     fs::create_dir(dir.path().join("build")).unwrap();
     fs::write(dir.path().join("build/junk"), b"ignored").unwrap();
     let b = planted(
         &mut repo,
         &files(&[
-            (".opalignore", b"build/\n"),
+            (".opalroignore", b"build/\n"),
             ("build/x", b"x"),
             ("build/deeper/y", b"y"),
             ("GI7EBA~1/hooks/post-checkout", b"evil"),
@@ -713,7 +713,7 @@ fn nothing_below_a_folder_in_the_way_is_planned() {
 fn what_the_plan_never_read_in_a_folder_that_goes_is_in_the_way_or_kept() {
     let (dir, mut repo) = project();
     let empty = current_save(&repo).unwrap();
-    let ignore: (&str, &[u8]) = (".opalignore", b"*.o\nout/\n");
+    let ignore: (&str, &[u8]) = (".opalroignore", b"*.o\nout/\n");
     let a = planted(
         &mut repo,
         &files(&[ignore, ("d/f", b"f"), ("d/sub/g", b"g"), ("e/s/h", b"h")]),
@@ -740,7 +740,7 @@ fn what_the_plan_never_read_in_a_folder_that_goes_is_in_the_way_or_kept() {
 fn a_folder_becoming_a_file_in_another_case_is_judged_as_the_drive_names_it() {
     let (dir, mut repo) = project();
     let empty = current_save(&repo).unwrap();
-    let ignore: (&str, &[u8]) = (".opalignore", b"*.o\n");
+    let ignore: (&str, &[u8]) = (".opalroignore", b"*.o\n");
     let a = planted(&mut repo, &files(&[ignore, ("d/f", b"f"), ("d/s/g", b"g")]));
     switch(&mut repo, empty, a);
     let b = planted(&mut repo, &files(&[ignore, ("D", b"file D")]));
@@ -758,7 +758,7 @@ fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
     let own = |folder: &str| -> io::Result<Vec<(String, String)>> {
         Ok(match folder {
             "" => vec![(".git".into(), "ZZ7EBA~1".into())],
-            "a" => vec![(".opal".into(), "BO1234~1".into())],
+            "a" => vec![(".opalro".into(), "BO1234~1".into())],
             _ => vec![],
         })
     };
@@ -949,7 +949,7 @@ fn a_link_through_a_name_write_out_wont_write_is_a_placeholder() {
         ("hooks", ".git/hooks"),
         ("git", ".git"),
         ("short", "git~1/hooks/x"),
-        ("opal", ".opal/x"),
+        ("opalro", ".opalro/x"),
         ("d/up", "../.git/hooks"),
     ] {
         let as_link = writes_as_link(&mut tree, path, target.as_bytes()).unwrap();
@@ -1158,7 +1158,7 @@ fn a_switch_stopped_at_every_write_is_finished_by_the_next_command() {
     }
 }
 
-/// Every path below `dir`, `.opal` aside, `/` between names.
+/// Every path below `dir`, `.opalro` aside, `/` between names.
 #[cfg(feature = "fault-injection")]
 fn all_paths(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
@@ -1167,7 +1167,7 @@ fn all_paths(dir: &Path) -> Vec<String> {
         for e in fs::read_dir(&at).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && name == ".opal" {
+            if rel.is_empty() && name == ".opalro" {
                 continue;
             }
             let path = if rel.is_empty() {
@@ -1312,7 +1312,7 @@ fn a_switch_that_cant_write_a_file_names_it_and_waits_for_the_next_command() {
 #[test]
 fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     let (dir, mut repo, journal) = stopped_switch();
-    let on_disk = dir.path().join(".opal/state/journal");
+    let on_disk = dir.path().join(".opalro/state/journal");
     let mut bytes = fs::read(&on_disk).unwrap();
     // At its front, where commands that only read look too.
     bytes[0] ^= 1;
@@ -1320,8 +1320,8 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
     let e = finish_interrupted(&mut repo, &lock).unwrap_err();
     assert!(matches!(e, RepoError::JournalUnusable { .. }), "{e:?}");
-    assert!(e.to_string().contains(".opal/state/journal"), "{e}");
-    assert!(e.hint().unwrap().contains("delete .opal/state/journal"));
+    assert!(e.to_string().contains(".opalro/state/journal"), "{e}");
+    assert!(e.hint().unwrap().contains("delete .opalro/state/journal"));
     assert_holds(dir.path(), OLD);
     drop(lock);
     let found = crate::status::status(&repo, false, None).unwrap();
@@ -1330,7 +1330,7 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
         found
             .unfinished_switch
             .unwrap()
-            .contains(".opal/state/journal")
+            .contains(".opalro/state/journal")
     );
 
     // One made for another save than the head's is no switch of this folder.
@@ -1348,7 +1348,7 @@ fn a_journal_that_cant_be_used_stops_changes_and_is_reported() {
     // Read-only commands say the same, not that the next command finishes it.
     let found = crate::status::status(&repo, false, None).unwrap();
     let said = found.unfinished_switch.unwrap();
-    assert!(said.contains(".opal/state/journal"), "{said}");
+    assert!(said.contains(".opalro/state/journal"), "{said}");
 }
 
 #[cfg(windows)]
@@ -1374,9 +1374,9 @@ fn a_file_held_open_keeps_the_switch_unfinished_until_let_go() {
     assert_holds(dir.path(), NEW);
 }
 
-/// Commits a save whose top listing holds `.OPAL`, and gives its ID.
+/// Commits a save whose top listing holds `.OPALRO`, and gives its ID.
 fn planted_hostile(repo: &mut Repository) -> Id {
-    // No listing Opalro makes holds `.OPAL`, so it is spelled `-OPAL`, then the bytes are changed.
+    // No listing Opalro makes holds `.OPALRO`, so it is spelled `-OPALRO`, then the bytes are changed.
     crate::test_support::plant_root(repo, |packs| {
         let id = packs.add_content(b"x").unwrap();
         let named = |name: &str| Entry {
@@ -1385,8 +1385,8 @@ fn planted_hostile(repo: &mut Repository) -> Id {
             id,
             size: 1,
         };
-        let listing = Listing::new(vec![named("-OPAL")]).unwrap().encode();
-        let at = listing.windows(5).position(|w| w == b"-OPAL").unwrap();
+        let listing = Listing::new(vec![named("-OPALRO")]).unwrap().encode();
+        let at = listing.windows(7).position(|w| w == b"-OPALRO").unwrap();
         let mut hostile = listing;
         hostile[at] = b'.';
         packs
@@ -1595,7 +1595,7 @@ fn copied_with(
     let from = current_save(repo).unwrap();
     let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
     let drive = drive::probe(repo.tmp_folder()).unwrap();
-    let tmp = repo.root().join(".opal/tmp");
+    let tmp = repo.root().join(".opalro/tmp");
     let mut packs = PackSet::with_limit(&tmp, repo.packs_dir(), 7).unwrap();
     crate::workers::set_test_workers(Some(count));
     let copies = keep_safety_copies(repo, actions, from, drive, &mut packs);

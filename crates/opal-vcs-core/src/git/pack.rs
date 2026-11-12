@@ -1048,7 +1048,8 @@ mod tests {
         match open(&dir).read(&x) {
             Err(e @ GitError::TooManyObjects { .. }) => {
                 let message = e.to_string();
-                let says = format!("lists 16777217 objects, more than the {MAX_GIT_OBJECTS} Opalro");
+                let says =
+                    format!("lists 16777217 objects, more than the {MAX_GIT_OBJECTS} Opalro");
                 assert!(message.contains(&says), "{message}");
                 assert!(message.contains("keeps in memory"), "{message}");
                 assert!(e.hint().unwrap().contains("git repack -a -d"), "{e:?}");

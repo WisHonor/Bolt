@@ -1,7 +1,7 @@
 //! Which file names Opalro stores, and which it flags as non-portable (decision 004):
 //! [`validate_name`] refuses a name outright, and [`validate_path`] a path; [`name_problems`] and
 //! [`folder_problems`] flag names that work here but would break on another operating system.
-//! [`is_git_alias`] and [`is_opal_alias`] spot the spellings of `.git` and `.opal`, [`own_folder`]
+//! [`is_git_alias`] and [`is_opal_alias`] spot the spellings of `.git` and `.opalro`, [`own_folder`]
 //! the project's own ones, [`holdable_here`] says whether this system can hold a name,
 //! [`writable_here`] whether write-out may write one, and [`fold`] compares names as a drive does.
 //! [`project_path`] turns a path typed on the command line into a project path, and
@@ -17,7 +17,7 @@ use crate::drive::Drive;
 use crate::text::escape;
 
 mod lookalike;
-pub use lookalike::{is_opal_alias, is_git_alias};
+pub use lookalike::{is_git_alias, is_opal_alias};
 use lookalike::{is_hashed_short_name, is_plain_short_name};
 
 /// Longest name the format allows, in bytes: Windows' 255 UTF-16 units, each at most three bytes
@@ -43,7 +43,7 @@ pub enum NameError {
     Nul,
     #[error("a name cannot be longer than {} bytes", MAX_NAME_BYTES)]
     TooLong,
-    #[error("a name cannot be spelled like Opalro's own folder (.opal)")]
+    #[error("a name cannot be spelled like Opalro's own folder (.opalro)")]
     OpalSpelling,
     #[error("a path cannot be longer than {} bytes", MAX_PATH_BYTES)]
     PathTooLong,
@@ -92,13 +92,13 @@ pub enum NotWritable {
     Invalid(NameError),
     /// A spelling of `.git` ([`is_git_alias`]).
     GitName,
-    /// A spelling of `.opal` ([`is_opal_alias`]).
+    /// A spelling of `.opalro` ([`is_opal_alias`]).
     OpalName,
     /// A name this system can't hold, by decision 004's rules for it.
     NotHoldable(PortabilityProblem),
     /// Longer than this system holds ([`fits_here`]).
     TooLong,
-    /// The real short name of a `.git` or `.opal` in the same folder.
+    /// The real short name of a `.git` or `.opalro` in the same folder.
     ShortNameOf(&'static str),
 }
 
@@ -134,32 +134,32 @@ pub fn validate_path(path: &str) -> Result<(), NameError> {
     path.split('/').try_for_each(validate_name)
 }
 
-/// Whether `name`, in the project's top folder, is the project's own `.opal` or Git's `.git` as
+/// Whether `name`, in the project's top folder, is the project's own `.opalro` or Git's `.git` as
 /// this drive spells them: exactly, or in other letter case where the drive ignores it (decision
 /// 059). Other spellings of either are left out of saves with a warning instead.
 pub fn own_folder(name: &str, drive: Drive) -> bool {
-    [".opal", ".git"]
+    [".opalro", ".git"]
         .iter()
         .any(|own| name == *own || (drive.ignores_case && name.eq_ignore_ascii_case(own)))
 }
 
-/// Which of `.git`, `.opal`, `.gitignore` and `.opalignore` a folder could hold, judged from its
+/// Which of `.git`, `.opalro`, `.gitignore` and `.opalroignore` a folder could hold, judged from its
 /// listing. False only where no drive could find the name there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Listed {
     pub git: bool,
-    pub opal: bool,
+    pub opalro: bool,
     pub gitignore: bool,
-    pub opalignore: bool,
+    pub opalroignore: bool,
 }
 
 impl Listed {
     /// Each could be there: ask the drive for all four.
     pub(crate) const ALL: Listed = Listed {
         git: true,
-        opal: true,
+        opalro: true,
         gitignore: true,
-        opalignore: true,
+        opalroignore: true,
     };
 }
 
@@ -173,9 +173,9 @@ pub(crate) fn listed_hints<'a>(
     let unlisted_short_names = cfg!(not(windows));
     let mut hints = Listed {
         git: unlisted_short_names,
-        opal: unlisted_short_names,
+        opalro: unlisted_short_names,
         gitignore: false,
-        opalignore: false,
+        opalroignore: false,
     };
     for name in names.flat_map(|(name, short)| std::iter::once(name).chain(short)) {
         let name = name.as_encoded_bytes();
@@ -183,9 +183,9 @@ pub(crate) fn listed_hints<'a>(
             return Listed::ALL;
         }
         hints.git |= name.eq_ignore_ascii_case(b".git");
-        hints.opal |= name.eq_ignore_ascii_case(b".opal");
+        hints.opalro |= name.eq_ignore_ascii_case(b".opalro");
         hints.gitignore |= name.eq_ignore_ascii_case(b".gitignore");
-        hints.opalignore |= name.eq_ignore_ascii_case(b".opalignore");
+        hints.opalroignore |= name.eq_ignore_ascii_case(b".opalroignore");
     }
     hints
 }
@@ -262,8 +262,8 @@ pub fn fits_here(name: &str) -> bool {
 
 /// Whether write-out may write `name` into a folder whose entries have the long and short names
 /// `short_names_here` (Windows' 8.3 names, as `Dir::entries` gives them). Never a spelling of
-/// `.git` or `.opal`, on any system: Linux reaches NTFS and vfat drives too (CVE-2019-1353). Nor
-/// a name this system can't hold, nor the real short name of a `.git` or `.opal` in that folder.
+/// `.git` or `.opalro`, on any system: Linux reaches NTFS and vfat drives too (CVE-2019-1353). Nor
+/// a name this system can't hold, nor the real short name of a `.git` or `.opalro` in that folder.
 /// Nor anything [`validate_name`] refuses, on any system.
 pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<(), NotWritable> {
     match validate_name(name) {
@@ -295,7 +295,7 @@ pub fn writable_here(name: &str, short_names_here: &[(&str, &str)]) -> Result<()
                 return Err(NotWritable::ShortNameOf(".git"));
             }
             if is_opal_alias(long) {
-                return Err(NotWritable::ShortNameOf(".opal"));
+                return Err(NotWritable::ShortNameOf(".opalro"));
             }
         }
     }
@@ -356,7 +356,7 @@ pub fn folder_problems(names: &[&str]) -> Vec<PortabilityProblem> {
 pub enum GivenPathError {
     #[error("{} is outside the project.", escape(.0, false))]
     Outside(String),
-    #[error("{} is in .opal, Opalro's own folder, which holds none of your files.", escape(.0, false))]
+    #[error("{} is in .opalro, Opalro's own folder, which holds none of your files.", escape(.0, false))]
     InOpal(String),
     #[error("{} isn't a path Opalro can use: {}.", escape(.0, false), .1)]
     Invalid(String, NameError),
@@ -498,13 +498,13 @@ mod tests {
                     .map(|(n, s)| (OsStr::new(n), s.map(OsStr::new))),
             )
         };
-        // Off Windows a listing shows no short names, so `.git` and `.opal` are always asked for.
+        // Off Windows a listing shows no short names, so `.git` and `.opalro` are always asked for.
         let by_listing = cfg!(windows);
-        let only = |git: bool, opal: bool, gitignore, opalignore| Listed {
+        let only = |git: bool, opalro: bool, gitignore, opalroignore| Listed {
             git: git || !by_listing,
-            opal: opal || !by_listing,
+            opalro: opalro || !by_listing,
             gitignore,
-            opalignore,
+            opalroignore,
         };
         let none = only(false, false, false, false);
         #[cfg(windows)]
@@ -512,9 +512,9 @@ mod tests {
             hints(&[("a.txt", None)]),
             Listed {
                 git: false,
-                opal: false,
+                opalro: false,
                 gitignore: false,
-                opalignore: false
+                opalroignore: false
             }
         );
         #[cfg(not(windows))]
@@ -522,21 +522,21 @@ mod tests {
             hints(&[("a.txt", None)]),
             Listed {
                 git: true,
-                opal: true,
+                opalro: true,
                 gitignore: false,
-                opalignore: false
+                opalroignore: false
             }
         );
         assert_eq!(hints(&[]), none);
         assert_eq!(hints(&[("a.txt", None), ("sub", None)]), none);
         assert_eq!(hints(&[(".git", None)]), only(true, false, false, false));
-        assert_eq!(hints(&[(".opal", None)]), only(false, true, false, false));
+        assert_eq!(hints(&[(".opalro", None)]), only(false, true, false, false));
         assert_eq!(
-            hints(&[(".gitignore", None), (".opalignore", None)]),
+            hints(&[(".gitignore", None), (".opalroignore", None)]),
             only(false, false, true, true)
         );
         assert_eq!(
-            hints(&[(".GiT", None), (".OPAL", None), (".GITignore", None)]),
+            hints(&[(".GiT", None), (".OPALRO", None), (".GITignore", None)]),
             only(true, true, true, false)
         );
         assert_eq!(hints(&[(".gitx", None), ("x.git", None)]), none);
@@ -574,15 +574,15 @@ mod tests {
             Err(GivenPathError::Outside(_))
         ));
         assert!(matches!(
-            at(root, ".opal/state"),
+            at(root, ".opalro/state"),
             Err(GivenPathError::InOpal(_))
         ));
         assert!(matches!(
-            at(&sub, "../.OPAL"),
+            at(&sub, "../.OPALRO"),
             Err(GivenPathError::InOpal(_))
         ));
         assert!(matches!(
-            at(root, "a/.opal"),
+            at(root, "a/.opalro"),
             Err(GivenPathError::Invalid(..))
         ));
         let typed = if cfg!(windows) {
@@ -629,7 +629,7 @@ mod tests {
         ));
         assert!(matches!(at(root, "../*"), Err(GivenPathError::Outside(_))));
         assert!(matches!(
-            at(root, ".opal/*"),
+            at(root, ".opalro/*"),
             Err(GivenPathError::InOpal(_))
         ));
     }
@@ -692,10 +692,10 @@ mod tests {
             composes_unicode: false,
         };
         for ignores_case in [false, true] {
-            for name in [".opal", ".git"] {
+            for name in [".opalro", ".git"] {
                 assert!(own_folder(name, drive(ignores_case)), "{name}");
             }
-            for name in [".OPAL", ".Git", ".gIT"] {
+            for name in [".OPALRO", ".Git", ".gIT"] {
                 assert_eq!(
                     own_folder(name, drive(ignores_case)),
                     ignores_case,
@@ -704,13 +704,13 @@ mod tests {
             }
             // Other spellings are left out of saves instead, and the rest are other names.
             for name in [
-                ".opal.",
-                "opal~1",
+                ".opalro.",
+                "opalro~1",
                 "git~1",
                 ".git ",
                 ".g\u{200c}it",
                 ".gitignore",
-                "opal",
+                "opalro",
             ] {
                 assert!(!own_folder(name, drive(ignores_case)), "{name:?}");
             }
@@ -724,17 +724,17 @@ mod tests {
             ".GIT",
             "git~1",
             ".git.",
-            ".opal",
-            ".OPAL",
-            "opal~1",
-            ".opal::$INDEX_ALLOCATION",
+            ".opalro",
+            ".OPALRO",
+            "opalro~1",
+            ".opalro::$INDEX_ALLOCATION",
             ".g\u{200c}it",
         ] {
             assert!(writable_here(n, &[]).is_err(), "{n:?}");
         }
         assert_eq!(writable_here(".Git", &[]), Err(NotWritable::GitName));
-        assert_eq!(writable_here("OPAL~2", &[]), Err(NotWritable::OpalName));
-        for n in ["Player.cs", ".gitignore", "opal.toml", "名前"] {
+        assert_eq!(writable_here("OPALRO~2", &[]), Err(NotWritable::OpalName));
+        for n in ["Player.cs", ".gitignore", "opalro.toml", "名前"] {
             assert_eq!(writable_here(n, &[]), Ok(()), "{n:?}");
         }
     }
@@ -754,10 +754,10 @@ mod tests {
     #[test]
     fn a_real_short_name_of_git_is_refused() {
         assert!(writable_here("GI1D2E~1", &[(".git", "GI1D2E~1")]).is_err());
-        // Ignoring case, and for `.opal` and other spellings of either too.
+        // Ignoring case, and for `.opalro` and other spellings of either too.
         let here = [
             (".git", "GI1D2E~1"),
-            (".OPAL", "OPC2A3~1"),
+            (".OPALRO", "OPC2A3~1"),
             ("Player.cs", "PLAYER~1.CS"),
         ];
         assert_eq!(
@@ -766,7 +766,7 @@ mod tests {
         );
         assert_eq!(
             writable_here("OPC2A3~1", &here),
-            Err(NotWritable::ShortNameOf(".opal"))
+            Err(NotWritable::ShortNameOf(".opalro"))
         );
         // Another entry's short name is write-out's to sort out as a clash, not a name to refuse.
         assert_eq!(writable_here("PLAYER~1.CS", &here), Ok(()));

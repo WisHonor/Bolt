@@ -443,7 +443,10 @@ fn delta_error(path: &Path, at: u64, e: DeltaError) -> GitError {
 /// What only a bug in Opalro causes: something the reader kept of `pack` went missing.
 fn lost(pack: &Pack) -> GitError {
     GitError::Bug {
-        what: format!("Opalro lost track of what it read of {}", pack.path.display()),
+        what: format!(
+            "Opalro lost track of what it read of {}",
+            pack.path.display()
+        ),
     }
 }
 
@@ -1492,7 +1495,7 @@ mod tests {
                 assert!(e.to_string().contains(why), "{e}");
                 let hint = "Nothing was changed. If you trust this repository, have Git store its \
                             files over 1 MiB whole and make its other deltas anew, with `git -c \
-                            core.bigFileThreshold=1m repack -a -d -f`, then run opal import \
+                            core.bigFileThreshold=1m repack -a -d -f`, then run opalro import \
                             again. Git's packs stay bigger until its next `git gc`.";
                 assert_eq!(e.hint().unwrap(), hint);
                 assert!(hint.contains("`git -c core.bigFileThreshold=1m repack -a -d -f`"));

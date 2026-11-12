@@ -76,7 +76,7 @@ expression: doc
       "timed_out": false
     }
   ],
-  "opal_json": 1,
+  "opalro_json": 1,
   "save": {
     "author": {
       "email": "test@example.com",

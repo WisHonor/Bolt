@@ -425,10 +425,10 @@ fn a_chunk_list_that_builds_another_file_is_damaged() {
 fn a_lost_head_is_one_problem_and_the_packs_are_still_checked() {
     let (dir, mut repo) = project(0);
     plant_save(&mut repo, &[("a.txt", EntryKind::File, b"one")]);
-    fs::write(dir.path().join(".opal/state/head"), "not an entry\n").unwrap();
+    fs::write(dir.path().join(".opalro/state/head"), "not an entry\n").unwrap();
     let v = checked(&repo);
     assert_eq!(kinds(&v), [ProblemKind::HeadLost], "{:?}", v.problems);
-    assert!(v.problems[0].message.contains(".opal/state/head"));
+    assert!(v.problems[0].message.contains(".opalro/state/head"));
     assert_eq!(v.objects, objects(&repo).len() as u64);
     assert_eq!(v.packs, pack_paths(&repo).len() as u64);
 }
@@ -463,7 +463,7 @@ fn what_an_earlier_tidy_freed_is_no_problem() {
     let v = checked(&repo);
     assert_eq!(v.problems_total, 0, "{:?}", v.problems);
     // Without the record of the window it used, it would be.
-    fs::remove_file(dir.path().join(".opal/state/tidied")).unwrap();
+    fs::remove_file(dir.path().join(".opalro/state/tidied")).unwrap();
     let v = checked(&repo);
     assert!(kinds(&v).contains(&ProblemKind::ObjectMissing), "{v:?}");
 }
@@ -574,7 +574,7 @@ fn more_than_1000_problems_are_counted_and_1000_kept() {
 fn a_fifo_named_like_a_pack_is_refused_within_the_limit() {
     let (dir, repo) = project(0);
     drop(repo);
-    let fifo = dir.path().join(".opal/store/packs/zz.pack");
+    let fifo = dir.path().join(".opalro/store/packs/zz.pack");
     let made = std::process::Command::new("mkfifo")
         .arg(&fifo)
         .status()
@@ -639,12 +639,12 @@ fn verify_writes_nothing() {
         });
         add_listing(packs, entries.to_vec()).0
     });
-    let opal = dir.path().join(".opal");
-    assert!(opal.join("format").is_file());
-    let before = every_file(&opal);
+    let opalro = dir.path().join(".opalro");
+    assert!(opalro.join("format").is_file());
+    let before = every_file(&opalro);
     let v = checked(&repo);
     assert_eq!(v.problems_total, 0, "{:?}", v.problems);
-    assert_eq!(every_file(&opal), before);
+    assert_eq!(every_file(&opalro), before);
 
     // Again with a needed chunk damaged and a needed file missing, so naming what needs them
     // runs too.
@@ -655,7 +655,7 @@ fn verify_writes_nothing() {
         .find(|(_, e)| e.id == list.chunks[0].id)
         .unwrap();
     flip(&path, entry.offset + ENTRY_HEADER_LEN);
-    let before = every_file(&opal);
+    let before = every_file(&opalro);
     let v = checked(&repo);
     let mut found = kinds(&v);
     found.sort_by_key(|k| k.name());
@@ -666,7 +666,7 @@ fn verify_writes_nothing() {
         v.problems
     );
     assert!(v.problems.iter().all(|p| p.needed_by.is_some()), "{v:?}");
-    assert_eq!(every_file(&opal), before);
+    assert_eq!(every_file(&opalro), before);
 }
 
 fn found(ids: &[u8]) -> Verdict {
@@ -773,7 +773,10 @@ fn what_no_readable_pack_holds_is_told_as_such() {
         .filter(|p| p.kind == ProblemKind::ObjectMissing)
         .collect();
     assert_eq!(missing.len(), 1, "{:?}", v.problems);
-    assert_eq!(missing[0].message, "It isn't in any pack Opalro could read.");
+    assert_eq!(
+        missing[0].message,
+        "It isn't in any pack Opalro could read."
+    );
 }
 
 #[test]

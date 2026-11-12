@@ -16,7 +16,7 @@ function Run-Opalro {
   # Opalro's notes on stderr are not errors; its exit code says.
   $ErrorActionPreference = 'Continue'
   & $Opalro @args
-  if ($LASTEXITCODE -ne 0) { throw "opal $args exited with $LASTEXITCODE" }
+  if ($LASTEXITCODE -ne 0) { throw "opalro $args exited with $LASTEXITCODE" }
 }
 
 # Built from code points: Windows PowerShell reads a script without a byte-order mark as ANSI.
@@ -26,17 +26,17 @@ $nihon = [string][char]0x65E5 + [char]0x672C
 try {
   $work = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
   $root = Join-Path $work "Projets d'${e}t${e}\$nihon"
-  $env:OPAL_CONFIG_DIR = Join-Path $work "r${e}glages de opal"
-  Remove-Item Env:OPAL_USER_NAME, Env:OPAL_USER_EMAIL -ErrorAction SilentlyContinue
-  New-Item -ItemType Directory -Path $root, $env:OPAL_CONFIG_DIR | Out-Null
+  $env:OPALRO_CONFIG_DIR = Join-Path $work "r${e}glages de opalro"
+  Remove-Item Env:OPALRO_USER_NAME, Env:OPALRO_USER_EMAIL -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Path $root, $env:OPALRO_CONFIG_DIR | Out-Null
   # With a byte-order mark, as Notepad may write it.
-  Set-Content -LiteralPath (Join-Path $env:OPAL_CONFIG_DIR config.toml) -Encoding UTF8 -Value @(
+  Set-Content -LiteralPath (Join-Path $env:OPALRO_CONFIG_DIR config.toml) -Encoding UTF8 -Value @(
     '[user]', 'name = "Clean Machine"', 'email = "clean@example.invalid"')
 
-  Step "opal --version prints opal $Version"
+  Step "opalro --version prints opalro $Version"
   $said = (Run-Opalro --version) -join "`n"
   Write-Host $said
-  Check ($said -ceq "opal $Version")
+  Check ($said -ceq "opalro $Version")
 
   foreach ($preset in 'code', 'game', 'custom') {
     Step "start --preset $preset in a new folder"

@@ -472,7 +472,7 @@ fn undo_to_an_entry_whose_saves_were_tidied_away_names_it() {
     }
     let said = failed.error.to_string();
     assert!(said.contains(&entry.short_hex()), "{said}");
-    assert!(failed.error.hint().unwrap().contains("opal tidy"));
+    assert!(failed.error.hint().unwrap().contains("opalro tidy"));
     assert_eq!(repo.head().unwrap(), head);
     let a = fs::read_to_string(dir.path().join("a.txt")).unwrap();
     assert_eq!(a, "three");
@@ -503,7 +503,7 @@ fn tidy_keeps_a_diary_cut_off_from_head_while_its_end_is_in_the_window() {
     let recent = save_text(dir.path(), &mut repo, "recent work", 2);
     let end = repo.head().unwrap();
     // `head` put back, as a sync tool or a restore would.
-    let head = dir.path().join(".opal").join("state").join("head");
+    let head = dir.path().join(".opalro").join("state").join("head");
     fs::write(head, format!("{older}\n")).unwrap();
     assert_eq!(repo.head().unwrap(), older);
     age_packs(&repo, 48);
@@ -571,7 +571,7 @@ fn tidy_stops_before_removing_anything_when_something_to_keep_is_missing() {
 }
 
 fn tidied_file(dir: &Path) -> std::path::PathBuf {
-    dir.join(".opal").join("state").join("tidied")
+    dir.join(".opalro").join("state").join("tidied")
 }
 
 #[test]
@@ -766,7 +766,7 @@ fn a_gap_at_an_undo_step_does_not_cut_off_the_entries_behind_it() {
     let end = repo.store_entry(&lock, packs, &entry).unwrap();
     drop(lock);
     // `head` put back before A, so only C's diary reaches A and B.
-    fs::write(dir.path().join(".opal/state/head"), format!("{start}\n")).unwrap();
+    fs::write(dir.path().join(".opalro/state/head"), format!("{start}\n")).unwrap();
     age_packs(&repo, 48);
     tidied(&mut repo);
     assert!(reads(&repo, &thrown, ObjectKind::Save));
@@ -813,7 +813,7 @@ fn a_tidied_file_that_is_a_link_counts_as_absent() {
     // Writing over the link is refused, as for any state file, before anything is removed.
     let before = pack_names(&repo);
     match tidy(&mut repo, 30, at, &mut |_| {}, &mut |_| {}) {
-        Err(RepoError::CantWrite { path, .. }) => assert!(path.ends_with(".opal/state/tidied")),
+        Err(RepoError::CantWrite { path, .. }) => assert!(path.ends_with(".opalro/state/tidied")),
         other => panic!("{other:?}"),
     }
     assert_eq!(pack_names(&repo), before);
@@ -1168,7 +1168,7 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
                     assert!(e.to_string().contains(name), "{why}: {e}");
                     let hint = e.hint().unwrap();
                     assert!(hint.starts_with("Nothing was removed"), "{why}: {hint}");
-                    assert!(hint.contains(".opal/store/packs"), "{why}: {hint}");
+                    assert!(hint.contains(".opalro/store/packs"), "{why}: {hint}");
                     assert!(hint.contains("only its chunk lists name"), "{why}: {hint}");
                 }
                 other => panic!("{why}: {other:?}"),

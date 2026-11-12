@@ -1,4 +1,4 @@
-//! `opal verify`: what it says when everything checks out, and when it doesn't.
+//! `opalro verify`: what it says when everything checks out, and when it doesn't.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -14,17 +14,17 @@ use support::{Env, text, write};
 
 fn project() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     write(&env, "a.txt", "a\n");
-    env.opal().args(["save", "First"]).assert().success();
+    env.opalro().args(["save", "First"]).assert().success();
     env
 }
 
 fn run(env: &Env, args: &[&str]) -> Output {
-    env.opal().args(args).output().unwrap()
+    env.opalro().args(args).output().unwrap()
 }
 
 /// Writes `name` into the project's packs: a pack holding `contents`, each with a byte flipped.
@@ -40,7 +40,7 @@ fn plant_damaged(env: &Env, name: &str, contents: &[Vec<u8>]) {
         let e = e.unwrap();
         pack[usize::try_from(e.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
     }
-    fs::write(env.root().join(".opal/store/packs").join(name), pack).unwrap();
+    fs::write(env.root().join(".opalro/store/packs").join(name), pack).unwrap();
 }
 
 fn doc(out: &Output) -> serde_json::Value {
@@ -99,7 +99,7 @@ fn verify_lists_problems_and_exits_1() {
     assert!(lines[2].starts_with("    + "), "{shown}");
     assert_eq!(
         lines.last(),
-        Some(&"    opal verify --json lists them all.")
+        Some(&"    opalro verify --json lists them all.")
     );
     assert!(shown.contains("    + the undo diary (2 entries) is intact"));
     let said = text(&out.stderr);
@@ -152,7 +152,7 @@ fn verify_json_matches_json_md() {
         "bytes",
         "entries",
         "objects",
-        "opal_json",
+        "opalro_json",
         "packs",
         "problems",
         "problems_total",
@@ -180,7 +180,7 @@ fn verify_json_matches_json_md() {
 #[test]
 fn verify_names_a_pack_with_an_escaped_name() {
     let env = project();
-    let packs = env.root().join(".opal/store/packs");
+    let packs = env.root().join(".opalro/store/packs");
     fs::write(packs.join("a\u{202e}b.pack"), b"not a pack").unwrap();
     let out = run(&env, &["verify"]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
@@ -214,11 +214,11 @@ fn fsck_verifies() {
 fn on_a_terminal_the_checks_have_their_marks() {
     let env = project();
     let out = env
-        .opal()
-        .env("OPAL_FAKE_TERMINAL", "80")
-        .env("OPAL_PROGRESS_QUIET_MS", "600000")
+        .opalro()
+        .env("OPALRO_FAKE_TERMINAL", "80")
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env("TERM", "xterm-256color")
-        .env("OPAL_ASCII", "0")
+        .env("OPALRO_ASCII", "0")
         .env_remove("NO_COLOR")
         .arg("verify")
         .output()
@@ -245,7 +245,7 @@ fn every_problem_of_a_kind_is_counted_on_screen() {
     );
     assert!(shown.contains("        ... and 985 more\n"), "{shown}");
     assert!(
-        shown.ends_with("    opal verify --json lists the first 1,000.\n"),
+        shown.ends_with("    opalro verify --json lists the first 1,000.\n"),
         "{shown}"
     );
 }
@@ -287,10 +287,10 @@ fn verify_leaves_every_file_as_it_was_even_opals_leftovers() {
             });
             fs::remove_file(&gone[0]).unwrap();
         }
-        let leftover = env.root().join(".opal/tmp/tmp-0123456789abcdef");
+        let leftover = env.root().join(".opalro/tmp/tmp-0123456789abcdef");
         fs::write(&leftover, "left by a crash").unwrap();
-        let opal = env.root().join(".opal");
-        let before = picture(&opal);
+        let opalro = env.root().join(".opalro");
+        let before = picture(&opalro);
         let out = run(&env, &["verify"]);
         let code = if damaged { 1 } else { 0 };
         assert_eq!(out.status.code(), Some(code), "{}", text(&out.stdout));
@@ -303,25 +303,25 @@ fn verify_leaves_every_file_as_it_was_even_opals_leftovers() {
             );
         }
         assert!(leftover.exists());
-        assert_eq!(picture(&opal), before, "damaged: {damaged}");
+        assert_eq!(picture(&opalro), before, "damaged: {damaged}");
     }
 }
 
 #[test]
 fn verify_makes_only_the_empty_working_folders_it_lacks() {
     let env = project();
-    let opal = env.root().join(".opal");
-    fs::remove_dir_all(opal.join("tmp")).unwrap();
-    let before = picture(&opal);
+    let opalro = env.root().join(".opalro");
+    fs::remove_dir_all(opalro.join("tmp")).unwrap();
+    let before = picture(&opalro);
     let out = run(&env, &["verify"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
-    let tmp = opal.join("tmp");
+    let tmp = opalro.join("tmp");
     assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
-    let mut after = picture(&opal);
+    let mut after = picture(&opalro);
     assert!(after.remove(&tmp).is_some());
     // The folder that holds it changed when it was made; nothing else did.
     let mut before = before;
-    before.remove(&opal);
-    after.remove(&opal);
+    before.remove(&opalro);
+    after.remove(&opalro);
     assert_eq!(after, before);
 }

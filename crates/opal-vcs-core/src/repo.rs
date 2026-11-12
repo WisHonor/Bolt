@@ -34,7 +34,7 @@ pub const FORMAT_TEXT: &str = "opal-repository 1\nhash blake3\nfeature chunks\n"
 const CHUNKS: &str = "chunks";
 
 /// What went wrong with a project. A path or detail in a message may hold text from outside Opalro
-/// (the project folder's name, a hostile `.opal/format`), so it is shown escaped.
+/// (the project folder's name, a hostile `.opalro/format`), so it is shown escaped.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
     #[error("Not inside an Opalro project.")]
@@ -42,7 +42,7 @@ pub enum RepoError {
     #[error("This folder is already an Opalro project.")]
     AlreadyAProject { root: PathBuf },
     #[error(
-        "There's a .opal folder here that Opalro didn't make (another tool may use that \
+        "There's a .opalro folder here that Opalro didn't make (another tool may use that \
          name); move or rename it first."
     )]
     OtherToolsFolder { root: PathBuf },
@@ -81,31 +81,31 @@ pub enum RepoError {
         refusal: Box<RepoError>,
     },
     #[error(
-        "The .opal folder at {} changed while Opalro looked at it.",
+        "The .opalro folder at {} changed while Opalro looked at it.",
         escape(&root.display().to_string(), false)
     )]
     OpalChanged { root: PathBuf },
-    /// `opal start` made `.opal` but may not use it. Once the folder is trusted, running it again
+    /// `opalro start` made `.opalro` but may not use it. Once the folder is trusted, running it again
     /// finishes the project.
-    #[error("The .opal folder was made, but the project isn't finished. {refusal}")]
+    #[error("The .opalro folder was made, but the project isn't finished. {refusal}")]
     StartStopped { refusal: Box<RepoError> },
-    /// A command found the `.opal` of a start or import that stopped before it wrote `format`.
+    /// A command found the `.opalro` of a start or import that stopped before it wrote `format`.
     /// `stored`: it holds a head or packs, which may be history Git no longer has.
     #[error(
         "An import or start began an Opalro project at {} and didn't finish it.",
         escape(&root.display().to_string(), false)
     )]
     Unfinished { root: PathBuf, stored: bool },
-    /// A command found the `.opal` of a start or import that is still running.
+    /// A command found the `.opalro` of a start or import that is still running.
     #[error(
         "An Opalro import or start is still making the project at {}.",
         escape(&root.display().to_string(), false)
     )]
     BeingMade { root: PathBuf },
-    /// `opal start` found files an unfinished import stored, which an empty project would leave
+    /// `opalro start` found files an unfinished import stored, which an empty project would leave
     /// unused.
     #[error(
-        "An import began an Opalro project here and didn't finish, and opal start won't make an empty \
+        "An import began an Opalro project here and didn't finish, and opalro start won't make an empty \
          project over what it stored."
     )]
     ImportUnfinished,
@@ -116,11 +116,11 @@ pub enum RepoError {
     NewerFormat { detail: String },
     #[error("This project's Opalro data looks damaged: {}.", escape(detail, false))]
     Damaged { detail: String },
-    /// A folder of a save holds a spelling of `.opal`, which no listing Opalro makes holds: of
+    /// A folder of a save holds a spelling of `.opalro`, which no listing Opalro makes holds: of
     /// `save` once the command knows which save it was reading. `current` only when the project
     /// is on that save, which a save read for another reason (a shelf's base, say) isn't.
     #[error(
-        "{} holds a name spelled like Opalro's own folder (.opal), which Opalro never writes, so it \
+        "{} holds a name spelled like Opalro's own folder (.opalro), which Opalro never writes, so it \
          can't be used.",
         save.map_or_else(|| "A save".to_owned(), |id| format!("Save {}", id.short_hex()))
     )]
@@ -140,7 +140,7 @@ pub enum RepoError {
     /// `state/head` is missing, isn't an entry's ID, or names an entry the store can't give: no
     /// command can tell which state is current, though every save is in the store.
     #[error(
-        "Opalro can't tell which diary entry is the project's current one: .opal/state/head {}.",
+        "Opalro can't tell which diary entry is the project's current one: .opalro/state/head {}.",
         escape(detail, false)
     )]
     HeadLost { detail: String },
@@ -148,7 +148,7 @@ pub enum RepoError {
     /// neither carried out nor passed over, since the folder may be half switched.
     #[error(
         "A switch between saves was stopped here, and Opalro can't finish it: \
-         .opal/state/journal {}.",
+         .opalro/state/journal {}.",
         escape(detail, false)
     )]
     JournalUnusable { detail: String },
@@ -164,7 +164,7 @@ pub enum RepoError {
         escape(detail, true)
     )]
     SwitchInUse { detail: String },
-    /// One of Opalro's own files in `.opal` couldn't be replaced.
+    /// One of Opalro's own files in `.opalro` couldn't be replaced.
     #[error(
         "Opalro couldn't write {}: {}",
         escape(&path.display().to_string(), false),
@@ -232,26 +232,26 @@ impl RepoError {
         }
         Some(
             match self {
-                RepoError::NotAProject => "Run `opal start` to make this folder an Opalro project.",
+                RepoError::NotAProject => "Run `opalro start` to make this folder an Opalro project.",
                 RepoError::InsideAnotherProject { .. } => {
                     "Run Opalro commands there, or pick a folder outside it."
                 }
                 RepoError::StartStopped { refusal } => {
-                    return refusal.hint_then("Then run `opal start` again to finish.");
+                    return refusal.hint_then("Then run `opalro start` again to finish.");
                 }
                 // Deleting is offered only for a folder that holds nothing: what is stored may be
                 // history Git no longer has, and running the command again finishes from it.
                 RepoError::Unfinished { stored: false, .. } => {
-                    "Run `opal import` (or `opal start`, if that began it) in that folder again to \
-                     finish, or delete its hidden .opal folder."
+                    "Run `opalro import` (or `opalro start`, if that began it) in that folder again to \
+                     finish, or delete its hidden .opalro folder."
                 }
                 RepoError::Unfinished { stored: true, .. } => {
-                    "Run `opal import` (or `opal start`, if that began it) in that folder again to \
+                    "Run `opalro import` (or `opalro start`, if that began it) in that folder again to \
                      finish."
                 }
                 RepoError::BeingMade { .. } => "Run the command again once it has finished.",
                 RepoError::OpalChanged { .. } => "Run the command again.",
-                RepoError::ImportUnfinished => "Run `opal import` again to finish the import.",
+                RepoError::ImportUnfinished => "Run `opalro import` again to finish the import.",
                 RepoError::NewerFormat { .. } => "Update Opalro to open it.",
                 RepoError::Damaged { .. } => {
                     "Nothing was changed. Ask for help before trying to repair it."
@@ -272,19 +272,19 @@ impl RepoError {
                 }
                 RepoError::CantTidy { .. } => {
                     "Nothing was removed. Check the pack's permissions. If it is damaged for good, \
-                     moving it out of .opal/store/packs lets `opal tidy` run, losing what only it \
+                     moving it out of .opalro/store/packs lets `opalro tidy` run, losing what only it \
                      holds, and the chunks only its chunk lists name."
                 }
                 RepoError::HeadLost { .. } => {
-                    "Your saves are safe. `opal undo --list` lists the entries where the diary may \
-                     have stopped, newest first, and `opal undo --to <entry>` makes one of them \
+                    "Your saves are safe. `opalro undo --list` lists the entries where the diary may \
+                     have stopped, newest first, and `opalro undo --to <entry>` makes one of them \
                      current, without changing any file."
                 }
                 // Removing the journal is no roll back: the files stay as the switch left them.
                 RepoError::JournalUnusable { .. } => {
                     "Nothing was changed. Your files are as the stopped switch left them, and \
-                     `opal status` shows how they differ from the save the project is on. To go \
-                     on without finishing the switch, delete .opal/state/journal: a later `opal save` \
+                     `opalro status` shows how they differ from the save the project is on. To go \
+                     on without finishing the switch, delete .opalro/state/journal: a later `opalro save` \
                      then records the folder as it is at that time."
                 }
                 RepoError::SwitchStopped { source, .. } => {
@@ -300,7 +300,7 @@ impl RepoError {
                     let damage = copy.map_or(String::new(), |copy| {
                         format!(
                             " Opalro's copy of it {copy}: ask for help before trying to repair the \
-                             project. To go on without it, delete .opal/state/journal: your files \
+                             project. To go on without it, delete .opalro/state/journal: your files \
                              stay as they are, and the next command goes on from there."
                         )
                     });
@@ -316,10 +316,10 @@ impl RepoError {
                 RepoError::CantWrite { source, .. } if fsio::held(source) => {
                     "Another program, such as a virus scanner or sync tool, may have it open: run \
                      the command again in a moment. If it keeps failing, check that Opalro can write \
-                     to the .opal folder."
+                     to the .opalro folder."
                 }
                 RepoError::CantWrite { .. } => {
-                    "Check that Opalro can write to the .opal folder and that its drive has free \
+                    "Check that Opalro can write to the .opalro folder and that its drive has free \
                      space, then run the command again."
                 }
                 RepoError::Config(e) => return e.hint(),
@@ -334,7 +334,7 @@ impl RepoError {
         )
     }
 
-    /// This error, met reading the folders of the save `save`: a spelling of `.opal` is told as
+    /// This error, met reading the folders of the save `save`: a spelling of `.opalro` is told as
     /// that save's, `current` when the project is on it.
     #[must_use]
     pub(crate) fn in_save(self, save: Id, current: bool) -> RepoError {
@@ -347,7 +347,7 @@ impl RepoError {
         }
     }
 
-    /// `hint`, then `then`, for a refusal that stopped `opal start` or `opal import` after `.opal`
+    /// `hint`, then `then`, for a refusal that stopped `opalro start` or `opalro import` after `.opalro`
     /// was made. Where other accounts can write, the hint says to move the project instead, so
     /// `then` is left off.
     pub(crate) fn hint_then(&self, then: &str) -> Option<String> {
@@ -400,7 +400,7 @@ pub(crate) fn damaged(detail: impl Into<String>) -> RepoError {
     }
 }
 
-/// A `safe_fs` refusal (a link, special file or oversized file where `.opal` must hold a real
+/// A `safe_fs` refusal (a link, special file or oversized file where `.opalro` must hold a real
 /// one) is damage; any other error stays an I/O error.
 pub(crate) fn refused(e: io::Error) -> RepoError {
     match e.kind() {
@@ -430,38 +430,38 @@ pub(crate) fn cant_write(path: PathBuf, e: io::Error) -> RepoError {
 
 /// The folders that must be real folders, never links or junctions (storage-format.md §10),
 /// parents first.
-fn fixed_folders(opal: &Path) -> [PathBuf; 6] {
-    let store = opal.join("store");
+fn fixed_folders(opalro: &Path) -> [PathBuf; 6] {
+    let store = opalro.join("store");
     let packs = store.join("packs");
     [
-        opal.to_owned(),
+        opalro.to_owned(),
         store,
         packs,
-        opal.join("state"),
-        opal.join("cache"),
-        opal.join("tmp"),
+        opalro.join("state"),
+        opalro.join("cache"),
+        opalro.join("tmp"),
     ]
 }
 
-/// Everything Opalro keeps directly in `.opal` (storage-format.md §10).
-const OPAL_ENTRIES: [&str; 6] = ["format", "store", "state", "cache", "tmp", "config.toml"];
+/// Everything Opalro keeps directly in `.opalro` (storage-format.md §10).
+const OPALRO_ENTRIES: [&str; 6] = ["format", "store", "state", "cache", "tmp", "config.toml"];
 
-/// Whether `.opal` holds only names Opalro puts there. Anything else means another tool made it.
-fn holds_only_opals_own(opal: &Path) -> Result<bool, RepoError> {
-    for entry in fs::read_dir(opal)? {
+/// Whether `.opalro` holds only names Opalro puts there. Anything else means another tool made it.
+fn holds_only_opals_own(opalro: &Path) -> Result<bool, RepoError> {
+    for entry in fs::read_dir(opalro)? {
         let name = entry?.file_name();
-        if !OPAL_ENTRIES.iter().any(|own| name == *own) {
+        if !OPALRO_ENTRIES.iter().any(|own| name == *own) {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-/// `.opal` and the fixed folders in it that commands read and write, held open from the moment
+/// `.opalro` and the fixed folders in it that commands read and write, held open from the moment
 /// its shape was checked: what Opalro reads and writes there goes through these, so a folder
 /// swapped for a link since is never followed (security.md T19).
 struct Held {
-    opal: Dir,
+    opalro: Dir,
     state: Dir,
     packs: Arc<Dir>,
     tmp: Arc<Dir>,
@@ -469,16 +469,16 @@ struct Held {
 }
 
 impl Held {
-    /// The fixed folders of the `.opal` folder `opal`, held open as `top`, each made in the one
+    /// The fixed folders of the `.opalro` folder `opalro`, held open as `top`, each made in the one
     /// above it if missing, then opened from it.
-    fn make(top: Dir, opal: &Path) -> Result<Held, RepoError> {
-        let store = make_fixed(&top, opal, "store")?;
+    fn make(top: Dir, opalro: &Path) -> Result<Held, RepoError> {
+        let store = make_fixed(&top, opalro, "store")?;
         Ok(Held {
-            state: make_fixed(&top, opal, "state")?,
-            packs: Arc::new(make_fixed(&store, &opal.join("store"), "packs")?),
-            tmp: Arc::new(make_fixed(&top, opal, "tmp")?),
-            cache: make_fixed(&top, opal, "cache")?,
-            opal: top,
+            state: make_fixed(&top, opalro, "state")?,
+            packs: Arc::new(make_fixed(&store, &opalro.join("store"), "packs")?),
+            tmp: Arc::new(make_fixed(&top, opalro, "tmp")?),
+            cache: make_fixed(&top, opalro, "cache")?,
+            opalro: top,
         })
     }
 }
@@ -513,10 +513,10 @@ fn unreal(path: &Path, e: io::Error) -> RepoError {
     }
 }
 
-/// Refuses a `.opal` whose fixed folders are links, junctions or files. A missing one passes:
+/// Refuses a `.opalro` whose fixed folders are links, junctions or files. A missing one passes:
 /// `begin` creates them, and `open` makes `tmp` and `cache` again and reports the others as damage.
-fn check_shape(opal: &Path) -> Result<(), RepoError> {
-    for dir in fixed_folders(opal) {
+fn check_shape(opalro: &Path) -> Result<(), RepoError> {
+    for dir in fixed_folders(opalro) {
         match safe_fs::check_real_dir(&dir) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(refused(e)),
             _ => {}
@@ -525,8 +525,8 @@ fn check_shape(opal: &Path) -> Result<(), RepoError> {
     Ok(())
 }
 
-/// Refuses the project at `root` unless the folder and its `.opal` are the user's, or the user
-/// listed `root` in safe-folders, as Git does (T23). `opal_seen`: the caller just saw `.opal`
+/// Refuses the project at `root` unless the folder and its `.opalro` are the user's, or the user
+/// listed `root` in safe-folders, as Git does (T23). `opal_seen`: the caller just saw `.opalro`
 /// there, so it may not be missing now.
 fn check_owner(root: &Path, opal_seen: bool) -> Result<(), RepoError> {
     check_owner_with(
@@ -546,7 +546,7 @@ fn check_owner_with(
 ) -> Result<(), RepoError> {
     let mut owners = vec![owner_of(root)];
     fsio::act_point("owner:asking");
-    let opal_owner = owner_of(&root.join(".opal"));
+    let opal_owner = owner_of(&root.join(".opalro"));
     fsio::act_point("owner:asked");
     match opal_owner {
         // Gone since it was seen: if it comes back, nobody asked who owns it.
@@ -555,7 +555,7 @@ fn check_owner_with(
                 root: root.to_owned(),
             });
         }
-        // Before `opal start` makes `.opal`, the folder alone decides.
+        // Before `opalro start` makes `.opalro`, the folder alone decides.
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         owner => owners.push(owner),
     }
@@ -577,7 +577,7 @@ pub(crate) fn counts_as_users(owner: &io::Result<Owner>) -> bool {
     )
 }
 
-/// Whether Opalro may use the project at `root`, given who owns the folder and its `.opal` (or why
+/// Whether Opalro may use the project at `root`, given who owns the folder and its `.opalro` (or why
 /// that couldn't be found out): all must be the user's, unless `safe` lists `root` itself. An
 /// entry that is itself a link never counts: whoever can swap a trusted folder for one would move
 /// the trust to wherever it leads. The Administrators group is the user's only while it is
@@ -694,8 +694,8 @@ pub(crate) fn passed_over(entry: &Path, why: &str) -> String {
     )
 }
 
-/// What `opal start` tells the user when the project at `root` will open only from an
-/// administrator terminal: its folder or `.opal` belongs to the Administrators group, which counts
+/// What `opalro start` tells the user when the project at `root` will open only from an
+/// administrator terminal: its folder or `.opalro` belongs to the Administrators group, which counts
 /// as the user's only there.
 #[must_use]
 pub fn elevated_only_note(root: &Path) -> Option<String> {
@@ -709,7 +709,7 @@ fn elevated_only_note_with(
 ) -> Option<String> {
     let group_owns =
         |path: &Path| matches!(owner_of(path), Ok(Owner::Administrators { elevated: true }));
-    (group_owns(root) || group_owns(&root.join(".opal"))).then(|| {
+    (group_owns(root) || group_owns(&root.join(".opalro"))).then(|| {
         format!(
             "This project belongs to the Administrators group, so it opens only from an \
              administrator terminal.\n{}",
@@ -718,15 +718,15 @@ fn elevated_only_note_with(
     })
 }
 
-/// Checks `root` and its `.opal` before anything inside is looked at. `owner_check` must allow
-/// both, and `.opal`, if there, must be a real folder. The folders inside `.opal` must be real too.
-/// `Ok(false)`: no `.opal`.
+/// Checks `root` and its `.opalro` before anything inside is looked at. `owner_check` must allow
+/// both, and `.opalro`, if there, must be a real folder. The folders inside `.opalro` must be real too.
+/// `Ok(false)`: no `.opalro`.
 fn check_opal(
     root: &Path,
     owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
 ) -> Result<bool, RepoError> {
-    let opal = root.join(".opal");
-    let is_there = || match safe_fs::check_real_dir(&opal) {
+    let opalro = root.join(".opalro");
+    let is_there = || match safe_fs::check_real_dir(&opalro) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(refused(e)),
@@ -737,7 +737,7 @@ fn check_opal(
     if !found || !is_there()? {
         return Ok(false);
     }
-    check_shape(&opal)?;
+    check_shape(&opalro)?;
     Ok(true)
 }
 
@@ -751,7 +751,7 @@ fn is_word(s: &str) -> bool {
     !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// Parses `.opal/format`. Anything a newer Opalro could have written is `NewerFormat`;
+/// Parses `.opalro/format`. Anything a newer Opalro could have written is `NewerFormat`;
 /// anything else that isn't exactly right is `Damaged`.
 pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
     let damaged_format = || damaged("the format file is not in the expected form");
@@ -815,10 +815,10 @@ impl Head {
     }
 }
 
-/// `head` in `state`, the `state` folder of the `.opal` folder `opal`. A link or special file
+/// `head` in `state`, the `state` folder of the `.opalro` folder `opalro`. A link or special file
 /// there is damage.
-fn read_head(state: &Dir, opal: &Path) -> Result<Head, RepoError> {
-    let shown = opal.join("state").join("head");
+fn read_head(state: &Dir, opalro: &Path) -> Result<Head, RepoError> {
+    let shown = opalro.join("state").join("head");
     let max = safe_fs::MAX_HEAD_BYTES;
     let bytes = match safe_fs::read_capped_in(state, OsStr::new("head"), &shown, max) {
         Ok(bytes) => bytes,
@@ -879,7 +879,7 @@ pub struct ChangeLock {
 
 pub struct Repository {
     root: PathBuf,
-    opal: PathBuf,
+    opalro: PathBuf,
     tmp: PathBuf,
     packs: PathBuf,
     held: Held,
@@ -890,7 +890,7 @@ pub struct Repository {
     head: Option<Id>,
     /// The user's own key, which seals the caches; without it none is read or written.
     cache_key: Option<[u8; KEY_LEN]>,
-    /// The project's `opal.toml`, as the change lock last read it.
+    /// The project's `opalro.toml`, as the change lock last read it.
     rules: RulesRead,
 }
 
@@ -916,50 +916,50 @@ pub fn resolved(path: &Path) -> PathBuf {
     }
 }
 
-/// The `.opal/format` file of the project whose top folder is `root`.
+/// The `.opalro/format` file of the project whose top folder is `root`.
 fn format_path(root: &Path) -> PathBuf {
-    root.join(".opal").join("format")
+    root.join(".opalro").join("format")
 }
 
 /// Whether `folder` holds a project, for the searches up from a folder. A refusal from
-/// `owner_check` is the error. Nothing is followed, and nothing in `.opal` is looked at before
-/// `owner_check` allows it: a planted `.opal` could point at another computer.
+/// `owner_check` is the error. Nothing is followed, and nothing in `.opalro` is looked at before
+/// `owner_check` allows it: a planted `.opalro` could point at another computer.
 fn has_project(
     folder: &Path,
     owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
 ) -> Result<bool, RepoError> {
-    let is_link = match fs::symlink_metadata(folder.join(".opal")) {
+    let is_link = match fs::symlink_metadata(folder.join(".opalro")) {
         Ok(meta) if safe_fs::is_link(&meta) => true,
         Ok(meta) if meta.is_dir() => false,
         _ => return Ok(false),
     };
     owner_check(folder, true)?;
-    // A link counts, so that `open` refuses it; a real `.opal` needs a `format`.
+    // A link counts, so that `open` refuses it; a real `.opalro` needs a `format`.
     Ok(is_link || has_format(folder).unwrap_or(false))
 }
 
-/// What a command says of `folder` when it holds a real `.opal` of Opalro's own names without
+/// What a command says of `folder` when it holds a real `.opalro` of Opalro's own names without
 /// `format`; `None` for any other folder. A start or import holding the lock is still making the
 /// project; a project whose diary shows saves lost its `format`, which is damage; anything else
 /// is a start or import that stopped. Only for a folder `has_project` has passed, so its owner
 /// was asked.
 fn unfinished_here(folder: &Path) -> Option<RepoError> {
-    let opal = folder.join(".opal");
-    let begun = safe_fs::check_real_dir(&opal).is_ok()
+    let opalro = folder.join(".opalro");
+    let begun = safe_fs::check_real_dir(&opalro).is_ok()
         && matches!(has_format(folder), Ok(false))
-        && matches!(holds_only_opals_own(&opal), Ok(true));
+        && matches!(holds_only_opals_own(&opalro), Ok(true));
     if !begun {
         return None;
     }
     let root = folder.to_owned();
     // Nothing in it is opened through a link.
-    if let Err(e) = check_shape(&opal) {
+    if let Err(e) = check_shape(&opalro) {
         return Some(e);
     }
-    if lock_is_held(&opal) {
+    if lock_is_held(&opalro) {
         return Some(RepoError::BeingMade { root });
     }
-    Some(match diary_of(&opal) {
+    Some(match diary_of(&opalro) {
         Ok(Diary::Nothing) => RepoError::Unfinished {
             root,
             stored: false,
@@ -970,16 +970,16 @@ fn unfinished_here(folder: &Path) -> Option<RepoError> {
     })
 }
 
-/// Whether a command holds the change lock of the `.opal` folder `opal`. Only looks: a lock file
+/// Whether a command holds the change lock of the `.opalro` folder `opalro`. Only looks: a lock file
 /// that isn't there was never taken, and a failure other than a busy lock says nothing either way.
-fn lock_is_held(opal: &Path) -> bool {
-    let path = opal.join("state").join("lock");
+fn lock_is_held(opalro: &Path) -> bool {
+    let path = opalro.join("state").join("lock");
     // Opened as `lock_for_change` opens it: some drives lock only a file open for writing.
     let opened = safe_fs::open_regular(&path, fs::OpenOptions::new().read(true).write(true));
     opened.is_ok_and(|file| matches!(file.try_lock(), Err(TryLockError::WouldBlock)))
 }
 
-/// How far the diary of a `.opal` without `format` got.
+/// How far the diary of a `.opalro` without `format` got.
 enum Diary {
     /// No head and no packs: nothing is stored.
     Nothing,
@@ -991,12 +991,12 @@ enum Diary {
     Saves,
 }
 
-/// How far the diary of the `.opal` folder `opal`, whose shape was checked, got.
-fn diary_of(opal: &Path) -> Result<Diary, RepoError> {
-    let state = opal.join("state");
+/// How far the diary of the `.opalro` folder `opalro`, whose shape was checked, got.
+fn diary_of(opalro: &Path) -> Result<Diary, RepoError> {
+    let state = opalro.join("state");
     // A start can stop before it makes `state`.
     let head = match Dir::open_top(&state) {
-        Ok(dir) => match read_head(&dir, opal)? {
+        Ok(dir) => match read_head(&dir, opalro)? {
             Head::Garbled => {
                 return Err(damaged(
                     "state/head is not a lowercase fingerprint and a newline",
@@ -1007,7 +1007,7 @@ fn diary_of(opal: &Path) -> Result<Diary, RepoError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(unreal(&state, e)),
     };
-    let packs = opal.join("store").join("packs");
+    let packs = opalro.join("store").join("packs");
     // A start can stop before it makes the store.
     let no_store =
         matches!(fs::symlink_metadata(&packs), Err(e) if e.kind() == io::ErrorKind::NotFound);
@@ -1032,18 +1032,18 @@ fn diary_of(opal: &Path) -> Result<Diary, RepoError> {
 /// never a project to make again over its saves.
 fn lost_format(root: &Path) -> RepoError {
     damaged(format!(
-        "the project at {} has saves, but no .opal/format file",
+        "the project at {} has saves, but no .opalro/format file",
         root.display()
     ))
 }
 
-/// Whether `root/.opal/state/head` is there, without following a link to it: some command
+/// Whether `root/.opalro/state/head` is there, without following a link to it: some command
 /// committed.
 pub(crate) fn has_head(root: &Path) -> bool {
-    fs::symlink_metadata(root.join(".opal").join("state").join("head")).is_ok()
+    fs::symlink_metadata(root.join(".opalro").join("state").join("head")).is_ok()
 }
 
-/// Whether `root/.opal` holds an entry named `format`, of any kind (`open` checks it), without
+/// Whether `root/.opalro` holds an entry named `format`, of any kind (`open` checks it), without
 /// following a link there.
 pub(crate) fn has_format(root: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(format_path(root)) {
@@ -1054,7 +1054,7 @@ pub(crate) fn has_format(root: &Path) -> io::Result<bool> {
 }
 
 /// The nearest folder above `root` holding a project Opalro may use. One it may not use is looked
-/// past, so that a `.opal` planted above the user's work can't stop them starting their own.
+/// past, so that a `.opalro` planted above the user's work can't stop them starting their own.
 fn enclosing_project<'a>(
     root: &'a Path,
     owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
@@ -1072,9 +1072,9 @@ fn enclosing_project<'a>(
 }
 
 impl Repository {
-    /// Makes `root` a new project: the folders, the first save on line `main`, then `.opal/format`
-    /// last. A `.opal` without `format` is an interrupted start, which this finishes, or an
-    /// interrupted import, which it refuses once the import has stored files: `opal import`
+    /// Makes `root` a new project: the folders, the first save on line `main`, then `.opalro/format`
+    /// last. A `.opalro` without `format` is an interrupted start, which this finishes, or an
+    /// interrupted import, which it refuses once the import has stored files: `opalro import`
     /// finishes that, and an empty project would leave them unused. One whose diary shows saves
     /// is a project that lost its `format`, which it refuses as damage (`check_new`).
     pub fn init(root: &Path, who: &Person) -> Result<Repository, RepoError> {
@@ -1128,15 +1128,15 @@ impl Repository {
         Ok(repo)
     }
 
-    /// Refuses to make `root` a project when it or its `.opal` isn't the user's, when it is a
-    /// project already, when another tool made its `.opal`, when it is a project that had saves
+    /// Refuses to make `root` a project when it or its `.opalro` isn't the user's, when it is a
+    /// project already, when another tool made its `.opalro`, when it is a project that had saves
     /// and lost its `format` (damage), or when it is inside another project. Makes nothing, so a
     /// command can ask before its own slow checks.
     pub fn check_new(root: &Path) -> Result<(), RepoError> {
         Repository::check_new_with(root, &check_owner).map(drop)
     }
 
-    /// `check_new`, with the owner check given. `Ok(true)`: a `.opal` that Opalro made is there
+    /// `check_new`, with the owner check given. `Ok(true)`: a `.opalro` that Opalro made is there
     /// already, left by a start or import that didn't finish.
     fn check_new_with(
         root: &Path,
@@ -1150,13 +1150,13 @@ impl Repository {
                 root: root.to_owned(),
             });
         }
-        if found && !holds_only_opals_own(&root.join(".opal"))? {
+        if found && !holds_only_opals_own(&root.join(".opalro"))? {
             return Err(RepoError::OtherToolsFolder {
                 root: root.to_owned(),
             });
         }
         // Its first entry would be written over the saves' diary, leaving them for clean-up.
-        if found && matches!(diary_of(&root.join(".opal"))?, Diary::Saves) {
+        if found && matches!(diary_of(&root.join(".opalro"))?, Diary::Saves) {
             return Err(lost_format(root));
         }
         if let Some(outer) = enclosing_project(root, owner_check)? {
@@ -1180,7 +1180,7 @@ impl Repository {
         owner_check: &dyn Fn(&Path, bool) -> Result<(), RepoError>,
     ) -> Result<(Repository, ChangeLock), RepoError> {
         let root = &resolved(root);
-        let opal = root.join(".opal");
+        let opalro = root.join(".opalro");
         let found = Repository::check_new_with(root, owner_check)?;
         let top = Dir::open_top(root).map_err(|e| {
             let shown = escape(&root.display().to_string(), false);
@@ -1188,7 +1188,7 @@ impl Repository {
             io::Error::new(e.kind(), said)
         })?;
         if !found {
-            match top.create_dir(OsStr::new(".opal")) {
+            match top.create_dir(OsStr::new(".opalro")) {
                 Ok(()) => top.sync()?,
                 // One made meanwhile, by another start say, is checked below as this one would be.
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -1208,22 +1208,22 @@ impl Repository {
             if !made {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "The .opal folder disappeared while the project was being started.",
+                    "The .opalro folder disappeared while the project was being started.",
                 )
                 .into());
             }
         }
         // Opened, never made: one gone since its check must not be made again unchecked. Each
         // folder in it is made and opened through the one above, so none through a link.
-        let held = Held::make(fixed(&top, root, ".opal")?, &opal)?;
-        opal_platform::hide_path(&opal)?;
-        let tmp = opal.join("tmp");
-        let packs = opal.join("store").join("packs");
+        let held = Held::make(fixed(&top, root, ".opalro")?, &opalro)?;
+        opal_platform::hide_path(&opalro)?;
+        let tmp = opalro.join("tmp");
+        let packs = opalro.join("store").join("packs");
         let mut repo = Repository {
             root: root.to_owned(),
             store: Store::open_in(Arc::clone(&held.packs), &packs)?,
             held,
-            opal,
+            opalro,
             tmp,
             packs,
             // As `commit_first` writes it, so taking the lock writes none before then.
@@ -1246,7 +1246,7 @@ impl Repository {
         Ok((repo, lock))
     }
 
-    /// Commits the first entry of a project `begin` started, then writes `.opal/format`, which
+    /// Commits the first entry of a project `begin` started, then writes `.opalro/format`, which
     /// makes it a project.
     pub fn commit_first(
         &mut self,
@@ -1261,19 +1261,19 @@ impl Repository {
         Ok(id)
     }
 
-    /// Replaces `.opal/format` with this version's. It knows no feature but `chunks`, so that
+    /// Replaces `.opalro/format` with this version's. It knows no feature but `chunks`, so that
     /// adds the one line a project of an older build can lack.
     fn write_format(&mut self, _lock: &ChangeLock) -> Result<(), RepoError> {
         let (held, name) = (&self.held, "format");
-        write_atomic(&held.tmp, &held.opal, name, FORMAT_TEXT.as_bytes())
-            .map_err(|e| cant_write(self.opal.join(name), e))?;
+        write_atomic(&held.tmp, &held.opalro, name, FORMAT_TEXT.as_bytes())
+            .map_err(|e| cant_write(self.opalro.join(name), e))?;
         self.format = parse_format(FORMAT_TEXT)?;
         Ok(())
     }
 
     /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
-    /// A `.opal` on the way that Opalro may not use is refused. With none, the nearest `.opal` a
-    /// start or import began is named, so that nobody is sent to `opal start` over an import: one
+    /// A `.opalro` on the way that Opalro may not use is refused. With none, the nearest `.opalro` a
+    /// start or import began is named, so that nobody is sent to `opalro start` over an import: one
     /// still being made, one that stopped, or one that lost only its `format`, which is damage.
     /// `start` is resolved first, so a link to the project is judged by the folder it leads to.
     pub fn discover(start: &Path) -> Result<Repository, RepoError> {
@@ -1313,7 +1313,7 @@ impl Repository {
         Err(unfinished.unwrap_or(RepoError::NotAProject))
     }
 
-    /// Opens the project whose top folder is `root` (the folder holding `.opal`).
+    /// Opens the project whose top folder is `root` (the folder holding `.opalro`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
         let repo = Repository::open_untouched(root)?;
         repo.clean_tmp()?;
@@ -1323,12 +1323,12 @@ impl Repository {
     /// [`Repository::open`] without removing the leftovers in `tmp/`, and so without trying the
     /// change lock.
     pub fn open_untouched(root: &Path) -> Result<Repository, RepoError> {
-        let opal = root.join(".opal");
+        let opalro = root.join(".opalro");
         if !check_opal(root, &check_owner)? {
             return Err(RepoError::NotAProject);
         }
         // Held from here on, so nothing below goes through a folder swapped since the check.
-        let top = Dir::open_top(&opal).map_err(|e| unreal(&opal, e))?;
+        let top = Dir::open_top(&opalro).map_err(|e| unreal(&opalro, e))?;
         let max = safe_fs::MAX_FORMAT_BYTES;
         let text =
             match safe_fs::read_capped_in(&top, OsStr::new("format"), &format_path(root), max) {
@@ -1341,38 +1341,38 @@ impl Repository {
                 Err(e) => return Err(refused(e)),
             };
         let format = parse_format(&text)?;
-        let tmp = opal.join("tmp");
-        let packs = opal.join("store").join("packs");
+        let tmp = opalro.join("tmp");
+        let packs = opalro.join("store").join("packs");
         // Every command needs these, so a missing one is damage, named as such.
-        for (dir, name) in [(&opal.join("state"), "state"), (&packs, "store/packs")] {
+        for (dir, name) in [(&opalro.join("state"), "state"), (&packs, "store/packs")] {
             if let Err(e) = safe_fs::check_real_dir(dir)
                 && e.kind() == io::ErrorKind::NotFound
             {
-                return Err(damaged(format!(".opal/{name} is missing")));
+                return Err(damaged(format!(".opalro/{name} is missing")));
             }
         }
-        let state = fixed(&top, &opal, "state")?;
+        let state = fixed(&top, &opalro, "state")?;
         let packs_dir = Arc::new(fixed(
-            &fixed(&top, &opal, "store")?,
-            &opal.join("store"),
+            &fixed(&top, &opalro, "store")?,
+            &opalro.join("store"),
             "packs",
         )?);
         // The head first: its pack was in the store before the head pointed at it. One that is
         // lost is found by `current`, so that `undo --list` and `--to` can still open the project.
-        let head = read_head(&state, &opal)?.id();
+        let head = read_head(&state, &opalro)?.id();
         let store = Store::open_in(Arc::clone(&packs_dir), &packs)?;
         // These hold nothing worth keeping, so a missing one is made again. Only now, so that a
         // project found damaged is left as it was.
         let held = Held {
-            tmp: Arc::new(make_fixed(&top, &opal, "tmp")?),
-            cache: make_fixed(&top, &opal, "cache")?,
-            opal: top,
+            tmp: Arc::new(make_fixed(&top, &opalro, "tmp")?),
+            cache: make_fixed(&top, &opalro, "cache")?,
+            opalro: top,
             state,
             packs: packs_dir,
         };
         Ok(Repository {
             root: root.to_owned(),
-            opal,
+            opalro,
             tmp,
             packs,
             held,
@@ -1435,7 +1435,7 @@ impl Repository {
 
     /// `state/lock`, to name it.
     fn lock_path(&self) -> PathBuf {
-        self.opal.join("state").join("lock")
+        self.opalro.join("state").join("lock")
     }
 
     #[must_use]
@@ -1458,9 +1458,9 @@ impl Repository {
         &self.held.tmp
     }
 
-    /// `.opal`, held open.
+    /// `.opalro`, held open.
     pub(crate) fn opal_folder(&self) -> &Dir {
-        &self.held.opal
+        &self.held.opalro
     }
 
     /// The key that seals this project's caches, if `set_cache_key` gave one.
@@ -1483,7 +1483,7 @@ impl Repository {
 
     /// Where `state/` is, to name files in it.
     pub(crate) fn state_dir(&self) -> PathBuf {
-        self.opal.join("state")
+        self.opalro.join("state")
     }
 
     /// `cache/`, held open.
@@ -1493,7 +1493,7 @@ impl Repository {
 
     /// Where `cache/` is, to name files in it.
     pub(crate) fn cache_dir(&self) -> PathBuf {
-        self.opal.join("cache")
+        self.opalro.join("cache")
     }
 
     #[must_use]
@@ -1516,7 +1516,7 @@ impl Repository {
         &self.rules
     }
 
-    /// Reads the project's `opal.toml` now, for a command that takes no lock.
+    /// Reads the project's `opalro.toml` now, for a command that takes no lock.
     #[must_use]
     pub fn read_rules(&self) -> RulesRead {
         match Dir::open_top(&self.root) {
@@ -1550,7 +1550,7 @@ impl Repository {
     /// The newest diary entry's ID. Readers never take the lock: `state/head` is replaced whole.
     /// `HeadLost` when it is missing or isn't an entry's ID.
     pub fn head(&self) -> Result<Id, RepoError> {
-        match read_head(&self.held.state, &self.opal)? {
+        match read_head(&self.held.state, &self.opalro)? {
             Head::At(id) => Ok(id),
             Head::Missing => Err(head_lost("is missing")),
             Head::Garbled => Err(head_lost("isn't a diary entry's ID and a newline")),
@@ -1608,7 +1608,7 @@ impl Repository {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
                 // Best effort: the text is only for the message.
-                let shown = self.opal.join("state").join("lock-info");
+                let shown = self.opalro.join("state").join("lock-info");
                 let (name, max) = (OsStr::new("lock-info"), safe_fs::MAX_LOCK_INFO_BYTES);
                 let info = safe_fs::read_capped_in(&self.held.state, name, &shown, max)
                     .ok()
@@ -1640,7 +1640,7 @@ impl Repository {
         }
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
-        self.head = read_head(&self.held.state, &self.opal)?.id();
+        self.head = read_head(&self.held.state, &self.opalro)?.id();
         self.store.refresh()?;
         // Once per command, under the lock, before anything is stored.
         self.rules = self.read_rules();
@@ -1722,7 +1722,7 @@ impl Repository {
             self.store.note(Warning::new(
                 warning::HEAD_NOT_FLUSHED,
                 format!(
-                    "The command happened, but Opalro couldn't flush .opal/state to the disk after \
+                    "The command happened, but Opalro couldn't flush .opalro/state to the disk after \
                      it ({}), so a power cut soon after could undo it.",
                     e.to_string().trim_end_matches('.')
                 ),
@@ -1800,13 +1800,13 @@ mod tests {
     /// A project made by hand: the folder layout and the `format` file, nothing committed.
     fn project() -> (tempfile::TempDir, Repository) {
         let dir = tempdir();
-        let opal = dir.path().join(".opal");
+        let opalro = dir.path().join(".opalro");
         for sub in ["store/packs", "state", "cache", "tmp"] {
-            std::fs::create_dir_all(opal.join(sub)).unwrap();
+            std::fs::create_dir_all(opalro.join(sub)).unwrap();
         }
-        std::fs::write(opal.join("format"), FORMAT_TEXT).unwrap();
+        std::fs::write(opalro.join("format"), FORMAT_TEXT).unwrap();
         // As `start` leaves it: opening a project never makes it.
-        std::fs::write(opal.join("state").join("lock"), b"").unwrap();
+        std::fs::write(opalro.join("state").join("lock"), b"").unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
@@ -1816,11 +1816,11 @@ mod tests {
         for name in ["state", "store/packs", "store"] {
             let (dir, repo) = project();
             drop(repo);
-            std::fs::remove_dir_all(dir.path().join(".opal").join(name)).unwrap();
+            std::fs::remove_dir_all(dir.path().join(".opalro").join(name)).unwrap();
             let missing = if name == "store" { "store/packs" } else { name };
             match Repository::open(dir.path()) {
                 Err(e @ RepoError::Damaged { .. }) => {
-                    let want = format!("damaged: .opal/{missing} is missing.");
+                    let want = format!("damaged: .opalro/{missing} is missing.");
                     assert!(e.to_string().ends_with(&want), "{e}");
                     assert!(e.hint().unwrap().contains("Nothing was changed"));
                 }
@@ -1835,7 +1835,7 @@ mod tests {
         for name in ["tmp", "cache"] {
             let (dir, repo) = project();
             drop(repo);
-            let folder = dir.path().join(".opal").join(name);
+            let folder = dir.path().join(".opalro").join(name);
             std::fs::remove_dir_all(&folder).unwrap();
             let mut repo = Repository::open(dir.path()).unwrap();
             assert!(safe_fs::check_real_dir(&folder).is_ok(), "{name}");
@@ -1853,13 +1853,13 @@ mod tests {
             let (dir, mut repo) = project();
             let head = commit(&mut repo, &entry(1)).unwrap();
             drop(repo);
-            let opal = dir.path().join(".opal");
+            let opalro = dir.path().join(".opalro");
             // Over 1 MiB, so reading it searches every pack.
             let big = vec![5u8; 2 << 20];
-            let mut w = crate::pack::PackWriter::create(&opal.join("tmp")).unwrap();
+            let mut w = crate::pack::PackWriter::create(&opalro.join("tmp")).unwrap();
             let big_id = w.add_content(&big).unwrap();
-            w.finish(&opal.join("store/packs")).unwrap();
-            let junk = opal.join("store/packs").join(junk_name);
+            w.finish(&opalro.join("store/packs")).unwrap();
+            let junk = opalro.join("store/packs").join(junk_name);
             std::fs::write(&junk, b"not what Opalro wrote").unwrap();
 
             let repo = Repository::open(dir.path()).unwrap();
@@ -1885,7 +1885,10 @@ mod tests {
             );
             assert_eq!(std::fs::read(&junk).unwrap(), b"not what Opalro wrote");
             for name in ["tmp", "cache"] {
-                assert!(safe_fs::check_real_dir(&opal.join(name)).is_ok(), "{name}");
+                assert!(
+                    safe_fs::check_real_dir(&opalro.join(name)).is_ok(),
+                    "{name}"
+                );
             }
         }
     }
@@ -1900,10 +1903,10 @@ mod tests {
         for spoil in ["format"] {
             let (dir, repo) = project();
             drop(repo);
-            let opal = dir.path().join(".opal");
-            std::fs::write(opal.join(spoil), b"not what Opalro wrote").unwrap();
+            let opalro = dir.path().join(".opalro");
+            std::fs::write(opalro.join(spoil), b"not what Opalro wrote").unwrap();
             for name in ["tmp", "cache"] {
-                std::fs::remove_dir_all(opal.join(name)).unwrap();
+                std::fs::remove_dir_all(opalro.join(name)).unwrap();
             }
             let opened = Repository::open(dir.path());
             assert!(
@@ -1912,7 +1915,10 @@ mod tests {
                 opened.map(|_| ())
             );
             for name in ["tmp", "cache"] {
-                assert!(!opal.join(name).exists(), "{spoil}: {name} was made again");
+                assert!(
+                    !opalro.join(name).exists(),
+                    "{spoil}: {name} was made again"
+                );
             }
         }
     }
@@ -2000,7 +2006,7 @@ mod tests {
         std::fs::write(&format, OLDER_FORMAT).unwrap();
         let mut repo = Repository::open(dir.path()).unwrap();
         let packs = || {
-            std::fs::read_dir(dir.path().join(".opal/store/packs"))
+            std::fs::read_dir(dir.path().join(".opalro/store/packs"))
                 .unwrap()
                 .count()
         };
@@ -2097,7 +2103,7 @@ mod tests {
         assert_eq!(repo.current().unwrap(), (a, entry(1)));
         let repo = Repository::open(dir.path()).unwrap();
         assert_eq!(repo.current().unwrap(), (a, entry(1)));
-        let text = std::fs::read_to_string(repo.root().join(".opal/state/head")).unwrap();
+        let text = std::fs::read_to_string(repo.root().join(".opalro/state/head")).unwrap();
         assert_eq!(text, format!("{a}\n"));
     }
 
@@ -2157,7 +2163,7 @@ mod tests {
     #[test]
     fn head_rejects_garbage() {
         let (dir, repo) = project();
-        let head = dir.path().join(".opal/state/head");
+        let head = dir.path().join(".opalro/state/head");
         let upper = format!("{}\n", Id([0xab; 32]).to_hex().to_uppercase());
         let no_newline = Id([0xab; 32]).to_hex();
         for bad in ["xyz\n", upper.as_str(), no_newline.as_str(), ""] {
@@ -2187,7 +2193,7 @@ mod tests {
         repo.store_packs(&lock, packs).unwrap();
         drop((lock, repo));
         for id in [damaged, undecodable] {
-            std::fs::write(dir.path().join(".opal/state/head"), format!("{id}\n")).unwrap();
+            std::fs::write(dir.path().join(".opalro/state/head"), format!("{id}\n")).unwrap();
             let read = Repository::open(dir.path()).unwrap().current();
             match read {
                 Err(e @ RepoError::HeadLost { .. }) => {
@@ -2203,15 +2209,15 @@ mod tests {
         }
     }
 
-    /// A `.opal` without `format` is a start or import that stopped, judged as before: a head
+    /// A `.opalro` without `format` is a start or import that stopped, judged as before: a head
     /// there that isn't an entry's ID is damage, not a lost head.
     #[test]
     fn a_garbled_head_without_format_is_still_damage() {
         let who = entry(0).who;
         let dir = tempdir();
         drop(Repository::init(dir.path(), &who).unwrap());
-        std::fs::remove_file(dir.path().join(".opal/format")).unwrap();
-        std::fs::write(dir.path().join(".opal/state/head"), b"not an ID\n").unwrap();
+        std::fs::remove_file(dir.path().join(".opalro/format")).unwrap();
+        std::fs::write(dir.path().join(".opalro/state/head"), b"not an ID\n").unwrap();
         let found = Repository::discover(dir.path()).map(drop);
         let started = Repository::init(dir.path(), &who).map(drop);
         for refused in [found, started] {
@@ -2264,9 +2270,9 @@ mod tests {
             }
             other => panic!("{:?}", other.map(|_| ())),
         }
-        assert!(!dir.path().join(".opal/format").exists());
+        assert!(!dir.path().join(".opalro/format").exists());
         // Another tool's folder is nothing of Opalro's to finish.
-        std::fs::write(dir.path().join(".opal/prompt"), b"").unwrap();
+        std::fs::write(dir.path().join(".opalro/prompt"), b"").unwrap();
         assert!(matches!(
             Repository::discover(&sub),
             Err(RepoError::NotAProject)
@@ -2321,7 +2327,7 @@ mod tests {
         let who = entry(0).who;
         let dir = tempdir();
         let mut repo = Repository::init(dir.path(), &who).unwrap();
-        let format = dir.path().join(".opal/format");
+        let format = dir.path().join(".opalro/format");
         // Only its first entry: a start that stopped as it wrote `format` looks the same.
         std::fs::remove_file(&format).unwrap();
         assert!(matches!(
@@ -2337,7 +2343,7 @@ mod tests {
         match Repository::discover(dir.path()) {
             Err(e @ RepoError::Damaged { .. }) => {
                 assert!(
-                    e.to_string().contains("has saves, but no .opal/format"),
+                    e.to_string().contains("has saves, but no .opalro/format"),
                     "{e}"
                 );
                 assert!(e.hint().unwrap().contains("Ask for help"), "{e}");
@@ -2346,7 +2352,7 @@ mod tests {
         }
         // With its head lost too, the saves' entries are still in the packs: it is damage all the
         // same, and no start or import makes the project again over them.
-        std::fs::remove_file(dir.path().join(".opal/state/head")).unwrap();
+        std::fs::remove_file(dir.path().join(".opalro/state/head")).unwrap();
         assert!(matches!(
             Repository::discover(dir.path()),
             Err(RepoError::Damaged { .. })
@@ -2357,16 +2363,16 @@ mod tests {
             "{:?}",
             refused.map(|_| ())
         );
-        assert!(!dir.path().join(".opal/state/head").exists());
+        assert!(!dir.path().join(".opalro/state/head").exists());
     }
 
-    /// The lock is never probed through a `state` that is a link: such a `.opal` is damage, even
+    /// The lock is never probed through a `state` that is a link: such a `.opalro` is damage, even
     /// where the link leads to a lock some command holds.
     #[test]
     fn a_linked_state_is_damage_before_its_lock_is_probed() {
         let dir = tempdir();
-        let opal = dir.path().join(".opal");
-        std::fs::create_dir_all(opal.join("store/packs")).unwrap();
+        let opalro = dir.path().join(".opalro");
+        std::fs::create_dir_all(opalro.join("store/packs")).unwrap();
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
         let outside = Dir::open_top(&elsewhere).unwrap();
@@ -2374,9 +2380,9 @@ mod tests {
         let held = fsio::open_lock_file(&outside, OsStr::new("lock"), &lock).unwrap();
         held.lock().unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&elsewhere, opal.join("state")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, opalro.join("state")).unwrap();
         #[cfg(windows)]
-        crate::test_support::junction(&opal.join("state"), &elsewhere);
+        crate::test_support::junction(&opalro.join("state"), &elsewhere);
         let found = Repository::discover(dir.path());
         assert!(
             matches!(found, Err(RepoError::Damaged { .. })),
@@ -2391,7 +2397,7 @@ mod tests {
     fn begin_clears_what_an_interrupted_run_left_in_tmp() {
         let dir = tempdir();
         drop(Repository::begin(dir.path()).unwrap());
-        let tmp = dir.path().join(".opal/tmp");
+        let tmp = dir.path().join(".opalro/tmp");
         let litter = tmp.join("tmp-0123456789abcdef");
         std::fs::write(&litter, b"half a pack").unwrap();
         std::fs::write(tmp.join("not-opals"), b"x").unwrap();
@@ -2410,12 +2416,12 @@ mod tests {
         ));
         let (dir, repo) = project();
         drop(repo);
-        let litter = dir.path().join(".opal/tmp/tmp-0123456789abcdef");
+        let litter = dir.path().join(".opalro/tmp/tmp-0123456789abcdef");
         std::fs::write(&litter, b"half a pack").unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         assert!(!litter.exists());
-        assert_eq!(repo.tmp_dir(), dir.path().join(".opal/tmp"));
-        assert_eq!(repo.packs_dir(), dir.path().join(".opal/store/packs"));
+        assert_eq!(repo.tmp_dir(), dir.path().join(".opalro/tmp"));
+        assert_eq!(repo.packs_dir(), dir.path().join(".opalro/store/packs"));
         assert!(!repo.signatures_allowed());
     }
 
@@ -2423,12 +2429,12 @@ mod tests {
     fn open_refuses_a_linked_fixed_folder() {
         let who = entry(0).who;
         let folders = [
-            ".opal",
-            ".opal/store",
-            ".opal/store/packs",
-            ".opal/state",
-            ".opal/cache",
-            ".opal/tmp",
+            ".opalro",
+            ".opalro/store",
+            ".opalro/store/packs",
+            ".opalro/state",
+            ".opalro/cache",
+            ".opalro/tmp",
         ];
         for folder in folders {
             let dir = tempdir();
@@ -2465,7 +2471,7 @@ mod tests {
     #[test]
     fn store_packs_swapped_for_a_link_after_the_shape_check_is_refused() {
         let (dir, mut repo) = project();
-        let store = dir.path().join(".opal").join("store");
+        let store = dir.path().join(".opalro").join("store");
         let outside = tempdir();
         std::fs::rename(store.join("packs"), store.join("checked")).unwrap();
         #[cfg(unix)]
@@ -2488,23 +2494,23 @@ mod tests {
     #[test]
     fn state_swapped_for_a_link_after_the_shape_check_gets_no_lock_outside() {
         let (dir, mut repo) = project();
-        let opal = dir.path().join(".opal");
+        let opalro = dir.path().join(".opalro");
         let outside = tempdir();
-        std::fs::rename(opal.join("state"), opal.join("checked")).unwrap();
+        std::fs::rename(opalro.join("state"), opalro.join("checked")).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path(), opal.join("state")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), opalro.join("state")).unwrap();
         #[cfg(windows)]
-        crate::test_support::junction(&opal.join("state"), outside.path());
+        crate::test_support::junction(&opalro.join("state"), outside.path());
         let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
-        assert!(opal.join("checked").join("lock").is_file());
+        assert!(opalro.join("checked").join("lock").is_file());
         drop(lock);
     }
 
     #[test]
     fn clean_tmp_removes_only_opals_own_names() {
         let (dir, _repo) = project();
-        let tmp = dir.path().join(".opal").join("tmp");
+        let tmp = dir.path().join(".opalro").join("tmp");
         let (_, made) = fsio::create_temp(&Dir::open_top(&tmp).unwrap()).unwrap();
         let made = tmp.join(made);
         for name in [
@@ -2543,8 +2549,8 @@ mod tests {
             .unwrap()
             .current()
             .unwrap();
-        let opal = dir.path().join(".opal");
-        let (state, tmp) = (opal.join("state"), opal.join("tmp"));
+        let opalro = dir.path().join(".opalro");
+        let (state, tmp) = (opalro.join("state"), opalro.join("tmp"));
         let lock = state.join("lock");
         // A stopped command's leftover, which this user can't remove.
         let left = tmp.join(opal_platform::temp_name());
@@ -2596,7 +2602,7 @@ mod tests {
         let (dir, mut repo) = project();
         let left = dir
             .path()
-            .join(".opal/tmp")
+            .join(".opalro/tmp")
             .join(opal_platform::temp_name());
         std::fs::write(&left, b"half a pack").unwrap();
         let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
@@ -2611,7 +2617,7 @@ mod tests {
     fn leftover_temporary_links_go_and_what_they_point_to_stays() {
         let (dir, repo) = project();
         drop(repo);
-        let tmp = dir.path().join(".opal").join("tmp");
+        let tmp = dir.path().join(".opalro").join("tmp");
         let outside = tempdir();
         let (file, folder) = (outside.path().join("file"), outside.path().join("folder"));
         std::fs::write(&file, b"x").unwrap();
@@ -2659,12 +2665,12 @@ mod tests {
         for folder in [&root, &sibling] {
             std::fs::create_dir(folder).unwrap();
         }
-        // Who owns the project folder, then its `.opal`.
+        // Who owns the project folder, then its `.opalro`.
         let allows =
             |owners: [io::Result<Owner>; 2], safe: &[PathBuf]| owner_allows(owners, &root, safe);
         let failed = || Err(io::Error::other("Access is denied."));
         assert!(allows([Ok(Owner::User), Ok(Owner::User)], &[]).is_ok());
-        // A `.opal` of the user's in a folder that isn't theirs is refused too.
+        // A `.opalro` of the user's in a folder that isn't theirs is refused too.
         match allows([Ok(Owner::Other), Ok(Owner::User)], &[]) {
             Err(RepoError::NotYours { path }) => assert_eq!(path, root),
             other => panic!("{other:?}"),
@@ -2735,7 +2741,7 @@ mod tests {
             owner_allows([Ok(normal)], root, &[]),
             Err(RepoError::AdminsNotElevated { .. })
         ));
-        // The folder and its `.opal` are each judged, and the refusal names the project folder.
+        // The folder and its `.opalro` are each judged, and the refusal names the project folder.
         match owner_allows([Ok(Owner::User), Ok(normal)], root, &[]) {
             Err(RepoError::AdminsNotElevated { path }) => assert_eq!(path, root),
             other => panic!("{other:?}"),
@@ -2777,7 +2783,7 @@ mod tests {
         assert!(note.ends_with(&config::trust_hint(root)), "{note}");
         // Either folder is enough.
         let only_opal = |path: &Path| {
-            Ok(if path.ends_with(".opal") {
+            Ok(if path.ends_with(".opalro") {
                 elevated
             } else {
                 Owner::User
@@ -2847,7 +2853,7 @@ mod tests {
         checked_by(move |_| owner, &[])
     }
 
-    /// Below a project it may not use, `opal start` looks further up, and makes the project if
+    /// Below a project it may not use, `opalro start` looks further up, and makes the project if
     /// none above is one the user may use.
     #[test]
     fn start_looks_past_an_enclosing_project_it_may_not_use() {
@@ -2858,7 +2864,7 @@ mod tests {
             let root = mid.join("root");
             std::fs::create_dir_all(&root).unwrap();
             for outer in [&top, &mid] {
-                std::fs::create_dir(outer.join(".opal")).unwrap();
+                std::fs::create_dir(outer.join(".opalro")).unwrap();
                 std::fs::write(format_path(outer), FORMAT_TEXT).unwrap();
             }
             let owner = |path: &Path| {
@@ -2875,7 +2881,7 @@ mod tests {
             // The nearest one the user trusts stops the search; one they don't is looked past.
             assert_eq!(inside(&[top.clone(), mid.clone()]), mid);
             assert_eq!(inside(std::slice::from_ref(&top)), top);
-            assert!(!root.join(".opal").exists(), "{drive_says:?}");
+            assert!(!root.join(".opalro").exists(), "{drive_says:?}");
             // With none trusted, the project is made.
             let repo = start_where(&root, owner, &[]).unwrap();
             assert_eq!(repo.root(), root);
@@ -2883,7 +2889,7 @@ mod tests {
         }
     }
 
-    /// Some drives give a new folder another owner, or none. `opal start` checks the `.opal` it
+    /// Some drives give a new folder another owner, or none. `opalro start` checks the `.opalro` it
     /// made, stops before making anything in it, and finishes when run again once it is trusted.
     #[test]
     fn start_stops_when_it_may_not_use_the_opal_folder_it_made() {
@@ -2915,8 +2921,8 @@ mod tests {
                 other => panic!("{other:?}"),
             }
             // Nothing deleted, nothing made inside.
-            assert!(root.join(".opal").is_dir(), "{drive_says:?}");
-            let inside = std::fs::read_dir(root.join(".opal")).unwrap().count();
+            assert!(root.join(".opalro").is_dir(), "{drive_says:?}");
+            let inside = std::fs::read_dir(root.join(".opalro")).unwrap().count();
             assert_eq!(inside, 0, "{drive_says:?}");
             let again = start_where(root, owner, &[]);
             assert!(
@@ -2938,13 +2944,16 @@ mod tests {
     fn what_counts_as_a_project_in_the_search() {
         let dir = tempdir();
         let folder = dir.path();
-        let opal = folder.join(".opal");
+        let opalro = folder.join(".opalro");
         let (mine, theirs) = (all_owned_by(Owner::User), all_owned_by(Owner::Other));
         assert!(!has_project(folder, &theirs).unwrap(), "nothing there");
-        std::fs::write(&opal, b"").unwrap();
-        assert!(!has_project(folder, &theirs).unwrap(), "a file named .opal");
-        std::fs::remove_file(&opal).unwrap();
-        std::fs::create_dir(&opal).unwrap();
+        std::fs::write(&opalro, b"").unwrap();
+        assert!(
+            !has_project(folder, &theirs).unwrap(),
+            "a file named .opalro"
+        );
+        std::fs::remove_file(&opalro).unwrap();
+        std::fs::create_dir(&opalro).unwrap();
         // The user's own interrupted start (no `format` yet) is no project.
         assert!(!has_project(folder, &mine).unwrap(), "an interrupted start");
         // Another account's is found, empty or not, and refused.
@@ -2954,7 +2963,7 @@ mod tests {
             "{found:?}"
         );
         // An entry named `format` of any kind counts: `open` checks it.
-        std::fs::create_dir(opal.join("format")).unwrap();
+        std::fs::create_dir(opalro.join("format")).unwrap();
         assert!(has_project(folder, &mine).unwrap(), "a folder named format");
     }
 
@@ -2967,16 +2976,16 @@ mod tests {
                 let outer = dir.path().join("outer");
                 let root = outer.join("root");
                 std::fs::create_dir_all(&root).unwrap();
-                let opal = outer.join(".opal");
+                let opalro = outer.join(".opalro");
                 if link {
                     let elsewhere = dir.path().join("elsewhere");
                     std::fs::create_dir(&elsewhere).unwrap();
                     #[cfg(unix)]
-                    std::os::unix::fs::symlink(&elsewhere, &opal).unwrap();
+                    std::os::unix::fs::symlink(&elsewhere, &opalro).unwrap();
                     #[cfg(windows)]
-                    crate::test_support::junction(&opal, &elsewhere);
+                    crate::test_support::junction(&opalro, &elsewhere);
                 } else {
-                    std::fs::create_dir(&opal).unwrap();
+                    std::fs::create_dir(&opalro).unwrap();
                 }
                 match (
                     drive_says,
@@ -2992,16 +3001,16 @@ mod tests {
         }
     }
 
-    /// A link inside would be damage, but a `.opal` the user may not use is refused before it is
+    /// A link inside would be damage, but a `.opalro` the user may not use is refused before it is
     /// looked at.
     #[test]
     fn the_owner_of_opal_is_asked_before_anything_inside_it() {
         let dir = tempdir();
         let root = dir.path().join("root");
         let elsewhere = dir.path().join("elsewhere");
-        std::fs::create_dir_all(root.join(".opal")).unwrap();
+        std::fs::create_dir_all(root.join(".opalro")).unwrap();
         std::fs::create_dir(&elsewhere).unwrap();
-        let store = root.join(".opal").join("store");
+        let store = root.join(".opalro").join("store");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&elsewhere, &store).unwrap();
         #[cfg(windows)]
@@ -3020,8 +3029,8 @@ mod tests {
         assert!(matches!(mine, Err(RepoError::Damaged { .. })), "{mine:?}");
     }
 
-    /// Any signed-in Windows user can rename a folder the user made into `C:\.opal`. `C:\`
-    /// belongs to the system, so that project is refused whoever owns its `.opal`, as Git does.
+    /// Any signed-in Windows user can rename a folder the user made into `C:\.opalro`. `C:\`
+    /// belongs to the system, so that project is refused whoever owns its `.opalro`, as Git does.
     #[test]
     fn a_opal_of_the_users_in_a_folder_that_isnt_theirs_is_refused() {
         for drive_says in [Owner::Other, Owner::Unknown] {
@@ -3030,7 +3039,7 @@ mod tests {
             let work = system.join("work");
             std::fs::create_dir_all(&work).unwrap();
             Repository::init(&system, &entry(0).who).unwrap();
-            // The folder isn't the user's; its `.opal`, and everything in `work`, is.
+            // The folder isn't the user's; its `.opalro`, and everything in `work`, is.
             let owner = |path: &Path| {
                 if path == system {
                     drive_says
@@ -3052,7 +3061,7 @@ mod tests {
                 refused(check_opal(&system, &check).map(|_| ())),
                 "{drive_says:?}"
             );
-            // `opal start` below it looks past it.
+            // `opalro start` below it looks past it.
             let started = Repository::init_with(&work, &entry(0).who, &check).unwrap();
             assert_eq!(started.root(), work);
             // Listed in safe-folders, it is used.
@@ -3088,18 +3097,18 @@ mod tests {
             // The same way on as for a project that is already there.
             let hint = started.err().and_then(|e| e.hint());
             assert_eq!(hint, Some(config::trust_hint(&root)), "{drive_says:?}");
-            assert!(!root.join(".opal").exists(), "{drive_says:?}");
+            assert!(!root.join(".opalro").exists(), "{drive_says:?}");
             start_where(&root, owner, std::slice::from_ref(&root)).unwrap();
         }
     }
 
-    /// Fails closed rather than make the project in a `.opal` nobody checked.
+    /// Fails closed rather than make the project in a `.opalro` nobody checked.
     #[test]
     fn start_stops_if_the_opal_it_made_vanishes() {
         let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
-        let opal = root.join(".opal");
+        let opalro = root.join(".opalro");
         let rule = checked_by(
             |path| {
                 if path.starts_with(&root) {
@@ -3111,15 +3120,15 @@ mod tests {
             &[],
         );
         let check = |folder: &Path, seen| {
-            // Someone removes the new `.opal` while its owner is asked.
-            if folder == root && opal.is_dir() {
-                std::fs::remove_dir(&opal).unwrap();
+            // Someone removes the new `.opalro` while its owner is asked.
+            if folder == root && opalro.is_dir() {
+                std::fs::remove_dir(&opalro).unwrap();
             }
             rule(folder, seen)
         };
         let started = Repository::init_with(&root, &entry(0).who, &check);
         assert!(started.is_err(), "{:?}", started.map(|_| ()));
-        assert!(!opal.exists() && !format_path(&root).exists());
+        assert!(!opalro.exists() && !format_path(&root).exists());
     }
 
     #[test]
@@ -3140,13 +3149,13 @@ mod tests {
         assert!(e.to_string().contains(&root.display().to_string()), "{e}");
     }
 
-    /// A link that appears where `opal start` is about to make `.opal` is never followed.
+    /// A link that appears where `opalro start` is about to make `.opalro` is never followed.
     #[test]
     fn start_refuses_a_opal_link_that_appears_while_it_starts() {
         let dir = tempdir();
         let root = dir.path().join("root");
         std::fs::create_dir(&root).unwrap();
-        let (opal, target) = (root.join(".opal"), dir.path().join("target"));
+        let (opalro, target) = (root.join(".opalro"), dir.path().join("target"));
         let rule = checked_by(
             |path| {
                 if path.starts_with(&root) {
@@ -3158,11 +3167,11 @@ mod tests {
             &[],
         );
         let check = |folder: &Path, seen| {
-            if folder == root && std::fs::symlink_metadata(&opal).is_err() {
+            if folder == root && std::fs::symlink_metadata(&opalro).is_err() {
                 #[cfg(unix)]
-                std::os::unix::fs::symlink(&target, &opal).unwrap();
+                std::os::unix::fs::symlink(&target, &opalro).unwrap();
                 #[cfg(windows)]
-                crate::test_support::junction(&opal, &target);
+                crate::test_support::junction(&opalro, &target);
             }
             rule(folder, seen)
         };
@@ -3175,19 +3184,19 @@ mod tests {
         assert!(!target.exists());
     }
 
-    /// A link put in an unfinished `.opal` once its shape was checked is refused, and nothing is
+    /// A link put in an unfinished `.opalro` once its shape was checked is refused, and nothing is
     /// made where it points.
     #[test]
     fn start_never_makes_a_fixed_folder_through_a_link() {
         for name in ["store", "state", "cache", "tmp"] {
             let dir = tempdir();
             let (root, target) = (dir.path().join("root"), dir.path().join("target"));
-            std::fs::create_dir_all(root.join(".opal")).unwrap();
+            std::fs::create_dir_all(root.join(".opalro")).unwrap();
             std::fs::create_dir(&target).unwrap();
-            // A `.opal` above, with no `format`: the search for a project around this one asks
+            // A `.opalro` above, with no `format`: the search for a project around this one asks
             // its owner after this one was checked, and the link appears then.
-            std::fs::create_dir(dir.path().join(".opal")).unwrap();
-            let link = root.join(".opal").join(name);
+            std::fs::create_dir(dir.path().join(".opalro")).unwrap();
+            let link = root.join(".opalro").join(name);
             let check = |folder: &Path, _seen: bool| {
                 if folder == dir.path() && std::fs::symlink_metadata(&link).is_err() {
                     #[cfg(unix)]
@@ -3208,7 +3217,7 @@ mod tests {
         }
     }
 
-    /// With the inside unreadable, any look inside a `.opal` the user may not use would fail and
+    /// With the inside unreadable, any look inside a `.opalro` the user may not use would fail and
     /// change the answer.
     #[cfg(unix)]
     #[test]
@@ -3219,14 +3228,14 @@ mod tests {
         let outer = dir.path().join("outer");
         let root = outer.join("root");
         std::fs::create_dir_all(&root).unwrap();
-        let opal = outer.join(".opal");
-        std::fs::create_dir_all(opal.join("store")).unwrap();
-        std::fs::write(opal.join("format"), FORMAT_TEXT).unwrap();
+        let opalro = outer.join(".opalro");
+        std::fs::create_dir_all(opalro.join("store")).unwrap();
+        std::fs::write(opalro.join("format"), FORMAT_TEXT).unwrap();
         let set_mode = |mode| {
-            std::fs::set_permissions(&opal, std::fs::Permissions::from_mode(mode)).unwrap();
+            std::fs::set_permissions(&opalro, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         set_mode(0o000);
-        if std::fs::read_dir(&opal).is_ok() {
+        if std::fs::read_dir(&opalro).is_ok() {
             set_mode(0o755);
             eprintln!("note: skipped, this user can look inside any folder (root)");
             return;
@@ -3257,13 +3266,13 @@ mod tests {
         assert!(asked.borrow().contains(&outer), "{:?}", asked.borrow());
     }
 
-    /// A shared project can bring a `.opal/format` link; following it could reach another
+    /// A shared project can bring a `.opalro/format` link; following it could reach another
     /// computer.
     #[test]
     fn start_never_follows_a_format_link() {
         let dir = tempdir();
         let root = dir.path();
-        std::fs::create_dir(root.join(".opal")).unwrap();
+        std::fs::create_dir(root.join(".opalro")).unwrap();
         // A link to nothing: followed, it would look like no `format` at all.
         let nothing = root.join("missing");
         #[cfg(unix)]
@@ -3284,7 +3293,7 @@ mod tests {
         );
     }
 
-    /// A planted `.opal` link could point at another computer, which Windows would contact.
+    /// A planted `.opalro` link could point at another computer, which Windows would contact.
     #[test]
     fn a_opal_link_above_is_found_but_never_followed() {
         for with_format in [true, false] {
@@ -3297,7 +3306,7 @@ mod tests {
             let outer = dir.path().join("outer");
             let root = outer.join("root");
             std::fs::create_dir_all(&root).unwrap();
-            let link = outer.join(".opal");
+            let link = outer.join(".opalro");
             #[cfg(unix)]
             std::os::unix::fs::symlink(&target, &link).unwrap();
             #[cfg(windows)]
@@ -3310,7 +3319,7 @@ mod tests {
                 ),
                 other => panic!("{with_format}: {:?}", other.map(|_| ())),
             }
-            // The user's own link stops `opal start` like their own project would; another
+            // The user's own link stops `opalro start` like their own project would; another
             // account's is looked past, and the new project is then found first.
             match Repository::init(&root, &entry(0).who) {
                 Err(RepoError::InsideAnotherProject { root }) => assert_eq!(root, outer),
@@ -3330,7 +3339,7 @@ mod tests {
         }
     }
 
-    /// A link to the project is judged by the folder it leads to, the one `.opal` is in.
+    /// A link to the project is judged by the folder it leads to, the one `.opalro` is in.
     #[test]
     fn the_owner_check_judges_the_resolved_folder() {
         let dir = tempdir();
@@ -3365,7 +3374,7 @@ mod tests {
         assert!(Repository::discover(&link).is_ok());
     }
 
-    /// The user's own link into another account's folder: `opal start` judges the folder, and
+    /// The user's own link into another account's folder: `opalro start` judges the folder, and
     /// makes nothing there.
     #[test]
     fn start_through_a_link_judges_the_folder_it_leads_to() {
@@ -3395,21 +3404,21 @@ mod tests {
             matches!(checked, Err(RepoError::NotYours { .. })),
             "{checked:?}"
         );
-        assert!(!theirs.join(".opal").exists());
+        assert!(!theirs.join(".opalro").exists());
     }
 
-    /// A `.opal` that is gone while its owner is asked, then back, was never checked.
+    /// A `.opalro` that is gone while its owner is asked, then back, was never checked.
     #[cfg(feature = "fault-injection")]
     #[test]
     fn a_opal_that_vanishes_during_the_owner_check_is_refused() {
         let dir = tempdir();
         Repository::init(dir.path(), &entry(0).who).unwrap();
-        let opal = dir.path().join(".opal");
+        let opalro = dir.path().join(".opalro");
         let away = dir.path().join("away");
         fsio::fault::act_at("owner:asking", move || {
-            std::fs::rename(&opal, &away).unwrap();
+            std::fs::rename(&opalro, &away).unwrap();
             fsio::fault::act_at("owner:asked", move || {
-                std::fs::rename(&away, &opal).unwrap()
+                std::fs::rename(&away, &opalro).unwrap()
             });
         });
         match Repository::discover(dir.path()) {
@@ -3451,7 +3460,7 @@ mod tests {
     fn a_format_link_to_dev_zero_is_refused_without_hanging() {
         let dir = tempdir();
         let outer = dir.path().to_owned();
-        std::fs::create_dir(outer.join(".opal")).unwrap();
+        std::fs::create_dir(outer.join(".opalro")).unwrap();
         std::os::unix::fs::symlink("/dev/zero", format_path(&outer)).unwrap();
         let root = outer.join("root");
         std::fs::create_dir(&root).unwrap();
@@ -3477,9 +3486,9 @@ mod tests {
     fn hidden_opal_folder_is_a_real_folder() {
         let dir = tempdir();
         Repository::init(dir.path(), &entry(0).who).unwrap();
-        let opal = dir.path().join(".opal");
-        assert!(opal_platform::is_hidden(&opal).unwrap());
-        crate::safe_fs::check_real_dir(&opal).unwrap();
+        let opalro = dir.path().join(".opalro");
+        assert!(opal_platform::is_hidden(&opalro).unwrap());
+        crate::safe_fs::check_real_dir(&opalro).unwrap();
     }
 
     #[test]
@@ -3492,10 +3501,13 @@ mod tests {
             RepoError::NotAProject
                 .hint()
                 .unwrap()
-                .contains("opal start")
+                .contains("opalro start")
         );
         let e = RepoError::Damaged { detail: "x".into() };
-        assert_eq!(e.to_string(), "This project's Opalro data looks damaged: x.");
+        assert_eq!(
+            e.to_string(),
+            "This project's Opalro data looks damaged: x."
+        );
         assert!(e.hint().unwrap().contains("Nothing was changed"));
         let e = RepoError::NotYours {
             path: PathBuf::from("/srv/work"),
@@ -3533,31 +3545,31 @@ mod tests {
             trust.ends_with("\nsafe-folders = [\"/media/usb/work\"]"),
             "{trust}"
         );
-        // `opal start` that stops after making `.opal` says so, and how to finish.
+        // `opalro start` that stops after making `.opalro` says so, and how to finish.
         let e = RepoError::StartStopped {
             refusal: Box::new(e),
         };
         assert_eq!(
             e.to_string(),
-            "The .opal folder was made, but the project isn't finished. Opalro can't tell who \
+            "The .opalro folder was made, but the project isn't finished. Opalro can't tell who \
              owns the project at /media/usb/work: this drive doesn't record who owns folders."
         );
         assert_eq!(
             e.hint().unwrap(),
-            format!("{trust}\nThen run `opal start` again to finish.")
+            format!("{trust}\nThen run `opalro start` again to finish.")
         );
     }
 
     #[test]
     fn a_file_opal_cant_replace_is_named_with_what_to_do() {
         let failed = |source| RepoError::CantWrite {
-            path: PathBuf::from("/srv/work/.opal/state/head"),
+            path: PathBuf::from("/srv/work/.opalro/state/head"),
             source,
         };
         let full = failed(io::Error::other("no space left"));
         assert_eq!(
             full.to_string(),
-            "Opalro couldn't write /srv/work/.opal/state/head: no space left"
+            "Opalro couldn't write /srv/work/.opalro/state/head: no space left"
         );
         assert!(full.hint().unwrap().contains("free space"), "{full:?}");
         // Code 32 means another program has the file open only on Windows.
@@ -3581,14 +3593,14 @@ mod tests {
         let hint = e.hint().unwrap();
         assert!(hint.contains("administrator"), "{hint}");
         assert!(hint.ends_with(&config::trust_hint(root)), "{hint}");
-        // An `opal start` that stops for it says how to finish, as for every other refusal.
+        // An `opalro start` that stops for it says how to finish, as for every other refusal.
         let e = RepoError::StartStopped {
             refusal: Box::new(e),
         };
         assert!(
             e.hint()
                 .unwrap()
-                .ends_with("\nThen run `opal start` again to finish.")
+                .ends_with("\nThen run `opalro start` again to finish.")
         );
     }
 
@@ -3616,7 +3628,7 @@ mod tests {
         for refusal in refusals(Path::new("/srv/work")) {
             let hint = stopped(refusal).hint().unwrap();
             assert!(
-                hint.ends_with("\nThen run `opal start` again to finish."),
+                hint.ends_with("\nThen run `opalro start` again to finish."),
                 "{hint}"
             );
         }
@@ -3695,7 +3707,7 @@ mod tests {
                 assert_hostile_text_escaped(&e.hint().unwrap());
             }
         }
-        // The hash named by a hostile `.opal/format` is quoted in the message.
+        // The hash named by a hostile `.opalro/format` is quoted in the message.
         let e = parse_format("opal-repository 1\nhash \u{202e}evil\n").unwrap_err();
         assert!(matches!(e, RepoError::NewerFormat { .. }), "{e:?}");
         assert!(e.to_string().contains("\"\\u{202e}evil\""), "{e}");
@@ -3904,7 +3916,7 @@ mod tests {
         let a = commit(&mut repo, &entry(1)).unwrap();
         let b = commit(&mut repo, &entry(2)).unwrap();
         let lock = repo.lock_for_change("undo", &mut |_| {}).unwrap();
-        let head = dir.path().join(".opal").join("state").join("head");
+        let head = dir.path().join(".opalro").join("state").join("head");
         // As a virus scanner or sync tool may hold it, for longer than Opalro tries.
         let held = std::fs::OpenOptions::new()
             .read(true)
@@ -3925,7 +3937,7 @@ mod tests {
         );
         assert!(e.hint().unwrap().contains("virus scanner"), "{e:?}");
         assert_eq!(std::fs::read_to_string(&head).unwrap(), format!("{b}\n"));
-        let tmp = std::fs::read_dir(dir.path().join(".opal").join("tmp")).unwrap();
+        let tmp = std::fs::read_dir(dir.path().join(".opalro").join("tmp")).unwrap();
         assert_eq!(tmp.count(), 0);
     }
 
@@ -3945,7 +3957,7 @@ mod tests {
             );
             assert!(
                 hint.contains(
-                    "To go on without it, delete .opal/state/journal: your files stay as they \
+                    "To go on without it, delete .opalro/state/journal: your files stay as they \
                      are, and the next command goes on from there."
                 ),
                 "{hint}"

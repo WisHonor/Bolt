@@ -1,4 +1,4 @@
-//! What `opal goto` shows people: where it switched to, and what it wrote.
+//! What `opalro goto` shows people: where it switched to, and what it wrote.
 
 use std::collections::BTreeMap;
 
@@ -11,7 +11,7 @@ use opal_core::text::{escape, thousands};
 use crate::output;
 use crate::style::{self, Role};
 
-/// `opal goto`'s outcome line and details. `short` names the save it is at, `save` is that save
+/// `opalro goto`'s outcome line and details. `short` names the save it is at, `save` is that save
 /// if it could be read, and `lines` are the project's lines now. A goto that recorded no step
 /// found the project already there, and only that is said.
 pub fn switched(
@@ -65,7 +65,7 @@ pub fn switched(
         details.push("Saving here asks for a new line's name.".to_owned());
         if let Some((line, _)) = lines.iter().find(|(_, tip)| *tip == id) {
             let line = escape(line, false);
-            let goto = style::whole(&s.paint(Role::Command, &format!("opal goto {line}")));
+            let goto = style::whole(&s.paint(Role::Command, &format!("opalro goto {line}")));
             let line = style::whole(&line);
             details.push(format!("To keep saving on {line}: {goto}"));
         }

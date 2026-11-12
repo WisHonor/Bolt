@@ -20,9 +20,9 @@ use support::{
 
 const MIB: u64 = 1 << 20;
 
-/// `opal <args>`, which must succeed.
+/// `opalro <args>`, which must succeed.
 fn ok(env: &Env, args: &[&str]) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -104,14 +104,18 @@ fn chunking_changes_no_ids() {
     }
 }
 
-/// With no `opal.toml`, files are cut from exactly 1 MiB, as before projects had rules.
+/// With no `opalro.toml`, files are cut from exactly 1 MiB, as before projects had rules.
 #[test]
 fn a_project_without_a_rules_file_cuts_files_from_exactly_1_mib() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
     let cut = write_noise(&env.root().join("cut.bin"), 21, MIB);
     let whole = write_noise(&env.root().join("whole.bin"), 22, MIB - 1);
-    let out = env.opal().args(["save", "--json", "Two"]).output().unwrap();
+    let out = env
+        .opalro()
+        .args(["save", "--json", "Two"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let warnings = doc["warnings"].as_array().unwrap();
@@ -157,12 +161,12 @@ fn discard_and_shelf_keep_a_big_file_as_chunks() {
     assert_eq!(id_of(&big), edited);
 }
 
-/// A project whose `opal.toml` cuts files from 8 MiB, having saved `big.bin`, 3 MiB made from
+/// A project whose `opalro.toml` cuts files from 8 MiB, having saved `big.bin`, 3 MiB made from
 /// `seed`, and the file's ID.
 fn with_a_file_under_a_raised_threshold(seed: u64) -> (Env, Id) {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
-    write(&env, "opal.toml", "chunk-files-over = \"8 MiB\"\n");
+    write(&env, "opalro.toml", "chunk-files-over = \"8 MiB\"\n");
     let id = write_noise(&env.root().join("big.bin"), seed, 3 * MIB);
     ok(&env, &["save", "Big"]);
     (env, id)
@@ -189,7 +193,7 @@ fn a_file_between_1_mib_and_a_raised_threshold_is_stored_whole_and_reads_back() 
 fn files_on_either_side_of_both_cuts_come_back_byte_for_byte() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
-    write(&env, "opal.toml", "chunk-files-over = \"4 MiB\"\n");
+    write(&env, "opalro.toml", "chunk-files-over = \"4 MiB\"\n");
     let sizes = [MIB - 1, MIB, 2 * MIB, 4 * MIB - 1, 4 * MIB];
     let files: Vec<(String, Id)> = (0u64..)
         .zip(sizes)
@@ -224,7 +228,7 @@ fn files_on_either_side_of_both_cuts_come_back_byte_for_byte() {
     for ((name, _), id) in files.iter().zip(&edited) {
         assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
     }
-    let out = env.opal().args(["--json", "verify"]).output().unwrap();
+    let out = env.opalro().args(["--json", "verify"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["problems"], serde_json::json!([]), "{doc}");

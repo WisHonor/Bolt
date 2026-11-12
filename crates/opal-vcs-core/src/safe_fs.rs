@@ -1,4 +1,4 @@
-//! The one way Opalro opens files it doesn't trust (everything in `.opal/`, settings files and
+//! The one way Opalro opens files it doesn't trust (everything in `.opalro/`, settings files and
 //! ignore files): links are never followed (except to the user's own settings), only regular
 //! files are accepted, and reads are capped (storage-format.md §10 and §12).
 
@@ -16,7 +16,7 @@ pub const MAX_LOCK_INFO_BYTES: u64 = 4096;
 /// `state/tidied`: a number of milliseconds and an LF.
 pub const MAX_TIDIED_BYTES: u64 = 32;
 pub const MAX_CONFIG_BYTES: u64 = 1 << 20;
-/// One `.gitignore` or `.opalignore`.
+/// One `.gitignore` or `.opalroignore`.
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1 << 20;
 /// The ignore files in force at one folder (its own and those above it), together.
 pub const MAX_IGNORE_IN_FORCE_BYTES: u64 = 1 << 20;
@@ -398,9 +398,9 @@ mod tests {
     #[test]
     fn check_real_dir_refuses_links_and_files() {
         let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join(".opal");
+        let real = dir.path().join(".opalro");
         fs::create_dir(&real).unwrap();
-        // Hiding `.opal` (as `opal start` does) must not make it look like a link.
+        // Hiding `.opalro` (as `opalro start` does) must not make it look like a link.
         opal_platform::hide_path(&real).unwrap();
         check_real_dir(&real).unwrap();
         let file = dir.path().join("format");

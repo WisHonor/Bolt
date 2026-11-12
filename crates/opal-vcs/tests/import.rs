@@ -1,4 +1,4 @@
-//! `opal import` end to end: repositories made with Git itself, imported, then read back with
+//! `opalro import` end to end: repositories made with Git itself, imported, then read back with
 //! Opalro's own commands.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -24,7 +24,7 @@ fn a_simple_repository_imports() {
     );
     assert!(out.contains("You're on line main."), "{out}");
 
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     assert_eq!(history.status.code(), Some(0), "{}", text(&history.stderr));
     let history = text(&history.stdout);
     let lines: Vec<&str> = history.lines().collect();
@@ -32,7 +32,7 @@ fn a_simple_repository_imports() {
     assert!(lines[2].contains("Ada Lovelace") && lines[2].contains("Second save"));
     assert!(lines[3].contains("Ada Lovelace") && lines[3].contains("First save"));
 
-    let show = env.opal().arg("show").output().unwrap();
+    let show = env.opalro().arg("show").output().unwrap();
     assert_eq!(show.status.code(), Some(0), "{}", text(&show.stderr));
     let show = text(&show.stdout);
     assert!(show.contains("Ada Lovelace") && show.contains("    With a body."));
@@ -136,11 +136,11 @@ fn names_opal_refuses_are_renamed_and_listed() {
     let other = Env::new();
     other.commit("a.txt", "a\n", "First");
     other.git(&["branch", "feature+x"]);
-    let out = other.opal().args(["--json", "import"]).output().unwrap();
+    let out = other.opalro().args(["--json", "import"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         json["renamed"],
-        serde_json::json!([{"kind": "line", "git": "feature+x", "opal": "feature-x"}])
+        serde_json::json!([{"kind": "line", "git": "feature+x", "opalro": "feature-x"}])
     );
 }
 
@@ -173,7 +173,7 @@ fn refs_left_out_are_listed_up_to_100_and_counted() {
     let id = copy.git(&["rev-parse", "HEAD"]);
     let packed: String = pulls.iter().map(|name| format!("{id} {name}\n")).collect();
     std::fs::write(copy.root().join(".git/packed-refs"), packed).unwrap();
-    let out = copy.opal().args(["--json", "import"]).output().unwrap();
+    let out = copy.opalro().args(["--json", "import"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["skipped_refs"]["count"], 150);
     let first = json["skipped_refs"]["first"].as_array().unwrap();
@@ -243,7 +243,7 @@ fn entries_left_out_show_their_hidden_characters() {
     assert!(
         out.contains(
             "Left out 1 entry whose name Opalro never writes to disk (such as .git and \
-                      .opal), with everything in it: `.g\\u{200c}it` in commit "
+                      .opalro), with everything in it: `.g\\u{200c}it` in commit "
         ),
         "{out}"
     );
@@ -269,7 +269,7 @@ fn a_detached_head_puts_you_at_its_save() {
     };
     assert_eq!(git_commit(&repo, &save), first);
     // `history` starts from there.
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     let history = text(&history.stdout);
     assert_eq!(history.lines().count(), 3, "{history}");
     // A save there needs a new line, and the hint says how to name it.
@@ -280,7 +280,7 @@ fn a_detached_head_puts_you_at_its_save() {
     assert!(
         err.contains(
             "error: You're at a save, not on a line, so this save needs a new line to go on.\n\n\
-             hint: Nothing was saved. Name it: opal save --line <name> \"message\"\n"
+             hint: Nothing was saved. Name it: opalro save --line <name> \"message\"\n"
         ),
         "{err}"
     );
@@ -296,7 +296,7 @@ fn an_unborn_branch_stops_the_import() {
         err.contains("Git's current branch `new` has no commits yet; switch to a branch with commits, or commit first."),
         "{err}"
     );
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 }
 
 #[test]
@@ -305,19 +305,19 @@ fn an_empty_repository_stops_the_import() {
     let err = env.refused_import();
     assert!(
         err.contains(
-            "There's nothing to import: this Git repository has no commits. opal start makes a \
+            "There's nothing to import: this Git repository has no commits. opalro start makes a \
              new project here."
         ),
         "{err}"
     );
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 }
 
 /// A Git LFS pointer, as Git LFS writes it.
 const POINTER: &str = "version https://git-lfs.github.com/spec/v1\noid sha256:\
     4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
 
-/// Once `.opal` is begun, "nothing was changed" isn't so: the hint says what became of it. A stop
+/// Once `.opalro` is begun, "nothing was changed" isn't so: the hint says what became of it. A stop
 /// the repository causes comes again, so the hint doesn't say that running it again finishes.
 #[test]
 fn an_import_that_stops_partway_says_its_opal_folder_is_kept() {
@@ -340,26 +340,26 @@ fn an_import_that_stops_partway_says_its_opal_folder_is_kept() {
     );
     assert!(
         err.contains(
-            "Nothing was committed. Opalro kept the .opal folder it began here: opal import stops \
+            "Nothing was committed. Opalro kept the .opalro folder it began here: opalro import stops \
              the same way until the cause is fixed, then finishes from what it stored. Or delete \
              that folder."
         ),
         "{err}"
     );
     assert!(!err.contains("Nothing was changed"), "{err}");
-    assert!(env.root().join(".opal").is_dir());
-    assert!(!env.root().join(".opal/format").exists());
+    assert!(env.root().join(".opalro").is_dir());
+    assert!(!env.root().join(".opalro/format").exists());
 
-    // Other commands say what the folder is, and send nobody to `opal start` alone.
+    // Other commands say what the folder is, and send nobody to `opalro start` alone.
     for args in [&["save", "Save it"][..], &["history"], &["show"]] {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let err = text(&out.stderr);
         assert!(
             err.contains("error: An import or start began an Opalro project at ")
                 && err.contains(
-                    "hint: Run `opal import` (or `opal start`, if that began it) in that folder \
-                     again to finish, or delete its hidden .opal folder.\n"
+                    "hint: Run `opalro import` (or `opalro start`, if that began it) in that folder \
+                     again to finish, or delete its hidden .opalro folder.\n"
                 ),
             "{args:?}: {err}"
         );
@@ -379,8 +379,8 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
             .output()
             .unwrap();
         assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
-        std::fs::remove_file(dir.join(".opal/format")).unwrap();
-        let head = std::fs::read(dir.join(".opal/state/head")).unwrap();
+        std::fs::remove_file(dir.join(".opalro/format")).unwrap();
+        let head = std::fs::read(dir.join(".opalro/state/head")).unwrap();
         let out = env.opal_in(dir).arg(command).output().unwrap();
         assert_eq!(
             out.status.code(),
@@ -390,18 +390,18 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
         );
         let err = text(&out.stderr);
         assert!(
-            err.contains("has saves, but no .opal/format file.\n")
+            err.contains("has saves, but no .opalro/format file.\n")
                 && err.contains(
                     "hint: Nothing was changed. Ask for help before trying to repair it.\n"
                 ),
             "{command}: {err}"
         );
         assert_eq!(
-            std::fs::read(dir.join(".opal/state/head")).unwrap(),
+            std::fs::read(dir.join(".opalro/state/head")).unwrap(),
             head,
             "{command}"
         );
-        assert!(!dir.join(".opal/format").exists(), "{command}");
+        assert!(!dir.join(".opalro/format").exists(), "{command}");
     };
     env.commit("a.txt", "a\n", "First");
     env.import();
@@ -415,7 +415,7 @@ fn import_and_start_refuse_a_project_that_lost_only_its_format() {
 }
 
 /// A sign of Git LFS has the first pass look for every Git LFS file's object, so the usual Git
-/// LFS repository missing some stops before `.opal` is made.
+/// LFS repository missing some stops before `.opalro` is made.
 #[test]
 fn a_git_lfs_repository_stops_before_anything_is_written() {
     let lfs_line = "*.psd filter=lfs diff=lfs merge=lfs -text\n";
@@ -437,7 +437,7 @@ fn a_git_lfs_repository_stops_before_anything_is_written() {
             "{sign}: {err}"
         );
         assert!(err.contains("hint: Nothing was changed."), "{sign}: {err}");
-        assert!(!env.root().join(".opal").exists(), "{sign}");
+        assert!(!env.root().join(".opalro").exists(), "{sign}");
     }
     // A sign can outlast the pointers, as `.git/lfs` does `git lfs migrate export`, and doesn't
     // stop the import by itself.
@@ -449,7 +449,7 @@ fn a_git_lfs_repository_stops_before_anything_is_written() {
     assert!(out.contains("Imported 2 commits from Git"), "{out}");
 }
 
-/// An import that stored files before it stopped is finished by `opal import`, never covered by an
+/// An import that stored files before it stopped is finished by `opalro import`, never covered by an
 /// empty project.
 #[cfg(feature = "fault-injection")]
 #[test]
@@ -457,19 +457,19 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");
     let out = env
-        .opal()
+        .opalro()
         .arg("import")
-        .env("OPAL_FAULT_FAIL", "commit:before-head")
+        .env("OPALRO_FAULT_FAIL", "commit:before-head")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(
-        text(&out.stderr).contains("running opal import again can finish the import"),
+        text(&out.stderr).contains("running opalro import again can finish the import"),
         "{}",
         text(&out.stderr)
     );
     let out = env
-        .opal()
+        .opalro()
         .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
@@ -477,13 +477,13 @@ fn start_refuses_a_folder_an_unfinished_import_stored_files_in() {
     let err = text(&out.stderr);
     assert!(
         err.contains(
-            "error: An import began an Opalro project here and didn't finish, and opal start won't \
-             make an empty project over what it stored.\n\nhint: Run `opal import` again to finish \
+            "error: An import began an Opalro project here and didn't finish, and opalro start won't \
+             make an empty project over what it stored.\n\nhint: Run `opalro import` again to finish \
              the import.\n"
         ),
         "{err}"
     );
-    assert!(!env.root().join(".opal/format").exists());
+    assert!(!env.root().join(".opalro/format").exists());
     let (out, _) = env.import();
     assert!(out.contains("Imported 1 commit from Git"), "{out}");
 }
@@ -507,19 +507,19 @@ fn a_second_import_is_refused() {
 fn another_tools_opal_folder_is_refused() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");
-    let opal = env.root().join(".opal");
-    std::fs::create_dir(&opal).unwrap();
-    std::fs::write(opal.join("config.json"), "{}").unwrap();
+    let opalro = env.root().join(".opalro");
+    std::fs::create_dir(&opalro).unwrap();
+    std::fs::write(opalro.join("config.json"), "{}").unwrap();
     let err = env.refused_import();
     assert!(
         err.contains(
-            "There's a .opal folder here that Opalro didn't make (another tool may use \
+            "There's a .opalro folder here that Opalro didn't make (another tool may use \
              that name); move or rename it first."
         ),
         "{err}"
     );
     // Nothing was made in it.
-    assert_eq!(std::fs::read_dir(&opal).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&opalro).unwrap().count(), 1);
 }
 
 /// Git checks such a folder out where Opalro keeps the project, and Opalro never takes files Git
@@ -528,44 +528,44 @@ fn another_tools_opal_folder_is_refused() {
 fn a_opal_folder_git_tracks_stops_the_import() {
     let env = Env::new();
     env.commit(
-        ".opal/config.toml",
+        ".opalro/config.toml",
         "[user]\nname = \"Mallory\"\n",
         "Track it",
     );
     let err = env.refused_import();
     assert!(
         err.contains(
-            "Git tracks `.opal` at the top of this project, and Opalro can't use it as its own \
-             .opal folder."
+            "Git tracks `.opalro` at the top of this project, and Opalro can't use it as its own \
+             .opalro folder."
         ),
         "{err}"
     );
-    assert!(err.contains("git rm -r --cached .opal"), "{err}");
+    assert!(err.contains("git rm -r --cached .opalro"), "{err}");
     // Nothing was made in it.
-    let inside: Vec<_> = std::fs::read_dir(env.root().join(".opal"))
+    let inside: Vec<_> = std::fs::read_dir(env.root().join(".opalro"))
         .unwrap()
         .collect();
     assert_eq!(inside.len(), 1);
 }
 
-/// What Git checked out decides the first look at `.opal`, which would say it is a project
+/// What Git checked out decides the first look at `.opalro`, which would say it is a project
 /// already, another tool's folder, or damaged; the import says what is really wrong.
 #[test]
 fn a_opal_git_tracks_is_named_whatever_it_holds() {
     for (file, refused) in [
-        (".opal/format", "already an Opalro project"),
-        (".opal/prompt", "Opalro didn't make"),
-        (".opal", "damaged"),
+        (".opalro/format", "already an Opalro project"),
+        (".opalro/prompt", "Opalro didn't make"),
+        (".opalro", "damaged"),
     ] {
         let env = Env::new();
         env.commit(file, "not Opalro's\n", "Track it");
         let err = env.refused_import();
         assert!(
-            err.contains("Git tracks `.opal` at the top of this project"),
+            err.contains("Git tracks `.opalro` at the top of this project"),
             "{file}: {err}"
         );
         assert!(!err.contains(refused), "{file}: {err}");
-        assert!(!env.root().join(".opal/state").exists(), "{file}");
+        assert!(!env.root().join(".opalro/state").exists(), "{file}");
     }
 }
 
@@ -590,7 +590,7 @@ fn import_inside_another_project_is_refused() {
         "{}",
         text(&out.stderr)
     );
-    assert!(!inner.join(".opal").exists());
+    assert!(!inner.join(".opalro").exists());
 }
 
 #[test]
@@ -653,10 +653,10 @@ fn an_imported_save_shows_the_letters_its_change_id_header_has() {
     env.git(&["reset", "-q", "--hard"]);
     env.import();
 
-    let out = env.opal().args(["--json", "history"]).output().unwrap();
+    let out = env.opalro().args(["--json", "history"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["saves"][0]["change_id"], letters);
-    let shown = text(&env.opal().arg("history").output().unwrap().stdout);
+    let shown = text(&env.opalro().arg("history").output().unwrap().stdout);
     assert!(shown.contains("\n> zyxw "), "{shown}");
 }
 
@@ -665,21 +665,21 @@ fn nested_opal_folders_are_warned_about() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");
     env.commit(
-        "sub/.opal/format",
+        "sub/.opalro/format",
         "not Opalro's\n",
-        "Add a folder named .opal",
+        "Add a folder named .opalro",
     );
     let (out, err) = env.import();
     assert!(
         err.contains(
-            "warning: Git checked out a folder named .opal at `sub/.opal`. Opalro left it out of \
+            "warning: Git checked out a folder named .opalro at `sub/.opalro`. Opalro left it out of \
              history, but commands run inside it would use it as an Opalro project; delete it \
              unless you made it."
         ),
         "{err}"
     );
-    assert!(out.contains("sub/.opal"), "{out}");
-    let json = env.opal().args(["--json", "show"]).output().unwrap();
+    assert!(out.contains("sub/.opalro"), "{out}");
+    let json = env.opalro().args(["--json", "show"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     // The commit that added only the folder adds nothing in Opalro.
     assert_eq!(json["changes"], serde_json::json!([]));
@@ -696,13 +696,13 @@ fn the_first_save_keeps_out_what_gits_exclude_list_hides() {
     std::fs::write(info.join("exclude"), "secret.txt\n").unwrap();
     std::fs::write(env.root().join("secret.txt"), "API_KEY=x\n").unwrap();
     std::fs::write(env.root().join("notes.txt"), "mine\n").unwrap();
-    let out = env.opal().args(["--json", "import"]).output().unwrap();
+    let out = env.opalro().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(json["warnings"], serde_json::json!([]));
-    let out = env.opal().args(["save", "Work"]).output().unwrap();
+    let out = env.opalro().args(["save", "Work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let shown = env.opal().args(["--json", "show"]).output().unwrap();
+    let shown = env.opalro().args(["--json", "show"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     let paths: Vec<&str> = json["changes"]
         .as_array()
@@ -735,7 +735,7 @@ blob\nmark :3\ndata 0\n\n\
 commit refs/heads/main\nmark :4\n\
 author Ada Lovelace <ada@example.com> 1700000100 +0000\n\
 committer Ada Lovelace <ada@example.com> 1700000100 +0000\n\
-data 7\nSecond\n\nfrom :2\nM 100644 :3 sub/.opal/config\n\n\
+data 7\nSecond\n\nfrom :2\nM 100644 :3 sub/.opalro/config\n\n\
 reset refs/heads/feature+x\nfrom :2\n\n\
 reset refs/remotes/origin/main\nfrom :4\n\n\
 tag v1\nfrom :2\ntagger Ada Lovelace <ada@example.com> 1700000200 +0000\ndata 11\nVersion 1.\n\n\
@@ -755,7 +755,7 @@ fn import_json_output() {
     ]);
     std::fs::create_dir_all(env.root().join(".git/info")).unwrap();
     std::fs::write(env.root().join(".git/info/grafts"), "").unwrap();
-    let out = env.opal().args(["--json", "import"]).output().unwrap();
+    let out = env.opalro().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let mut json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // A note that depends on the computer stays out of the snapshot, as in `start`'s.
@@ -805,11 +805,11 @@ fn converted_line_endings_stop_the_first_save() {
     assert!(err.contains(&format!("hint: {CRLF_HINT}\n")), "{err}");
     // Nothing was written: not a save, not an object.
     assert_eq!(env.standing(), before);
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     assert_eq!(text(&history.stdout).lines().count(), 5);
 
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "Save it"])
         .output()
         .unwrap();
@@ -836,7 +836,7 @@ fn accept_crlf_saves_them() {
     );
 
     // Saved as they are: each line ending is a byte longer than it was.
-    let shown = env.opal().args(["--json", "show"]).output().unwrap();
+    let shown = env.opalro().args(["--json", "show"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     let sizes: Vec<_> = json["changes"]
         .as_array()
@@ -931,7 +931,7 @@ fn following_the_line_ending_hint_saves_what_git_stored() {
         "{}",
         text(&out.stdout)
     );
-    let shown = env.opal().args(["--json", "show"]).output().unwrap();
+    let shown = env.opalro().args(["--json", "show"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
     assert_eq!(json["changes"][0]["path"], "a.txt");
     assert_eq!(json["changes"][0]["new_size"], 14);
@@ -1020,7 +1020,7 @@ fn a_sparse_checkout_in_the_users_git_settings_stops_an_import() {
         err.contains("hint: Turn it off with `git sparse-checkout disable`"),
         "{err}"
     );
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 
     std::fs::write(
         env.config().join(".gitconfig"),
@@ -1052,7 +1052,7 @@ fn a_sparse_checkout_given_through_git_config_count_counts_last() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");
     let out = env
-        .opal()
+        .opalro()
         .arg("import")
         .envs(given("true"))
         .output()
@@ -1063,12 +1063,12 @@ fn a_sparse_checkout_given_through_git_config_count_counts_last() {
         "{}",
         text(&out.stderr)
     );
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 
     let sparse = "[core]\n\tsparseCheckout = true\n";
     std::fs::write(env.config().join(".gitconfig"), sparse).unwrap();
     let out = env
-        .opal()
+        .opalro()
         .arg("import")
         .envs(given("false"))
         .output()

@@ -7,7 +7,7 @@
 ## 1. The speed gates
 
 - **Memory:** saving a 10 GiB file of incompressible bytes peaks at no more than 500,000,000 bytes of memory.
-- **Status:** `opal status` on an unchanged 100,000-file project takes under 2 s. From v0.1 the nightly job fails at 2 s or more ([decision 129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)).
+- **Status:** `opalro status` on an unchanged 100,000-file project takes under 2 s. From v0.1 the nightly job fails at 2 s or more ([decision 129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)).
 - **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Opalro at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians. **For v0.1** ([decision 128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md)) `status` and the small save keep the limit of twice Git's time, and going back to the first version is held to three and a half times ([decision 132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md), picked from the eleven runs on record, whose worst was 3.01): twice is its goal for v0.2, and the job says when it is over the goal.
 
 Before milestone 6's speed work the third gate fails five of its six checks (§2's tables, 2026-11-09):
@@ -27,17 +27,17 @@ The first two gates, as measured:
 
 How they are measured:
 
-- **The file:** 10,737,418,240 bytes of BLAKE3's extendable output for the input `opal memory gate`, written 1 MiB at a time by `crates/opal-vcs/tests/speed.rs`. Nothing in it compresses and no two chunks match. It is saved with `opal start`, then `opal save "A 10 GiB file" --yes`, in a new temporary folder that is deleted afterwards.
-- **Peak memory** is the most memory the `opal save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
+- **The file:** 10,737,418,240 bytes of BLAKE3's extendable output for the input `opalro memory gate`, written 1 MiB at a time by `crates/opal-vcs/tests/speed.rs`. Nothing in it compresses and no two chunks match. It is saved with `opalro start`, then `opalro save "A 10 GiB file" --yes`, in a new temporary folder that is deleted afterwards.
+- **Peak memory** is the most memory the `opalro save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
 - **Time** is wall-clock time from start to exit, with warm caches: the file was just written, and part of it may still be in the system's cache.
-- **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `opal status` twice ([testing.md](testing.md) §5).
+- **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `opalro status` twice ([testing.md](testing.md) §5).
 - Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, both fail their jobs over their limits: the memory gate always, the status gate from v0.1 on (decision 129).
 
 ### GitHub's Linux runner, 2026-11-09
 
 - **Machine:** GitHub's `ubuntu-latest` runner, image ubuntu-24.04 20261101.360.1: AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, SSD.
 - **Opalro:** the code of commit `bca0558`. The commit that added this page changes no Opalro code, only tests, workflows and docs.
-- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. That job is now `.github/workflows/memory-gate.yml`, which the bench and nightly workflows both call. The run is at `0e93681`, on a branch since deleted: this page's commit before the docs were added, with `bca0558`'s Opalro code. The test and its job have since gained one check each that a real measurement was made; neither changes what is measured. The test runs the `opal` that `cargo test` builds, which has the core's test-support feature on. That feature only adds test overrides, off unless a test sets them, and helpers `opal` never calls, so it doesn't change the number:
+- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. That job is now `.github/workflows/memory-gate.yml`, which the bench and nightly workflows both call. The run is at `0e93681`, on a branch since deleted: this page's commit before the docs were added, with `bca0558`'s Opalro code. The test and its job have since gained one check each that a real measurement was made; neither changes what is measured. The test runs the `opalro` that `cargo test` builds, which has the core's test-support feature on. That feature only adds test overrides, off unless a test sets them, and helpers `opalro` never calls, so it doesn't change the number:
 
   ```sh
   cargo test --release -p opal-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb
@@ -55,17 +55,17 @@ How they are measured:
 
 - **Machine:** AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200.
 - **Opalro:** commit `bca0558`.
-- **Memory gate,** in PowerShell from the repository's root, with `OPAL_CONFIG_DIR` set to an empty folder and `OPAL_USER_NAME` and `OPAL_USER_EMAIL` set:
+- **Memory gate,** in PowerShell from the repository's root, with `OPALRO_CONFIG_DIR` set to an empty folder and `OPALRO_USER_NAME` and `OPALRO_USER_EMAIL` set:
 
   ```powershell
   New-Item -ItemType Directory "$env:TEMP\opal-gate"
-  $env:OPAL_GATE_FILE = "$env:TEMP\opal-gate\big.bin"
+  $env:OPALRO_GATE_FILE = "$env:TEMP\opal-gate\big.bin"
   cargo test --release -p opal-vcs --test speed -j 2 -- --ignored --nocapture --exact write_the_memory_gate_file
-  cargo build --release -p opal-vcs -j 2   # after the test, which builds its own opal.exe
-  $opal = (Resolve-Path target\release\opal.exe).Path
+  cargo build --release -p opal-vcs -j 2   # after the test, which builds its own opalro.exe
+  $opalro = (Resolve-Path target\release\opalro.exe).Path
   cd $env:TEMP\opal-gate
-  & $opal start
-  $p = Start-Process $opal -ArgumentList 'save', '"A 10 GiB file"', '--yes' -NoNewWindow -PassThru
+  & $opalro start
+  $p = Start-Process $opalro -ArgumentList 'save', '"A 10 GiB file"', '--yes' -NoNewWindow -PassThru
   $null = $p.Handle   # keeps the exit code and times readable after it ends
   $peak = 0
   while (-not $p.HasExited) {
@@ -100,13 +100,13 @@ How they are measured:
 
   Noise is the keystream of AES-256-CTR from `openssl`, keyed by a fixed text: nothing in it compresses, and every run builds the same bytes.
 - **The steps,** each timed on its own:
-  1. **First save:** `opal save` after `opal start`; `git add -A && git commit` after `git init`.
+  1. **First save:** `opalro save` after `opalro start`; `git add -A && git commit` after `git init`.
   2. **A small change, saved:** a line added to `README.md` (code, Godot); 4 KiB overwritten in one file (noise, repeated); the next version (versions, whose remaining versions are then saved untimed, to make 10).
   3. **`status` with nothing changed,** started 3 seconds after the last change.
   4. **`status` after `touch` on the biggest file,** whose time changes but not its contents, so each tool must read it again.
-  5. **Back to the first version,** from the newest: `opal goto` with the first save's fingerprint (not the empty save `opal start` makes), `git checkout` with the first commit.
+  5. **Back to the first version,** from the newest: `opalro goto` with the first save's fingerprint (not the empty save `opalro start` makes), `git checkout` with the first commit.
 
-  Then the space each one takes: `.opal`, or `.git` with Git LFS's objects in it, as `du -sb` gives it (the files' bytes; on Linux each folder's own few KiB too).
+  Then the space each one takes: `.opalro`, or `.git` with Git LFS's objects in it, as `du -sb` gives it (the files' bytes; on Linux each folder's own few KiB too).
 - **Timing:** `run.sh` runs each step once to warm up. `hyperfine` then times 5 runs and gives the mean, the fastest and the slowest, with warm caches. A step whose warm-up took over a minute would get 3 runs instead, but none did. `hyperfine` runs each command with bash (Git's own on Windows) and takes the shell's start-up time off. Before every run, untimed, come three things in turn. First a wait for Git's background housekeeping, then the step's setup (a new repository for the first save, or the change for the next one), then a `sync`, so that no run pays for writing what an earlier one left. Every command is in `bench/run.sh`.
 - **To keep it fair:**
   - Git's `core.autocrlf` is off, so all three store the same bytes; every other setting is the tool's default.
@@ -249,9 +249,9 @@ After the steps: the first save and six small changes, or the 10 versions of the
 
 ## 3. Imports
 
-**In plain words.** `opal import` turns a Git repository, history and all, into an Opalro project. Three repositories show what it costs in space. A Git LFS repository shrinks to a ninth, since Git LFS keeps every version of a file whole. An honest history of one big file comes out 18% bigger than Git keeps it, since Git stores each version as a small delta. And the red team's RT4-1 repository, built to blow up, comes out 98 times bigger: chunking covers files, not the records a save is made of ([decision 087](decisions/087-what-an-import-writes-once-files-are-chunked.md)).
+**In plain words.** `opalro import` turns a Git repository, history and all, into an Opalro project. Three repositories show what it costs in space. A Git LFS repository shrinks to a ninth, since Git LFS keeps every version of a file whole. An honest history of one big file comes out 18% bigger than Git keeps it, since Git stores each version as a small delta. And the red team's RT4-1 repository, built to blow up, comes out 98 times bigger: chunking covers files, not the records a save is made of ([decision 087](decisions/087-what-an-import-writes-once-files-are-chunked.md)).
 
-| Repository | Git (`.git`) | Opalro (`.opal`) | `opal import`, Linux | `opal import`, Windows |
+| Repository | Git (`.git`) | Opalro (`.opalro`) | `opalro import`, Linux | `opalro import`, Windows |
 |---|---|---|---|---|
 | Git LFS: five files of 100 MiB in 10 versions, each overwriting 1 MiB of each file | 5,000.0 MiB, all but 42 KB of it in `.git/lfs` | 553.7 MiB | 11.4 s (11.4–11.5) | 12.4 s (12.3–12.4) |
 | One 200 MiB file in 50 versions, each overwriting 1% (eight runs of 256 KiB) | 299.2 MiB | 351.9 MiB | 48.2 s (48.0–48.5) | 47.2 s (46.7–49.0) |
@@ -266,9 +266,9 @@ After the steps: the first save and six small changes, or the 10 versions of the
 
 ### git/git: main against milestone 5
 
-The whole history of Git's own repository is imported by `opal` built from `main` and from this branch, in turn, three times each on the same machine. After each import comes its first save: a line added to `README.md`, saved with `--accept-crlf`. That flag is needed because Git wrote three `.bat` files with CRLF, as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`), and `run.sh import` has the commands. The branch's commits `c519636` and `a2ba223` both have `ba513aa`'s Opalro code.
+The whole history of Git's own repository is imported by `opalro` built from `main` and from this branch, in turn, three times each on the same machine. After each import comes its first save: a line added to `README.md`, saved with `--accept-crlf`. That flag is needed because Git wrote three `.bat` files with CRLF, as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`), and `run.sh import` has the commands. The branch's commits `c519636` and `a2ba223` both have `ba513aa`'s Opalro code.
 
-| Machine and run | `opal` from | Import: 3 runs | Mean | Peak memory | First save after it |
+| Machine and run | `opalro` from | Import: 3 runs | Mean | Peak memory | First save after it |
 |---|---|---|---|---|---|
 | AMD EPYC 7763, [run 42611120400](https://github.com/WisHonor/Bolt/actions/runs/42611120400) | `main` (`400e09e`) | 166.05, 164.36, 164.66 s | 165.0 s | 572.8–575.5 MB | 0.85, 0.84, 0.85 s |
 | | this branch (`c519636`) | 165.05, 165.52, 164.72 s | 165.1 s (+0.04%) | 668.9–674.2 MB | 0.64, 0.64, 0.64 s |
@@ -303,7 +303,7 @@ The whole history of Git's own repository is imported by `opal` built from `main
   cargo test --release -p opal-vcs-core --test throughput -- --ignored --nocapture --test-threads=1
   ```
 
-  with `OPAL_BENCH_CODE` and `OPAL_BENCH_GODOT` naming the code set and Godot's demos. On the runners these are the sets of §2, in the same runs. On the laptop, the code set is the same tarball, unpacked by Git's bash (its links as copies), and Godot's demos a sparse checkout of their PNG and OGG files: `git clone --depth 1 --branch 4.7-6ad6167 --filter=blob:none --sparse https://github.com/godotengine/godot-demo-projects`, then `git sparse-checkout set --no-cone '*.png' '*.ogg'`. Both were in a temporary folder, deleted afterwards.
+  with `OPALRO_BENCH_CODE` and `OPALRO_BENCH_GODOT` naming the code set and Godot's demos. On the runners these are the sets of §2, in the same runs. On the laptop, the code set is the same tarball, unpacked by Git's bash (its links as copies), and Godot's demos a sparse checkout of their PNG and OGG files: `git clone --depth 1 --branch 4.7-6ad6167 --filter=blob:none --sparse https://github.com/godotengine/godot-demo-projects`, then `git sparse-checkout set --no-cone '*.png' '*.ogg'`. Both were in a temporary folder, deleted afterwards.
 - **The laptop:** the one of §1 (AMD Ryzen 7 7730U, 16 GB, Windows 11 Home 10.0.26200), 2026-11-09, with `-j 2`, the test file as committed, and Opalro's code at `ba513aa`.
 
 ## 5. Compressing again: the ruling
@@ -345,7 +345,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 ### How it was measured
 
 - **The build:** `main`'s code at `a76f635` with timers added, which print to stderr when a variable is set, on the branch `bench/m6b-profile` (since deleted). The timers cost a few percent: `status` on Git's source took 63.3 ms without them printing and about 65 ms with.
-- **Small projects:** [run 42753171139](https://github.com/WisHonor/Bolt/actions/runs/42753171139), 2026-11-10, at `b0e849b`. Git's source and Godot's demos, set up as §2's steps set them up (`opal start`, the first save, a line added to `README.md`, saved). Each step was then timed with `hyperfine` (30 runs of `status`, 15 of the others, run directly, with no shell) and run three times with the timers printing. The three agreed within about 3%; the tables give one of them. Linux: image ubuntu-24.04 20261101.360.1, AMD EPYC 7763, 4 virtual CPUs, Git 2.56.0. Windows: image windows-2025-vs2026 20261103.298.1, AMD EPYC 9V74, 4 virtual CPUs, Windows Defender's real-time protection off, Git 2.56.0.windows.4. On Linux `strace` also counted the system calls; `perf` wasn't on the runner, so there is no profile by function.
+- **Small projects:** [run 42753171139](https://github.com/WisHonor/Bolt/actions/runs/42753171139), 2026-11-10, at `b0e849b`. Git's source and Godot's demos, set up as §2's steps set them up (`opalro start`, the first save, a line added to `README.md`, saved). Each step was then timed with `hyperfine` (30 runs of `status`, 15 of the others, run directly, with no shell) and run three times with the timers printing. The three agreed within about 3%; the tables give one of them. Linux: image ubuntu-24.04 20261101.360.1, AMD EPYC 7763, 4 virtual CPUs, Git 2.56.0. Windows: image windows-2025-vs2026 20261103.298.1, AMD EPYC 9V74, 4 virtual CPUs, Windows Defender's real-time protection off, Git 2.56.0.windows.4. On Linux `strace` also counted the system calls; `perf` wasn't on the runner, so there is no profile by function.
 - **Big files:** [run 42755560911](https://github.com/WisHonor/Bolt/actions/runs/42755560911), 2026-11-10, at `79c03de`, both runners on AMD EPYC 7763s, Git LFS 3.8.1. §2's noise, versions and repeated sets, each step run once (twice for going back), so these are single runs, not means.
 - **The laptop:** §1's (AMD Ryzen 7 7730U, Windows 11, its virus scanner on), Git 2.50.1, each command timed 10 to 20 times by a script.
 
@@ -363,9 +363,9 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 | matching every name against every ignore line in force (Git's own `.gitignore` has 263) | 17.7 | 16.2 | 25.0 |
 | opening and listing each folder | 5.6 | 11.5 | 33.0 |
 | reading the last save's listing of each folder from the store | 5.8 | 10.4 | 17.5 |
-| opening each folder and asking it for `.git` and `.opal` by name | 1.2 | 6.7 | 25.0 |
-| trying to open `.gitignore` and `.opalignore` in each folder | 1.4 | 4.5 | 15.4 |
-| checking each name (the name rules, `.git` and `.opal` spellings) | 2.3 | 3.7 | 3.9 |
+| opening each folder and asking it for `.git` and `.opalro` by name | 1.2 | 6.7 | 25.0 |
+| trying to open `.gitignore` and `.opalroignore` in each folder | 1.4 | 4.5 | 15.4 |
+| checking each name (the name rules, `.git` and `.opalro` spellings) | 2.3 | 3.7 | 3.9 |
 | handing files to the looking threads, and waiting for room | 1.0 | 4.9 | 1.7 |
 | the rest: building paths, keeping the books | 9.5 | 13.9 | 16.9 |
 | The looks at each file, summed over the looking threads (run beside the walk, not after it) | 10.7 | 104.8 | 292 |
@@ -375,7 +375,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 | The rest: comparing with the save, printing, freeing memory | 1.5 | 1.9 | 2.9 |
 
 - **A look at one file** takes 2.2 µs on Linux (one call), 21.6 µs on the Windows runner and 60 µs on the laptop (five calls: open, three questions, close; the laptop's virus scanner sees each open). The looking threads finished within a millisecond of the walk on every machine, so the walk is what `status` waits for.
-- **System calls on Linux:** Opalro made 5,311 lookups of an entry's details (453 of them the failed lookups of `.git` and `.opal`), 937 opens (419 failed, for ignore files that aren't there), 1,583 reads from packs (7 for each folder listing), 511 folder reads and 4 flushes. Git made 5,157 lookups, 334 opens, 457 folder reads and no flush.
+- **System calls on Linux:** Opalro made 5,311 lookups of an entry's details (453 of them the failed lookups of `.git` and `.opalro`), 937 opens (419 failed, for ignore files that aren't there), 1,583 reads from packs (7 for each folder listing), 511 folder reads and 4 flushes. Git made 5,157 lookups, 334 opens, 457 folder reads and no flush.
 - **What Git doesn't do.** Git matches ignore lines only against names it doesn't track, and keeps one index where Opalro reads and checks a listing for each folder. Git looks at each file as Opalro does, on several threads.
 
 ### Godot's demos
@@ -389,7 +389,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 | The walk, on one thread | 48.9 | 107.3 |
 | opening and listing each folder | 10.5 | 27.5 |
 | reading the last save's listing of each folder | 12.6 | 26.6 |
-| opening each folder and asking it for `.git` and `.opal` | 3.2 | 17.0 |
+| opening each folder and asking it for `.git` and `.opalro` | 3.2 | 17.0 |
 | trying to open the two ignore files in each folder | 3.1 | 8.5 |
 | matching ignore lines | 3.3 | 3.6 |
 | handing files to the looking threads | 2.6 | 7.3 |
@@ -573,9 +573,9 @@ Two things to know when reading them:
 | Noise | 1,048,576,000 | 1,051,271,584 | 1,363,601,944 | 1,363,192,300 |
 | Versions | 1,073,741,824 | 1,091,689,096 | 10,740,917,054 | 10,737,640,524 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,838 | 7,516,228,782 |
-- history-opal: 368,998,025 bytes
+- history-opalro: 368,998,025 bytes
 - history-git: 313,774,870 bytes
-- lfs-opal: 580,585,708 bytes
+- lfs-opalro: 580,585,708 bytes
 - lfs-git: 5,242,922,183 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -645,9 +645,9 @@ Two things to know when reading them:
 | Noise | 1,048,576,000 | 1,051,271,583 | 1,363,601,964 | 1,363,192,324 |
 | Versions | 1,073,741,824 | 1,091,689,095 | 10,740,917,076 | 10,737,640,549 |
 | Repeated | 1,073,741,824 | 5,504,716 | 7,518,523,853 | 7,516,228,810 |
-- history-opal: 368,998,024 bytes
+- history-opalro: 368,998,024 bytes
 - history-git: 313,774,890 bytes
-- lfs-opal: 580,585,708 bytes
+- lfs-opalro: 580,585,708 bytes
 - lfs-git: 5,242,922,196 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -672,7 +672,7 @@ Two things to know when reading them:
 
 ### Imports
 
-git/git, imported three times by each `opal` in turn on one runner ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs):
+git/git, imported three times by each `opalro` in turn on one runner ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs):
 
 | | Import | Peak memory | The first save after it |
 |---|---|---|---|
@@ -681,11 +681,11 @@ git/git, imported three times by each `opal` in turn on one runner ([run 4291024
 
 The import is faster because the store finds and reads records in fewer reads; its memory is lower because it keeps 96 MiB of rebuilt objects where it kept 256 MiB.
 
-And the largest history at hand, once, with `main`'s engine and its 256 MiB of rebuilt objects ([run 42759080455](https://github.com/WisHonor/Bolt/actions/runs/42759080455), GitHub's Linux runner): torvalds/linux at `b3dfbde` (2026-11-09), 1,506,211 commits and 12,024,624 objects. It imports in 2,955 s (49 minutes) with a peak of 3,329,288 KiB (3.4 GB), and the `.opal` folder takes 64,636,524,309 bytes (64.6 GB) where Git's pack takes 6.6 GB. Opalro stores every version of every file and listing whole or in chunks; Git stores most of them as deltas against another version. That is the biggest loss on this page, and records stored as deltas ([decision 009](decisions/009-storage-engine.md)'s later feature) are what would close it.
+And the largest history at hand, once, with `main`'s engine and its 256 MiB of rebuilt objects ([run 42759080455](https://github.com/WisHonor/Bolt/actions/runs/42759080455), GitHub's Linux runner): torvalds/linux at `b3dfbde` (2026-11-09), 1,506,211 commits and 12,024,624 objects. It imports in 2,955 s (49 minutes) with a peak of 3,329,288 KiB (3.4 GB), and the `.opalro` folder takes 64,636,524,309 bytes (64.6 GB) where Git's pack takes 6.6 GB. Opalro stores every version of every file and listing whole or in chunks; Git stores most of them as deltas against another version. That is the biggest loss on this page, and records stored as deltas ([decision 009](decisions/009-storage-engine.md)'s later feature) are what would close it.
 
 ### Long histories
 
-git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first parents, with its four other branches as lines too (`maint`, `next` and `seen`, each about as long, and `todo`, 2,636 saves). It was imported by `main`'s `opal` and by the branch's on one runner, with Git on a third clone; three turns each, timed from a shell ([run 42910267213](https://github.com/WisHonor/Bolt/actions/runs/42910267213)). A range is the three turns; a command's very first run, which reads files nothing has read yet, is left out where it stood apart.
+git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first parents, with its four other branches as lines too (`maint`, `next` and `seen`, each about as long, and `todo`, 2,636 saves). It was imported by `main`'s `opalro` and by the branch's on one runner, with Git on a third clone; three turns each, timed from a shell ([run 42910267213](https://github.com/WisHonor/Bolt/actions/runs/42910267213)). A range is the three turns; a command's very first run, which reads files nothing has read yet, is left out where it stood apart.
 
 | Step | Linux: before, after, Git | Windows: before, after, Git |
 |---|---|---|
@@ -744,9 +744,9 @@ Each is a row of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) ("
 
 ## 9. Both halves of milestone 6 together
 
-**In plain words.** Milestone 6 was built in two halves at once: speed and space (§8), and presets and polish (the project kinds, `opal setup`, `opal.toml`, `opal verify`, the new terminal output, Git's words). §8 measured the speed half alone. This section measures the two together, on the code v0.1 is made from, with the same workflow and the same steps. The short of it: nothing the presets-and-polish half added shows in the numbers. Against Git on the same runner, each step's share of Git's time sits where §8's runs put it; the import takes the same time and memory as the speed half alone, turn by turn on one runner; and what Opalro stores is the same size. The same two gates pass, and the third gate misses in the same place: going back to another version on Linux, at twice Git's time or over it.
+**In plain words.** Milestone 6 was built in two halves at once: speed and space (§8), and presets and polish (the project kinds, `opalro setup`, `opalro.toml`, `opalro verify`, the new terminal output, Git's words). §8 measured the speed half alone. This section measures the two together, on the code v0.1 is made from, with the same workflow and the same steps. The short of it: nothing the presets-and-polish half added shows in the numbers. Against Git on the same runner, each step's share of Git's time sits where §8's runs put it; the import takes the same time and memory as the speed half alone, turn by turn on one runner; and what Opalro stores is the same size. The same two gates pass, and the third gate misses in the same place: going back to another version on Linux, at twice Git's time or over it.
 
-Everything here was measured on 2026-11-10. The whole benchmark, the import and the first run of the gates are of commit `922a31f`, the commit that merged the speed half into the other ([run 42931440244](https://github.com/WisHonor/Bolt/actions/runs/42931440244)). The commits after it change `opal verify`, `opal setup`'s output, tests and documents, none of them a step this page times; the three gates were run once more on `fe5b46c`, the code as its final review left it, to confirm (below).
+Everything here was measured on 2026-11-10. The whole benchmark, the import and the first run of the gates are of commit `922a31f`, the commit that merged the speed half into the other ([run 42931440244](https://github.com/WisHonor/Bolt/actions/runs/42931440244)). The commits after it change `opalro verify`, `opalro setup`'s output, tests and documents, none of them a step this page times; the three gates were run once more on `fe5b46c`, the code as its final review left it, to confirm (below).
 
 ### The three gates
 
@@ -839,9 +839,9 @@ What the tables below say, losses included:
 | Noise | 1,048,576,000 | 1,051,271,584 | 1,363,601,946 | 1,363,192,296 |
 | Versions | 1,073,741,824 | 1,091,689,096 | 10,740,917,051 | 10,737,640,526 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,836 | 7,516,228,784 |
-- history-opal: 368,998,025 bytes
+- history-opalro: 368,998,025 bytes
 - history-git: 313,774,870 bytes
-- lfs-opal: 580,585,708 bytes
+- lfs-opalro: 580,585,708 bytes
 - lfs-git: 5,242,922,182 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -911,15 +911,15 @@ What the tables below say, losses included:
 | Noise | 1,048,576,000 | 1,051,271,583 | 1,363,601,966 | 1,363,192,327 |
 | Versions | 1,073,741,824 | 1,091,689,095 | 10,740,917,074 | 10,737,640,551 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,860 | 7,516,228,806 |
-- history-opal: 368,998,024 bytes
+- history-opalro: 368,998,024 bytes
 - history-git: 313,774,890 bytes
-- lfs-opal: 580,585,707 bytes
+- lfs-opalro: 580,585,707 bytes
 - lfs-git: 5,242,922,198 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
 ### Imports
 
-git/git, imported three times by each `opal` in turn on one runner (the same run, job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs). "`main`" is the speed half alone:
+git/git, imported three times by each `opalro` in turn on one runner (the same run, job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs). "`main`" is the speed half alone:
 
 | | Import | Peak memory | The first save after it |
 |---|---|---|---|

@@ -1,4 +1,4 @@
-//! `opal tidy`, end to end.
+//! `opalro tidy`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 mod support;
 use support::{Env, id_of, main_tip, text, write_noise};
 
-/// `opal <args>`, which must succeed; what it printed, and what it said on stderr.
+/// `opalro <args>`, which must succeed; what it printed, and what it said on stderr.
 fn ok(env: &Env, args: &[&str]) -> (String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -26,7 +26,7 @@ fn ok(env: &Env, args: &[&str]) -> (String, String) {
 /// nothing reaches, as a crash can leave them.
 fn with_garbage() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -52,7 +52,7 @@ fn with_garbage() -> Env {
 
 /// Makes every pack of the project `hours` old, so that `tidy` may change it.
 fn age(env: &Env, hours: u64) {
-    let packs = env.root().join(".opal").join("store").join("packs");
+    let packs = env.root().join(".opalro").join("store").join("packs");
     for entry in fs::read_dir(packs).unwrap() {
         let file = fs::File::options()
             .write(true)
@@ -68,10 +68,10 @@ fn tidy_says_what_it_will_free_and_what_it_freed() {
     let env = with_garbage();
     age(&env, 48);
     let (head, packs) = env.standing();
-    let out = env.opal().args(["tidy", "--json"]).output().unwrap();
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     let (before, after) = (doc["bytes_before"].as_u64(), doc["bytes_after"].as_u64());
     let freed = before.unwrap() - after.unwrap();
     assert!(freed >= 64 << 10, "{doc}");
@@ -115,9 +115,14 @@ fn a_routine_tidy_with_nothing_to_free_says_so() {
     assert_eq!(told, "");
     // Old enough to rewrite, so the estimate is worked out, not 0 for packs too young.
     age(&env, 48);
-    let doc: Value =
-        serde_json::from_slice(&env.opal().args(["tidy", "--json"]).output().unwrap().stdout)
-            .unwrap();
+    let doc: Value = serde_json::from_slice(
+        &env.opalro()
+            .args(["tidy", "--json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
     assert_eq!(doc["packs_young"], 0, "{doc}");
     assert_eq!(doc["to_free"], 0, "{doc}");
 }
@@ -156,9 +161,9 @@ fn tidy_that_frees_nothing_it_found_says_nothing_could_be_freed() {
     let env = with_garbage();
     age(&env, 48);
     let out = env
-        .opal()
+        .opalro()
         .arg("tidy")
-        .env("OPAL_FAULT_FAIL", "tidy:removing")
+        .env("OPALRO_FAULT_FAIL", "tidy:removing")
         .output()
         .unwrap();
     let (said, told) = (text(&out.stdout), text(&out.stderr));
@@ -177,12 +182,12 @@ fn tidy_that_frees_nothing_it_found_says_nothing_could_be_freed() {
 fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
     let env = with_garbage();
     fs::write(
-        env.root().join(".opal/store/packs/zz.pack"),
+        env.root().join(".opalro/store/packs/zz.pack"),
         vec![b'x'; 200],
     )
     .unwrap();
     age(&env, 48);
-    let out = env.opal().arg("tidy").output().unwrap();
+    let out = env.opalro().arg("tidy").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(text(&out.stdout), "");
     let said = text(&out.stderr);
@@ -194,13 +199,13 @@ fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
         .unwrap_or_else(|| panic!("{said}"));
     let named = std::path::Path::new(pack);
     assert!(
-        named.ends_with(".opal/store/packs/zz.pack") && named.is_absolute(),
+        named.ends_with(".opalro/store/packs/zz.pack") && named.is_absolute(),
         "{said}"
     );
     assert_eq!(
         hint,
         "hint: Nothing was removed. Check the pack's permissions. If it is damaged for good, \
-         moving it out of .opal/store/packs lets `opal tidy` run, losing what only it holds, and \
+         moving it out of .opalro/store/packs lets `opalro tidy` run, losing what only it holds, and \
          the chunks only its chunk lists name.\n"
     );
 }
@@ -218,7 +223,7 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
     assert!(
         said.ends_with(&format!(
             " KiB.\n\n    Left {young} packs changed in the last 24 hours as they are: a later \
-             opal tidy frees what they hold that nothing needs.\n"
+             opalro tidy frees what they hold that nothing needs.\n"
         )),
         "{said}"
     );
@@ -228,7 +233,7 @@ fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
 #[test]
 fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -250,11 +255,11 @@ fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
 #[test]
 fn tidy_stops_at_a_pack_it_cannot_read() {
     let env = with_garbage();
-    let junk = env.root().join(".opal/store/packs/zz.pack");
+    let junk = env.root().join(".opalro/store/packs/zz.pack");
     fs::write(&junk, vec![b'x'; 200]).unwrap();
     age(&env, 48);
     let before = env.standing();
-    let out = env.opal().args(["tidy", "--json"]).output().unwrap();
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     let said = doc["error"]["message"].as_str().unwrap();
@@ -263,7 +268,7 @@ fn tidy_stops_at_a_pack_it_cannot_read() {
         "{doc}"
     );
     let hint = doc["error"]["hint"].as_str().unwrap();
-    assert!(hint.contains(".opal/store/packs"), "{doc}");
+    assert!(hint.contains(".opalro/store/packs"), "{doc}");
     assert!(hint.contains("only its chunk lists name"), "{doc}");
     // Nothing was removed.
     assert_eq!(env.standing(), before);
@@ -287,7 +292,7 @@ fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
     ] {
         fs::write(&config, setting).unwrap();
         let before = env.standing();
-        let out = env.opal().arg("tidy").output().unwrap();
+        let out = env.opalro().arg("tidy").output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{setting}");
         let err = text(&out.stderr);
         assert!(err.contains(said), "{err}");
@@ -303,7 +308,7 @@ fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
 fn tidy_json_matches_its_snapshot() {
     let env = with_garbage();
     age(&env, 48);
-    let out = env.opal().args(["tidy", "--json"]).output().unwrap();
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let mut doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     // Sizes on disk depend on the times in the records, which differ from run to run.

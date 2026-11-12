@@ -1,4 +1,4 @@
-//! The `opal` command-line tool.
+//! The `opalro` command-line tool.
 
 mod git_words;
 mod goto_output;
@@ -20,6 +20,8 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::{CommandFactory, Parser, Subcommand};
+use git_words::Typed;
 use opal_core::changes::{Lines, save_changes, unsaved_changes};
 use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
@@ -50,14 +52,12 @@ use opal_core::undo::{self, StepInfo, StepRequest};
 use opal_core::verify;
 use opal_core::warning::{self, Warning};
 use opal_core::writeout::unfinished_warning;
-use clap::{CommandFactory, Parser, Subcommand};
-use git_words::Typed;
-use output::{OPAL_JSON, Failure};
+use output::{Failure, OPALRO_JSON};
 use serde_json::json;
 
 #[derive(Parser)]
 #[command(
-    name = "opal",
+    name = "opalro",
     version,
     about = "Version control for code and big files."
 )]
@@ -140,7 +140,7 @@ enum Command {
         #[arg(long, requires = "list")]
         all: bool,
         /// Make things as they were right after this diary entry, named by at least 8 hex digits
-        /// of its ID, as opal undo --list shows them.
+        /// of its ID, as opalro undo --list shows them.
         #[arg(long, value_name = "ENTRY", conflicts_with = "n")]
         to: Option<String>,
     },
@@ -160,7 +160,7 @@ enum Command {
     },
     /// Bring back the newest shelf, or the one with this number, onto the save you're on.
     Unshelf {
-        /// The shelf's number, as opal shelf --list shows it.
+        /// The shelf's number, as opalro shelf --list shows it.
         #[arg(value_name = "NUMBER")]
         number: Option<String>,
     },
@@ -347,7 +347,7 @@ fn with_users_key(mut repo: Repository) -> Repository {
     repo
 }
 
-/// The preset `opal start` begins with: `None` where the folder has an `opal.toml` of its own,
+/// The preset `opalro start` begins with: `None` where the folder has an `opalro.toml` of its own,
 /// which stays. Asks when it may and `asked` is `None`; stops before anything is made otherwise.
 fn preset_to_start(
     json: bool,
@@ -359,12 +359,13 @@ fn preset_to_start(
         return match asked {
             None => Ok(None),
             Some(preset) => Err(Failure {
-                message: "Nothing was started: this folder already has an opal.toml, and a start \
+                message:
+                    "Nothing was started: this folder already has an opalro.toml, and a start \
                           keeps the rules it holds, so --preset can't be used here."
-                    .into(),
+                        .into(),
                 hint: Some(format!(
-                    "Run opal start without --preset to keep them; to switch to the preset's \
-                     rules afterwards, run: opal setup --preset {}",
+                    "Run opalro start without --preset to keep them; to switch to the preset's \
+                     rules afterwards, run: opalro setup --preset {}",
                     preset.name()
                 )),
                 printed: false,
@@ -378,7 +379,7 @@ fn preset_to_start(
     let stop = |message: &str| Failure {
         message: message.to_owned(),
         hint: Some(format!(
-            "Name the kind of project: opal start --preset code, opal start --preset game or opal \
+            "Name the kind of project: opalro start --preset code, opalro start --preset game or opalro \
              start --preset custom. Opalro would suggest --preset {}: it {}.",
             suggestion.name(),
             setup_output::found_words(looked)
@@ -472,14 +473,14 @@ fn start(
                 warning::FIRST_SAVE_NOT_READ,
                 format!(
                     "The project was made, but Opalro couldn't read its first save back. {}\n\
-                     Run `opal history` to check that the project reads.",
+                     Run `opalro history` to check that the project reads.",
                     problem.message
                 ),
             ));
             None
         }
     };
-    // The rule files are a second step, which `opal undo` takes back.
+    // The rule files are a second step, which `opalro undo` takes back.
     let mut rules_written = Vec::new();
     let mut unwritten = None;
     if let Some(preset) = preset.filter(|p| *p != Preset::Custom) {
@@ -508,7 +509,7 @@ fn start(
                         problem.message
                     ),
                     hint: Some(format!(
-                        "Run opal setup --preset {} to write them.",
+                        "Run opalro setup --preset {} to write them.",
                         preset.name()
                     )),
                     printed: false,
@@ -524,7 +525,7 @@ fn start(
             output::save_json(id, save, short)
         });
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "root": root.display().to_string(),
             "position": output::position_json(&Position::OnLine("main".into())),
             "save": save,
@@ -557,7 +558,7 @@ fn start(
         let e = style::err();
         style::next(&format!(
             "change some files, then run: {}",
-            e.command("opal save \"describe your change\"")
+            e.command("opalro save \"describe your change\"")
         ));
     }
     Ok(())
@@ -574,27 +575,27 @@ fn setup_command(
     )?));
     let Some(preset) = preset else {
         let read = repo.read_rules();
-        let block = opal_core::setup::opalignore_block_lines(repo.root())?;
+        let block = opal_core::setup::opalroignore_block_lines(repo.root())?;
         let mut warnings = read.warnings();
         warnings.extend(repo.store().warnings());
         if json {
             let mut document = setup_output::rules_json(&read, block);
-            document["opal_json"] = OPAL_JSON.into();
+            document["opalro_json"] = OPALRO_JSON.into();
             document["warnings"] = output::warnings_json(&warnings);
             return output::print_quietly(&format!("{document}\n"), &warnings);
         }
         output::print_quietly(&setup_output::rules_shown(&read, block), &warnings)?;
         let e = style::err();
         style::next(&format!(
-            "edit opal.toml or .opalignore to change a rule, or switch presets with: {}",
-            e.command("opal setup --preset <name>")
+            "edit opalro.toml or .opalroignore to change a rule, or switch presets with: {}",
+            e.command("opalro setup --preset <name>")
         ));
         return Ok(());
     };
     let plan = plan_setup(repo.root(), preset)?;
     let title = setup_output::title(preset);
     let mut document = json!({
-        "opal_json": OPAL_JSON,
+        "opalro_json": OPALRO_JSON,
         "preset": preset.name(),
         "found": setup_output::found_json(&plan.found),
         "files": setup_output::changes_json(&plan.changes),
@@ -632,7 +633,7 @@ fn setup_command(
                     .into()
             },
             hint: Some(format!(
-                "If they are what you want, run: opal setup --preset {} --yes",
+                "If they are what you want, run: opalro setup --preset {} --yes",
                 preset.name()
             )),
             printed: false,
@@ -747,7 +748,7 @@ fn import(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     output::print_done(&text, &warnings)?;
     style::next(&format!(
         "look around with: {}",
-        style::err().command("opal status")
+        style::err().command("opalro status")
     ));
     Ok(())
 }
@@ -880,7 +881,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             warnings.extend(repo.store().warnings());
             let text = if json {
                 let document = json!({
-                    "opal_json": OPAL_JSON,
+                    "opalro_json": OPALRO_JSON,
                     "result": "saved",
                     "paths": paths,
                     "save": output::save_json(&save_id, &save, &short),
@@ -919,7 +920,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                 if only.is_some() {
                     details.push(format!(
                         "Only what you named was saved: {} lists the changes left out.",
-                        s.command("opal status")
+                        s.command("opalro status")
                     ));
                 }
                 if !details.is_empty() {
@@ -940,7 +941,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             let text = if json {
                 warnings.extend(repo.store().warnings());
                 let document = json!({
-                    "opal_json": OPAL_JSON,
+                    "opalro_json": OPALRO_JSON,
                     "result": "nothing_changed",
                     "paths": paths,
                     "warnings": output::warnings_json(&warnings),
@@ -1022,7 +1023,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// A change `opal status` found, as the diff walk hands one out.
+/// A change `opalro status` found, as the diff walk hands one out.
 fn file_change(c: &PathChange) -> opal_core::diff::FileChange<'_> {
     opal_core::diff::FileChange {
         path: &c.path,
@@ -1064,7 +1065,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 out,
                 "{}",
                 json!({
-                    "opal_json": OPAL_JSON,
+                    "opalro_json": OPALRO_JSON,
                     "position": output::position_json(&found.position),
                     "save": output::save_json(id, save, &short),
                     "changes": changes,
@@ -1125,13 +1126,13 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     if !json && !found.changes.is_empty() {
         style::next(&format!(
             "save them with: {}",
-            style::err().command("opal save \"describe your change\"")
+            style::err().command("opalro save \"describe your change\"")
         ));
     }
     Ok(())
 }
 
-/// Why `opal changes` stopped: a file couldn't be read, or what it shows couldn't be written.
+/// Why `opalro changes` stopped: a file couldn't be read, or what it shows couldn't be written.
 enum Stop {
     Read(SaveError),
     Write(Failure),
@@ -1231,7 +1232,7 @@ fn changes_command(
     let result = if json {
         output::stream_document(
             &mut out,
-            &format!("{{\"opal_json\":{OPAL_JSON},\"changes\":["),
+            "{\"changes\":[",
             |item| {
                 walk(&mut |path, c, lines| {
                     note(path, &lines);
@@ -1245,7 +1246,7 @@ fn changes_command(
             || {
                 let (warnings, short) = warnings();
                 (
-                    json!({"save": output::save_json(&id, &saved, &short)}),
+                    json!({"opalro_json": OPALRO_JSON, "save": output::save_json(&id, &saved, &short)}),
                     warnings,
                 )
             },
@@ -1313,7 +1314,7 @@ fn history_to(
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
-            &format!("{{\"opal_json\":{OPAL_JSON},\"position\":{position},\"saves\":["),
+            &format!("{{\"opalro_json\":{OPALRO_JSON},\"position\":{position},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
                     each(&output::save_json(id, save, short))
@@ -1394,10 +1395,10 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let done = (|| -> Result<Vec<Warning>, Failure> {
         if json {
             // The document `json!` would make, in pieces: serde_json writes an object's keys in
-            // alphabetical order, so `changes` comes between `opal_json` and `save`.
+            // alphabetical order, so `changes` comes first, then `opalro_json` and `save`.
             return output::stream_document(
                 &mut out,
-                &format!("{{\"opal_json\":{OPAL_JSON},\"changes\":["),
+                "{\"changes\":[",
                 |each| {
                     for_each_change(store, old_root, save.root, |c| {
                         each(&output::change_json(&c))
@@ -1410,7 +1411,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                     warnings.extend(store.warnings());
                     (
-                        json!({"save": output::save_json(&id, &save, &short)}),
+                        json!({"opalro_json": OPALRO_JSON, "save": output::save_json(&id, &save, &short)}),
                         warnings,
                     )
                 },
@@ -1432,7 +1433,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     if !json && count > 0 {
         style::next(&format!(
             "see its lines with: {}",
-            style::err().command(&format!("opal changes --save {shown_as}"))
+            style::err().command(&format!("opalro changes --save {shown_as}"))
         ));
     }
     Ok(())
@@ -1458,7 +1459,7 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     if json {
         let lines: Vec<&String> = entry.state.lines.keys().collect();
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "position": output::position_json(&entry.state.position),
             "lines": lines,
             "server_lines": server_lines,
@@ -1544,7 +1545,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
     warnings.extend(repo.store().warnings());
     let text = if json {
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "position": output::position_json(&done.position),
             "save": save.map(|s| output::save_json(&done.save, &s, &short)),
             "written": done.applied.written,
@@ -1596,7 +1597,7 @@ fn discard_command(
     warnings.extend(repo.store().warnings());
     let text = if json {
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "restored_paths": done.restored,
             "removed_paths": done.removed,
             "folders": done.folders,
@@ -1616,7 +1617,7 @@ fn discard_command(
     Ok(())
 }
 
-/// `opal undo`, `opal redo`, and `opal undo --to <entry>` (`to`).
+/// `opalro undo`, `opalro redo`, and `opalro undo --to <entry>` (`to`).
 fn undo_command(
     json: bool,
     redo: bool,
@@ -1731,11 +1732,11 @@ fn undo_command(
             text += &match &to {
                 Some(to) => format!(
                     "{done} the {what} that was stopped, so nothing more was done. Running \
-                     opal undo --to {to} again goes on from there.\n"
+                     opalro undo --to {to} again goes on from there.\n"
                 ),
                 None => format!(
                     "{done} the {what} that was stopped, so nothing more was {list}. Running \
-                     opal {command} again takes one more step.\n"
+                     opalro {command} again takes one more step.\n"
                 ),
             };
         }
@@ -1768,7 +1769,7 @@ fn undo_command(
                 Some(t) => Some(t.after.position.clone()),
                 None => repo.current().ok().map(|(_, e)| e.state.position),
             };
-            document["opal_json"] = OPAL_JSON.into();
+            document["opalro_json"] = OPALRO_JSON.into();
             document["finished"] = finished.into();
             document["position"] = position.map_or(json!(null), |p| output::position_json(&p));
             document["warnings"] = output::warnings_json(&warnings);
@@ -1790,18 +1791,18 @@ fn undo_command(
         None => {
             warnings.extend(repo.store().warnings());
             output::print_done(&text, &told_once(warnings))?;
-            // One shelf made is the newest, which `opal unshelf` brings back; each step of
+            // One shelf made is the newest, which `opalro unshelf` brings back; each step of
             // several can make one.
             let e = style::err();
             match shelved.len() {
                 0 => {}
                 1 => style::next(&format!(
                     "bring your changes back with: {}",
-                    e.command("opal unshelf")
+                    e.command("opalro unshelf")
                 )),
                 _ => style::next(&format!(
                     "see the shelves with: {}",
-                    e.command("opal shelf --list")
+                    e.command("opalro shelf --list")
                 )),
             }
             Ok(())
@@ -1816,7 +1817,7 @@ fn undo_command(
     }
 }
 
-/// `opal shelf`.
+/// `opalro shelf`.
 fn shelf_command(
     json: bool,
     message: Option<&str>,
@@ -1846,9 +1847,11 @@ fn shelf_command(
             Shelved::Nothing {
                 changed_again: true,
                 ..
-            } => "Nothing was shelved: your files changed while Opalro was reading them. Run opal \
+            } => {
+                "Nothing was shelved: your files changed while Opalro was reading them. Run opalro \
                   shelf again.\n"
-                .to_owned(),
+                    .to_owned()
+            }
             Shelved::Nothing { links_left, .. } if !links_left.is_empty() => {
                 "Nothing was shelved.\n".to_owned()
             }
@@ -1858,15 +1861,15 @@ fn shelf_command(
         }
     };
     output::print_done(&text, &warnings)?;
-    // The new shelf is the newest, which `opal unshelf` brings back.
+    // The new shelf is the newest, which `opalro unshelf` brings back.
     if !json && made.is_some() {
-        let unshelf = style::err().command("opal unshelf");
+        let unshelf = style::err().command("opalro unshelf");
         style::next(&format!("bring them back with: {unshelf}"));
     }
     Ok(())
 }
 
-/// `opal shelf --list`.
+/// `opalro shelf --list`.
 fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
@@ -1877,7 +1880,7 @@ fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(),
     let text = if json {
         let shelves: Vec<serde_json::Value> = list.iter().map(output::shelf_json).collect();
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "shelves": shelves,
             "warnings": output::warnings_json(&warnings),
         });
@@ -1888,7 +1891,7 @@ fn shelf_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(),
     output::print_quietly(&text, &warnings)
 }
 
-/// `opal unshelf`, of the shelf `number` or the newest.
+/// `opalro unshelf`, of the shelf `number` or the newest.
 fn unshelf_command(
     json: bool,
     number: Option<&str>,
@@ -1909,7 +1912,7 @@ fn unshelf_command(
         let shelf =
             (!done.finished).then(|| json!({"label": done.label, "save": done.save.to_hex()}));
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "finished": done.finished,
             "shelf": shelf,
             "written": done.applied.written,
@@ -1928,17 +1931,17 @@ fn unshelf_command(
             (_, Err(_)) => String::new(),
             (None, Ok(left)) if left.is_empty() => " There are no shelves left.".to_owned(),
             (None, Ok(_)) => {
-                " Running opal unshelf again brings back the newest shelf left.".to_owned()
+                " Running opalro unshelf again brings back the newest shelf left.".to_owned()
             }
             (Some(n), Ok(left)) if left.iter().any(|(label, _)| label == n) => {
                 format!(
-                    " Running opal unshelf {} again brings it back.",
+                    " Running opalro unshelf {} again brings it back.",
                     escape(n, false)
                 )
             }
             // The stopped switch may have been the one bringing it back.
             (Some(n), Ok(_)) => format!(
-                " There's no shelf {} on the list now: opal shelf --list shows the shelves there \
+                " There's no shelf {} on the list now: opalro shelf --list shows the shelves there \
                  are.",
                 escape(n, false)
             ),
@@ -1962,7 +1965,7 @@ fn unshelf_command(
     Ok(())
 }
 
-/// `opal tidy`.
+/// `opalro tidy`.
 fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
@@ -1982,7 +1985,7 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     let warnings = repo.store().warnings();
     let text = if json {
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "to_free": done.to_free,
             "bytes_before": done.bytes_before,
             "bytes_after": done.bytes_after,
@@ -1998,7 +2001,7 @@ fn tidy_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     output::print_done(&text, &warnings)
 }
 
-/// `opal verify`. Problems found end it with exit code 1, the outcome line being the error.
+/// `opalro verify`. Problems found end it with exit code 1, the outcome line being the error.
 fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository =
         opened.insert(Repository::discover_untouched(&std::env::current_dir()?)?);
@@ -2036,10 +2039,10 @@ fn verify_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Fai
     Err(failure)
 }
 
-/// How many of the steps undo can take `opal undo --list` shows.
+/// How many of the steps undo can take `opalro undo --list` shows.
 const UNDO_LIST: usize = 20;
 
-/// `opal undo --list`, and with `--all` (`all`) the whole diary.
+/// `opalro undo --list`, and with `--all` (`all`) the whole diary.
 fn undo_list_command(
     json: bool,
     all: bool,
@@ -2062,8 +2065,8 @@ fn undo_list_command(
     output::listed(done, || so_far(unfinished, repo))
 }
 
-/// The steps redo can bring back, newest first and numbered for `opal redo N`, then those undo
-/// can take, numbered for `opal undo N`.
+/// The steps redo can bring back, newest first and numbered for `opalro redo N`, then those undo
+/// can take, numbered for `opalro undo N`.
 fn undo_list_to(
     out: &mut output::Stdout,
     repo: &Repository,
@@ -2079,7 +2082,7 @@ fn undo_list_to(
         warnings.extend(repo.store().warnings());
         let warnings = told_once(warnings);
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "redo": entries(&list.redo),
             "undo": entries(&list.undo),
             "more": list.more,
@@ -2126,7 +2129,7 @@ fn whole_diary_to(
         // `history`.
         return output::stream_document(
             out,
-            &format!("{{\"opal_json\":{OPAL_JSON},\"entries\":["),
+            "{\"entries\":[",
             |each| {
                 undo::whole_diary(repo, |id, entry, effects| {
                     each(&output::entry_json(&id, entry, effects))
@@ -2134,7 +2137,7 @@ fn whole_diary_to(
             },
             || {
                 warnings.extend(repo.store().warnings());
-                (json!({}), told_once(warnings))
+                (json!({"opalro_json": OPALRO_JSON}), told_once(warnings))
             },
         );
     }
@@ -2158,7 +2161,7 @@ fn whole_diary_to(
 }
 
 /// The entries no other follows, newest first, for a lost `head`: where the diary may have
-/// stopped, for `opal undo --to` to pick one from.
+/// stopped, for `opalro undo --to` to pick one from.
 fn stopped_at_to(
     out: &mut output::Stdout,
     repo: &Repository,
@@ -2172,7 +2175,7 @@ fn stopped_at_to(
         warnings.extend(repo.store().warnings());
         let warnings = told_once(warnings);
         let document = json!({
-            "opal_json": OPAL_JSON,
+            "opalro_json": OPALRO_JSON,
             "head_lost": true,
             "ends": ends,
             "warnings": output::warnings_json(&warnings),
@@ -2208,7 +2211,7 @@ fn stopped_at_to(
         }
         writeln!(
             out,
-            "Run opal undo --to <entry> to make one of them the current one; it changes no file."
+            "Run opalro undo --to <entry> to make one of them the current one; it changes no file."
         )?;
     }
     warnings.extend(repo.store().warnings());
@@ -2337,7 +2340,7 @@ fn help_or_usage_error(e: &clap::Error, args: &[OsString], json: bool) -> ExitCo
 
 fn main() -> ExitCode {
     let mut typed = std::env::args_os();
-    let program = typed.next().unwrap_or_else(|| "opal".into());
+    let program = typed.next().unwrap_or_else(|| "opalro".into());
     let typed: Vec<OsString> = typed.collect();
     let json = typed.iter().any(|a| a == "--json");
     let (args, shortcut) = match git_words::translate(typed) {
@@ -2442,7 +2445,7 @@ mod tests {
             for (line, does) in examples {
                 assert!(!does.is_empty(), "{line}");
                 let words = words(line);
-                assert_eq!(words[..2], ["opal", name], "{line}");
+                assert_eq!(words[..2], ["opalro", name], "{line}");
                 let parsed = Cli::try_parse_from(&words);
                 assert!(parsed.is_ok(), "{line}: {:?}", parsed.err());
             }

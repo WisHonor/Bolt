@@ -32,16 +32,16 @@ impl Env {
         Env(support::Env::empty())
     }
 
-    fn opal(&self) -> Command {
+    fn opalro(&self) -> Command {
         self.opal_process_in(self.root())
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let out = self.opal().args(args).output().unwrap();
+        let out = self.opalro().args(args).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
-            "opal {args:?}: {}",
+            "opalro {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -49,7 +49,7 @@ impl Env {
 }
 
 fn pack_bytes(root: &Path) -> u64 {
-    std::fs::read_dir(root.join(".opal/store/packs"))
+    std::fs::read_dir(root.join(".opalro/store/packs"))
         .unwrap()
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum()
@@ -96,11 +96,11 @@ fn plant_for_script() {
     let dir = std::path::PathBuf::from(std::env::var("RT2_DIR").unwrap());
     let var = |k: &str| std::env::var(k).unwrap_or_default();
     let n: usize = var("RT2_N").parse().unwrap();
-    let st = Command::new(assert_cmd::cargo::cargo_bin("opal"))
+    let st = Command::new(assert_cmd::cargo::cargo_bin("opalro"))
         .args(["start", "--preset", "custom"])
         .current_dir(&dir)
-        .env("OPAL_USER_NAME", "Test")
-        .env("OPAL_USER_EMAIL", "test@example.com")
+        .env("OPALRO_USER_NAME", "Test")
+        .env("OPALRO_USER_EMAIL", "test@example.com")
         .stdout(Stdio::null())
         .status()
         .unwrap();
@@ -124,7 +124,7 @@ fn largest_message() -> String {
 }
 
 // RT2-1: `line_history` keeps every save on the line in memory, and zstd shrinks a 1 MiB
-// message to a few dozen bytes. A sub-megabyte repository makes `opal history` need gigabytes.
+// message to a few dozen bytes. A sub-megabyte repository makes `opalro history` need gigabytes.
 
 #[cfg(unix)]
 #[test]
@@ -138,11 +138,11 @@ fn rt2_1_history_of_a_tiny_repository_does_not_need_gigabytes() {
     let end = run_limited(opal_capped(env.config(), env.root(), &["history"]), 120);
     assert!(
         end.code == Some(0),
-        "`opal history` on a {packs}-byte repository failed under a 1.5 GB cap: {end:?}"
+        "`opalro history` on a {packs}-byte repository failed under a 1.5 GB cap: {end:?}"
     );
 }
 
-/// The same history bomb hits the victim's own `opal save`: `short_of` walks the whole line
+/// The same history bomb hits the victim's own `opalro save`: `short_of` walks the whole line
 /// after the save is committed, so the save lands and then the command dies.
 #[cfg(unix)]
 #[test]
@@ -160,7 +160,7 @@ fn rt2_1_save_in_a_repository_with_a_long_history_does_not_die_after_committing(
     let after = Repository::open(env.root()).unwrap().head().unwrap();
     assert!(
         end.code == Some(0),
-        "`opal save` failed (committed anyway: {}): {end:?}",
+        "`opalro save` failed (committed anyway: {}): {end:?}",
         before != after
     );
 }
@@ -174,12 +174,12 @@ fn rt2_2_show_by_fingerprint_does_not_walk_the_history_once_per_line() {
     env.ok(&["start", "--preset", "custom"]);
     plant_chain(env.root(), 300, 99_999, |_| {});
     let packs = pack_bytes(env.root());
-    let mut cmd = env.opal();
+    let mut cmd = env.opalro();
     cmd.args(["show", "0123abcd"]);
     let end = run_limited(cmd, 60);
     assert!(
         end.code == Some(1) && end.stderr.contains("No save, line or ID matches"),
-        "`opal show 0123abcd` hung or failed otherwise on a {packs}-byte repository: {end:?}"
+        "`opalro show 0123abcd` hung or failed otherwise on a {packs}-byte repository: {end:?}"
     );
 }
 
@@ -217,7 +217,7 @@ fn rt2_3_invisible_characters_in_names_and_messages_are_not_printed_raw() {
     assert!(raw.is_empty(), "printed raw: {raw:?}\n{shown}");
 }
 
-/// The paths `opal show --json` lists for the newest save.
+/// The paths `opalro show --json` lists for the newest save.
 fn shown_paths(env: &Env) -> Vec<String> {
     let out = env.ok(&["--json", "show"]);
     out.split("\"path\":\"")
@@ -226,14 +226,14 @@ fn shown_paths(env: &Env) -> Vec<String> {
         .collect()
 }
 
-// RT2-4: `.opalignore` is meant to use "exactly the .gitignore pattern syntax" (storage-format.md
+// RT2-4: `.opalroignore` is meant to use "exactly the .gitignore pattern syntax" (storage-format.md
 // §12), but `ignore`/`globset` read `{a,b}` as a choice where Git reads it literally.
 
 #[test]
-fn rt2_4_braces_in_opalignore_are_literal_as_in_git() {
+fn rt2_4_braces_in_opalroignore_are_literal_as_in_git() {
     let env = Env::new();
     env.ok(&["start", "--preset", "custom"]);
-    std::fs::write(env.root().join(".opalignore"), "{prod,dev}.env\n").unwrap();
+    std::fs::write(env.root().join(".opalroignore"), "{prod,dev}.env\n").unwrap();
     std::fs::write(env.root().join("{prod,dev}.env"), "API_KEY=hunter2").unwrap();
     std::fs::write(env.root().join("prod.env"), "kept by Git").unwrap();
     env.ok(&["save", "settings"]);
@@ -248,10 +248,10 @@ fn rt2_4_braces_in_opalignore_are_literal_as_in_git() {
 /// The `ignore` matcher is case-sensitive unless told otherwise.
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
-fn win_rt2_9_opalignore_ignores_case_like_git_on_case_insensitive_systems() {
+fn win_rt2_9_opalroignore_ignores_case_like_git_on_case_insensitive_systems() {
     let env = Env::new();
     env.ok(&["start", "--preset", "custom"]);
-    std::fs::write(env.root().join(".opalignore"), "*.env\nsecrets/\n").unwrap();
+    std::fs::write(env.root().join(".opalroignore"), "*.env\nsecrets/\n").unwrap();
     std::fs::write(env.root().join("PROD.ENV"), "API_KEY=hunter2").unwrap();
     std::fs::create_dir(env.root().join("Secrets")).unwrap();
     std::fs::write(env.root().join("Secrets").join("key.pem"), "-----BEGIN").unwrap();
@@ -260,7 +260,7 @@ fn win_rt2_9_opalignore_ignores_case_like_git_on_case_insensitive_systems() {
     let saved = shown_paths(&env);
     assert_eq!(
         saved,
-        [".opalignore", "readme.txt"],
+        [".opalroignore", "readme.txt"],
         "Git ignores the rest here"
     );
 }
@@ -273,7 +273,7 @@ fn win_rt2_9_opalignore_ignores_case_like_git_on_case_insensitive_systems() {
 #[cfg(target_os = "linux")]
 fn plant_sparse_pack(root: &Path, size: u64) {
     use std::io::{Seek, SeekFrom, Write};
-    let mut f = std::fs::File::create(root.join(".opal/store/packs/zz.pack")).unwrap();
+    let mut f = std::fs::File::create(root.join(".opalro/store/packs/zz.pack")).unwrap();
     f.write_all(b"OPALPACK\x01\0\0\0\0\0\0\0").unwrap();
     f.set_len(size).unwrap();
     f.seek(SeekFrom::Start(size - 48)).unwrap();
@@ -288,22 +288,22 @@ fn rt2_5_a_sparse_pack_does_not_make_every_command_allocate_its_size() {
     let env = Env::new();
     env.ok(&["start", "--preset", "custom"]);
     plant_sparse_pack(env.root(), 2 << 30);
-    let mut cmd = env.opal();
+    let mut cmd = env.opalro();
     cmd.arg("history");
     let end = run_limited(cmd, 120);
     assert!(
         end.peak_mb < 512,
-        "`opal history` on a pack that takes 8 KB of disk peaked at {} MB: {end:?}",
+        "`opalro history` on a pack that takes 8 KB of disk peaked at {} MB: {end:?}",
         end.peak_mb
     );
 }
 
 // RT2-6: the scan keeps the compiled rules of every folder on its way down, and one 1 MiB
-// `.opalignore` compiles to ~17 MB; nested ones add up (4,096 levels allowed).
+// `.opalroignore` compiles to ~17 MB; nested ones add up (4,096 levels allowed).
 
 #[cfg(unix)]
 #[test]
-fn rt2_6_nested_opalignore_files_do_not_exhaust_memory_in_save() {
+fn rt2_6_nested_opalroignore_files_do_not_exhaust_memory_in_save() {
     let env = Env::new();
     env.ok(&["start", "--preset", "custom"]);
     let mut rules = String::new();
@@ -315,7 +315,7 @@ fn rt2_6_nested_opalignore_files_do_not_exhaust_memory_in_save() {
     }
     let mut dir = env.root().to_path_buf();
     for _ in 0..100 {
-        std::fs::write(dir.join(".opalignore"), &rules).unwrap();
+        std::fs::write(dir.join(".opalroignore"), &rules).unwrap();
         dir.push("d");
         std::fs::create_dir(&dir).unwrap();
     }
@@ -324,9 +324,9 @@ fn rt2_6_nested_opalignore_files_do_not_exhaust_memory_in_save() {
     // error that names it, not an abort for want of memory.
     assert!(
         end.code == Some(1)
-            && end.stderr.contains("d/.opalignore: ")
+            && end.stderr.contains("d/.opalroignore: ")
             && end.stderr.contains("larger than 1048576 bytes"),
-        "`opal save` of 100 nested .opalignore files did not stop cleanly under a 1.5 GB cap: {end:?}"
+        "`opalro save` of 100 nested .opalroignore files did not stop cleanly under a 1.5 GB cap: {end:?}"
     );
 }
 
@@ -365,7 +365,7 @@ fn plant_lying_pack(root: &Path, kind: ObjectKind, id: &opal_core::id::Id, data:
     checksum.id(&opal_core::id::hash_content(&index));
     out.extend_from_slice(&checksum.into_bytes());
     out.extend_from_slice(&PACK_END_MAGIC);
-    std::fs::write(root.join(".opal/store/packs/00.pack"), out).unwrap();
+    std::fs::write(root.join(".opalro/store/packs/00.pack"), out).unwrap();
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn rt2_7_save_stores_a_file_even_if_a_planted_pack_claims_its_id() {
     let read = repo.store().copy_content(&id, &mut back);
     assert!(
         read.is_ok() && back == licence,
-        "`opal save` said {said:?}, but LICENSE can't be read back: {read:?}"
+        "`opalro save` said {said:?}, but LICENSE can't be read back: {read:?}"
     );
 }
 
@@ -440,7 +440,7 @@ fn plant_huge_copies(root: &Path, kind: ObjectKind, ids: &[opal_core::id::Id], c
     checksum.id(&opal_core::id::hash_content(&index));
     out.extend_from_slice(&checksum.into_bytes());
     out.extend_from_slice(&PACK_END_MAGIC);
-    std::fs::write(root.join(".opal/store/packs/00.pack"), out).unwrap();
+    std::fs::write(root.join(".opalro/store/packs/00.pack"), out).unwrap();
 }
 
 /// Runs `f` on a thread of its own, failing if it takes longer than `secs` seconds.
@@ -460,12 +460,12 @@ fn rt2_7_a_planted_copy_claiming_a_huge_size_does_not_slow_save() {
     // Records 1 TiB, takes about 32 MiB on disk.
     plant_huge_copies(env.root(), ObjectKind::Content, &[id], 1 << 40);
     std::fs::write(env.root().join("LICENSE"), licence).unwrap();
-    let mut save = env.opal();
+    let mut save = env.opalro();
     save.args(["save", "Add licence"]);
     let end = run_limited(save, 60);
     assert!(
         end.code == Some(0),
-        "`opal save` read the planted copy: {end:?}"
+        "`opalro save` read the planted copy: {end:?}"
     );
     // Read back without knowing the size: the smallest copy must be tried first.
     let root = env.root().to_path_buf();
@@ -493,12 +493,12 @@ fn rt2_7_planted_copies_claiming_huge_sizes_do_not_slow_history() {
     drop(repo);
     // 512 MiB claimed per save, 16 KiB on disk each.
     plant_huge_copies(env.root(), ObjectKind::Save, &ids, 512 << 20);
-    let mut history = env.opal();
+    let mut history = env.opalro();
     history.arg("history");
     let end = run_limited(history, 60);
     assert!(
         end.code == Some(0),
-        "`opal history` read the planted copies: {end:?}"
+        "`opalro history` read the planted copies: {end:?}"
     );
 }
 
@@ -520,7 +520,7 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
     // The oldest save is damaged; the newest, which the new save builds on, is fine. Opalro's own
     // copy is damaged too, or reads would just pass the planted one over.
     plant_lying_pack(env.root(), ObjectKind::Save, &first, b"not a save");
-    for e in std::fs::read_dir(env.root().join(".opal/store/packs")).unwrap() {
+    for e in std::fs::read_dir(env.root().join(".opalro/store/packs")).unwrap() {
         let path = e.unwrap().path();
         let found = opal_core::pack::PackReader::open(&path)
             .unwrap()
@@ -534,10 +534,10 @@ fn rt2_8_a_committed_save_is_never_reported_as_nothing_changed() {
         }
     }
     // Without the change-ID cache, the save reads the line to shorten its ID.
-    std::fs::remove_file(env.root().join(".opal/cache/change-ids")).unwrap();
+    std::fs::remove_file(env.root().join(".opalro/cache/change-ids")).unwrap();
     let before = Repository::open(env.root()).unwrap().head().unwrap();
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
-    let out = env.opal().args(["save", "my work"]).output().unwrap();
+    let out = env.opalro().args(["save", "my work"]).output().unwrap();
     let after = Repository::open(env.root()).unwrap().head().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

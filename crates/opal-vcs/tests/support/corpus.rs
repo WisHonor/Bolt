@@ -67,12 +67,12 @@ pub fn seen(dir: &Path) -> BTreeMap<String, Seen> {
     found
 }
 
-/// The project's own entries: `seen`, without `.git` and `.opal`.
+/// The project's own entries: `seen`, without `.git` and `.opalro`.
 pub fn project_entries(env: &Env) -> BTreeMap<String, Seen> {
     let mut all = seen(env.root());
     all.retain(|path, _| {
         let top = path.split('/').next().unwrap();
-        top != ".git" && top != ".opal"
+        top != ".git" && top != ".opalro"
     });
     all
 }
@@ -81,14 +81,14 @@ pub fn file(bytes: &[u8]) -> Seen {
     Seen::File(bytes.to_vec())
 }
 
-/// A project with a `.git` folder beside `.opal`, as after an import, at its only save but not on
-/// a line, so that `opal goto main` switches to whatever is planted on `main`; and a folder
+/// A project with a `.git` folder beside `.opalro`, as after an import, at its only save but not on
+/// a line, so that `opalro goto main` switches to whatever is planted on `main`; and a folder
 /// beside it. `before_git` runs before `.git` is made.
 pub struct Case {
     pub env: Env,
     pub outside: TempDir,
     git: BTreeMap<String, Seen>,
-    opal: BTreeMap<String, Seen>,
+    opalro: BTreeMap<String, Seen>,
     beside: BTreeMap<String, Seen>,
 }
 
@@ -109,7 +109,7 @@ impl Case {
 
     fn make(before_git: impl FnOnce(&Path), off_main: bool) -> Case {
         let env = Env::empty();
-        env.opal()
+        env.opalro()
             .args(["start", "--preset", "custom"])
             .assert()
             .success();
@@ -120,14 +120,14 @@ impl Case {
         std::fs::write(hooks.join("pre-commit.sample"), b"#!/bin/sh\n").unwrap();
         if off_main {
             let first = env.state().1.lines["main"].to_hex();
-            let out = env.opal().args(["goto", &first]).output().unwrap();
+            let out = env.opalro().args(["goto", &first]).output().unwrap();
             assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         }
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("theirs.txt"), b"theirs").unwrap();
         let mut case = Case {
             git: BTreeMap::new(),
-            opal: BTreeMap::new(),
+            opalro: BTreeMap::new(),
             beside: BTreeMap::new(),
             env,
             outside,
@@ -140,12 +140,12 @@ impl Case {
         self.env.root()
     }
 
-    /// `opal <args> --json` in the project, stopped if it runs a minute: its exit code, its
+    /// `opalro <args> --json` in the project, stopped if it runs a minute: its exit code, its
     /// document and what it printed to stderr.
     pub fn run_json(&self, args: &[&str]) -> (Option<i32>, serde_json::Value, String) {
         let out = self
             .env
-            .opal()
+            .opalro()
             .args(args)
             .arg("--json")
             .timeout(Duration::from_secs(60))
@@ -157,10 +157,10 @@ impl Case {
         (out.status.code(), doc, stderr)
     }
 
-    /// Notes what `.git`, `.opal` and the folder beside hold now.
+    /// Notes what `.git`, `.opalro` and the folder beside hold now.
     pub fn look_around(&mut self) {
         self.git = seen(&self.root().join(".git"));
-        self.opal = seen(&self.root().join(".opal"));
+        self.opalro = seen(&self.root().join(".opalro"));
         self.beside = seen(self.outside.path());
     }
 
@@ -169,7 +169,7 @@ impl Case {
         self.outside.path().to_string_lossy().replace('\\', "/")
     }
 
-    /// Fails unless `.git` and the folder beside are as they were, and `.opal` changed only
+    /// Fails unless `.git` and the folder beside are as they were, and `.opalro` changed only
     /// where Opalro keeps its state, holding no planted name or contents.
     pub fn assert_nothing_escaped(&self) {
         assert_eq!(seen(self.outside.path()), self.beside, "beside the project");
@@ -186,20 +186,20 @@ impl Case {
             }
         }
         assert_eq!(seen(&self.root().join(".git")), self.git, "in .git");
-        for (path, what) in seen(&self.root().join(".opal")) {
-            assert!(!path.contains("pwned"), ".opal/{path}");
-            if self.opal.get(&path) == Some(&what) {
+        for (path, what) in seen(&self.root().join(".opalro")) {
+            assert!(!path.contains("pwned"), ".opalro/{path}");
+            if self.opalro.get(&path) == Some(&what) {
                 continue;
             }
             let top = path.split('/').next().unwrap();
             assert!(
                 ["state", "store", "cache"].contains(&top),
-                "new in .opal: {path}"
+                "new in .opalro: {path}"
             );
             if let Seen::File(bytes) = what
                 && top != "store"
             {
-                assert!(!holds(&bytes, PAYLOAD), ".opal/{path} holds the payload");
+                assert!(!holds(&bytes, PAYLOAD), ".opalro/{path} holds the payload");
             }
         }
     }
@@ -254,7 +254,7 @@ pub fn no_link_right_here(path: &str) {
     println!("Skipped the link checks: this account can't make links, so {path} is a file.");
 }
 
-/// Whether this drive takes names in other letter case for one, as `opal` probes it.
+/// Whether this drive takes names in other letter case for one, as `opalro` probes it.
 pub fn ignores_case(root: &Path) -> bool {
     let probe = root.join("Case-Probe");
     std::fs::write(&probe, b"").unwrap();

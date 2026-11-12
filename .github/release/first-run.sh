@@ -16,11 +16,11 @@ in_doc() { grep -qF -- "$2" "$1" || { echo "no longer in $1: $2" >&2; false; }; 
 run() { in_doc "$guide" "$1"; echo "\$ $1"; eval "$1"; }
 
 if [ "$(uname)" = Darwin ]; then
-  rc=.zshrc shell=zsh config="$HOME/Library/Application Support/opal"
+  rc=.zshrc shell=zsh config="$HOME/Library/Application Support/opalro"
 else
-  rc=.bashrc shell=bash config="$HOME/.config/opal"
+  rc=.bashrc shell=bash config="$HOME/.config/opalro"
 fi
-unset OPAL_CONFIG_DIR XDG_CONFIG_HOME OPAL_USER_NAME OPAL_USER_EMAIL
+unset OPALRO_CONFIG_DIR XDG_CONFIG_HOME OPALRO_USER_NAME OPALRO_USER_EMAIL
 # What a new terminal reads: the system's own folders, then the shell's start-up file.
 new_shell() { env -i HOME="$HOME" TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin "$shell" -i -c "$1" 2> /dev/null; }
 
@@ -49,7 +49,7 @@ echo "$said"
 in_doc "$guide" "It prints the file's name and \`OK\`"
 [ "$said" = "$archive: OK" ]
 
-step "the guide: unpack, and move opal to ~/.local/bin"
+step "the guide: unpack, and move opalro to ~/.local/bin"
 in_doc "$guide" "(Use your archive's name in the first line.)"
 line="tar -xzf opalro-$version-x86_64-unknown-linux-gnu.tar.gz"
 in_doc "$guide" "$line"
@@ -58,38 +58,38 @@ tar -xzf "$archive"
 in_doc "$page" "Read the user agreement, \`USER-AGREEMENT.md\`."
 [ -f USER-AGREEMENT.md ]
 run "mkdir -p ~/.local/bin"
-run "mv opal ~/.local/bin/"
+run "mv opalro ~/.local/bin/"
 
 step "the guide: add ~/.local/bin to the PATH in ~/$rc"
 # Not found before, so the guide's line is what puts it there.
-if new_shell "command -v opal"; then echo "opal is found before the PATH line is added" >&2; false; fi
+if new_shell "command -v opalro"; then echo "opalro is found before the PATH line is added" >&2; false; fi
 line="echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
 in_doc "$guide" "$line"
 in_doc "$guide" "on Linux, write \`~/.bashrc\` in its place"
 echo "\$ ${line/.zshrc/$rc}"
 eval "${line/.zshrc/$rc}"
 
-step "the guide: in a new terminal, opal --version"
+step "the guide: in a new terminal, opalro --version"
 in_doc "$guide" "Check that it works, in a new terminal:"
-found=$(new_shell "command -v opal")
+found=$(new_shell "command -v opalro")
 echo "found: $found"
-[ "$found" = "$HOME/.local/bin/opal" ]
-said=$(new_shell "opal --version")
+[ "$found" = "$HOME/.local/bin/opalro" ]
+said=$(new_shell "opalro --version")
 echo "$said"
-[ "$said" = "opal $version" ]
-in_doc "$guide" "opal $version"
+[ "$said" = "opalro $version" ]
+in_doc "$guide" "opalro $version"
 # The rest runs as that new terminal would.
 PATH=$(new_shell 'printf %s "$PATH"')
 export PATH
 
 step "the guide: tell Opalro who you are"
 if [ "$(uname)" = Darwin ]; then
-  run "mkdir -p ~/Library/Application\ Support/opal"
-  run "touch ~/Library/Application\ Support/opal/config.toml"
-  in_doc "$guide" "open -e ~/Library/Application\ Support/opal/config.toml"
+  run "mkdir -p ~/Library/Application\ Support/opalro"
+  run "touch ~/Library/Application\ Support/opalro/config.toml"
+  in_doc "$guide" "open -e ~/Library/Application\ Support/opalro/config.toml"
 else
-  run "mkdir -p ~/.config/opal"
-  in_doc "$guide" "nano ~/.config/opal/config.toml"
+  run "mkdir -p ~/.config/opalro"
+  in_doc "$guide" "nano ~/.config/opalro/config.toml"
 fi
 # The editor's work: the guide's three lines, saved.
 for l in '[user]' 'name = "Ana Lima"' 'email = "ana@example.com"'; do
@@ -104,25 +104,25 @@ cd "$HOME/practice"
 # The ten lines below are every line of the section's sh blocks; one added there fails here.
 count=$(awk '/^## 3\./ { s = 1 } /^## 4\./ { s = 0 } s && /^```/ { b = b ? 0 : ($0 == "```sh"); next } s && b' "$guide" | wc -l | tr -d ' ')
 [ "$count" = 10 ]
-run 'opal start --preset code'
+run 'opalro start --preset code'
 run 'echo "hello" > notes.txt'
-run 'opal save "First notes"'
-run 'opal status'
+run 'opalro save "First notes"'
+run 'opalro status'
 run 'echo "hello again" > notes.txt'
-run 'opal status'
-run 'opal changes'
-run 'opal save "More notes"'
-run 'opal history'
-run 'opal undo'
+run 'opalro status'
+run 'opalro changes'
+run 'opalro save "More notes"'
+run 'opalro history'
+run 'opalro undo'
 [ "$(cat notes.txt)" = "hello again" ]
 
 step "the guide: removing Opalro from a computer"
 cd "$HOME"
-run "rm ~/.local/bin/opal"
+run "rm ~/.local/bin/opalro"
 if [ "$(uname)" = Darwin ]; then
-  run "rm -r ~/Library/Application\ Support/opal"
+  run "rm -r ~/Library/Application\ Support/opalro"
 else
-  run "rm -r ~/.config/opal"
+  run "rm -r ~/.config/opalro"
 fi
 [ ! -e "$config" ]
 in_doc "$guide" "Then take \`~/.local/bin\` off your PATH by deleting the \`export PATH=\"\$HOME/.local/bin:\$PATH\"\` line from \`~/.zshrc\` or \`~/.bashrc\`, but only if you added that line yourself for Opalro and no other program lives in that folder."
@@ -136,13 +136,13 @@ else
   gone=no
 fi
 
-step "in a new terminal, opal is no longer found"
+step "in a new terminal, opalro is no longer found"
 newpath=$(new_shell 'printf %s "$PATH"')
 echo "PATH: $newpath"
 if [ "$gone" = yes ]; then
   case ":$newpath:" in *":$HOME/.local/bin:"*) echo "~/.local/bin is still on the PATH" >&2; false ;; esac
 fi
-if new_shell "command -v opal"; then false; fi
+if new_shell "command -v opalro"; then false; fi
 
 rm -rf "$downloads" "$HOME/practice" "$(dirname "$guide")"
 echo

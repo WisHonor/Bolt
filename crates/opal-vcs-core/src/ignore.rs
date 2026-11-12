@@ -27,7 +27,7 @@ pub enum Decision {
 /// Opalro's verdict, from every rule, and Git's, from Git's rules alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
-    pub opal: Decision,
+    pub opalro: Decision,
     pub git: Decision,
 }
 
@@ -649,7 +649,7 @@ fn name_key(name: &[u8]) -> u64 {
 pub struct Rules {
     /// The folder the file is in, as the path is compared.
     folder: String,
-    /// Git's rules (a `.gitignore` or a personal list), not a `.opalignore`.
+    /// Git's rules (a `.gitignore` or a personal list), not a `.opalroignore`.
     gits: bool,
     /// The file's size.
     size: u64,
@@ -750,30 +750,30 @@ impl InForce {
         let path = self.composed(path.as_ref());
         let fold = self.drive.ignores_case;
         let base = path.rsplit(|&b| b == b'/').next().unwrap_or_default();
-        let (mut opal, mut git) = (None, None);
+        let (mut opalro, mut git) = (None, None);
         let mut level = self.top.as_deref();
         while let Some(here) = level {
             for rules in here.rules.iter().rev() {
-                if opal.is_some() && (git.is_some() || !rules.gits) {
+                if opalro.is_some() && (git.is_some() || !rules.gits) {
                     continue;
                 }
                 let Some(rel) = below(&path, rules.folder.as_bytes(), fold) else {
                     continue;
                 };
                 if let Some(line) = rules.last(rel, base, is_dir, fold) {
-                    opal.get_or_insert(line.decision());
+                    opalro.get_or_insert(line.decision());
                     if rules.gits {
                         git.get_or_insert(line.decision());
                     }
                 }
             }
-            if opal.is_some() && git.is_some() {
+            if opalro.is_some() && git.is_some() {
                 break;
             }
             level = here.up.as_deref();
         }
         Verdict {
-            opal: opal.unwrap_or(Decision::NoRule),
+            opalro: opalro.unwrap_or(Decision::NoRule),
             git: git.unwrap_or(Decision::NoRule),
         }
     }
@@ -828,7 +828,7 @@ impl Matcher {
     }
 
     /// The walk enters `folder` and gives the rule files read there, in order: at the top Git's
-    /// personal lists, then `.gitignore`, then `.opalignore`.
+    /// personal lists, then `.gitignore`, then `.opalroignore`.
     pub fn enter(&mut self, folder: &str, mut rules: Vec<Rules>) {
         for r in &mut rules {
             if let Cow::Owned(name) = self.now.composed_name(&r.folder) {
@@ -871,7 +871,7 @@ impl Matcher {
     /// Opalro's verdict for a project path (`a/b/c`) under the rules in force.
     #[must_use]
     pub fn decide(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Decision {
-        self.now.verdict(path, is_dir).opal
+        self.now.verdict(path, is_dir).opalro
     }
 
     /// Opalro's verdict and Git's.

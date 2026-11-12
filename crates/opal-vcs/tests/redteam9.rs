@@ -46,7 +46,7 @@ fn rt9_1_without_home_opal_applies_only_the_git_settings_git_applies() {
     let env = Env::new();
     write(&env, "art.psd", "a picture\n");
     write(&env, "readme.txt", "hello\n");
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -70,7 +70,7 @@ fn rt9_1_without_home_opal_applies_only_the_git_settings_git_applies() {
     eprintln!("git status without a home folder: {}", git_status());
     let out = save();
     eprintln!(
-        "opal save without a home folder: {:?} {}",
+        "opalro save without a home folder: {:?} {}",
         out.status.code(),
         text(&out.stderr).trim()
     );
@@ -88,7 +88,7 @@ fn rt9_1_without_home_opal_applies_only_the_git_settings_git_applies() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let saved = saved_files(&env, main_tip(&env));
     let names: Vec<&String> = saved.keys().collect();
-    eprintln!("opal save without a home folder: saved {names:?}");
+    eprintln!("opalro save without a home folder: saved {names:?}");
     if saved.contains_key("art.psd") {
         wrong.push("a save took art.psd, which Git's list keeps out");
     }
@@ -114,7 +114,7 @@ fn rt9_1_without_home_opal_applies_only_the_git_settings_git_applies() {
     without_home(&mut import, xdg.path()).arg("import");
     let out = import.output().unwrap();
     eprintln!(
-        "opal import without a home folder: {:?} {}",
+        "opalro import without a home folder: {:?} {}",
         out.status.code(),
         text(&out.stderr).trim()
     );
@@ -179,7 +179,7 @@ fn rt9_2_a_blob_git_lfs_reads_as_a_pointer_once_converted_never_comes_in_silentl
         None => eprintln!("git lfs isn't installed here"),
     }
 
-    let out = env.opal().args(["--json", "import"]).output().unwrap();
+    let out = env.opalro().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let warned = doc["warnings"]
@@ -189,7 +189,7 @@ fn rt9_2_a_blob_git_lfs_reads_as_a_pointer_once_converted_never_comes_in_silentl
         .any(|w| w["message"].as_str().unwrap_or("").contains("a.bin"));
     let saved = saved_files(&env, main_tip(&env));
     eprintln!(
-        "opal import: a.bin saved as {} bytes, the picture: {}; warned: {warned}; warnings: {}",
+        "opalro import: a.bin saved as {} bytes, the picture: {}; warned: {warned}; warnings: {}",
         saved["a.bin"].len(),
         saved["a.bin"] == picture,
         doc["warnings"]

@@ -4,7 +4,7 @@ expression: doc
 ---
 {
   "not_written": [],
-  "opal_json": 1,
+  "opalro_json": 1,
   "placeholders": [],
   "position": {
     "line": "feature"

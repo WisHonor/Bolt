@@ -332,7 +332,7 @@ fn an_entry_without_a_folder_change_has_milestone_1s_bytes() {
     let minimal = vectors.iter().find(|v| v.name == "minimal").unwrap();
     let e = minimal_diary_entry();
     assert_eq!(hex(&e.encode()), minimal.hex);
-    // The ID milestone 1 gave it, which pins every byte.
+    // Its ID, which pins every byte: milestone 1's bytes, under the context string of decision 150.
     let milestone_1 = "616fa137a45ee91eeed7711ed61dec1fa79ce8d2d96011d9eb87e090170ec07c";
     assert_eq!(e.id().to_hex(), milestone_1);
 }
@@ -1061,7 +1061,7 @@ fn the_format_file_matches_its_vector() {
     // `start` writes exactly these bytes.
     let dir = tempfile::tempdir().unwrap();
     drop(Repository::init(dir.path(), &person()).unwrap());
-    let format = dir.path().join(".opal").join("format");
+    let format = dir.path().join(".opalro").join("format");
     assert_eq!(hex(&std::fs::read(&format).unwrap()), v.hex, "{}", v.name);
     // A project whose format file holds them opens.
     std::fs::write(&format, &bytes).unwrap();
@@ -1386,7 +1386,7 @@ fn every_vector_reads_as_it_says() {
 #[derive(Deserialize)]
 struct PresetVectors {
     presets: Vec<PresetVector>,
-    opalignore_edits: Vec<OpalignoreEdit>,
+    opalroignore_edits: Vec<OpalignoreEdit>,
 }
 
 #[derive(Deserialize)]
@@ -1395,7 +1395,7 @@ struct PresetVector {
     preset: String,
     found: Vec<String>,
     opal_toml: String,
-    opalignore_block: String,
+    opalroignore_block: String,
 }
 
 #[derive(Deserialize)]
@@ -1435,8 +1435,8 @@ fn every_preset_vector_is_written_byte_for_byte() {
             v.name
         );
         assert_eq!(
-            presets::opalignore_block(preset, &found).as_deref(),
-            Some(v.opalignore_block.as_str()),
+            presets::opalroignore_block(preset, &found).as_deref(),
+            Some(v.opalroignore_block.as_str()),
             "{}",
             v.name
         );
@@ -1444,12 +1444,12 @@ fn every_preset_vector_is_written_byte_for_byte() {
 }
 
 #[test]
-fn every_opalignore_edit_gives_its_vector() {
-    let vectors = preset_vectors().opalignore_edits;
+fn every_opalroignore_edit_gives_its_vector() {
+    let vectors = preset_vectors().opalroignore_edits;
     assert_eq!(vectors.len(), 16);
     for v in &vectors {
         let after =
-            presets::edit_opalignore(v.before.as_ref().map(String::as_bytes), v.block.as_deref());
+            presets::edit_opalroignore(v.before.as_ref().map(String::as_bytes), v.block.as_deref());
         assert_eq!(
             after.as_deref(),
             v.after.as_ref().map(String::as_bytes),

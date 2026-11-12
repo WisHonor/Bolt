@@ -1,4 +1,4 @@
-//! `opal status`: what changed in the project folder since the save the project is on.
+//! `opalro status`: what changed in the project folder since the save the project is on.
 
 use std::path::Path;
 

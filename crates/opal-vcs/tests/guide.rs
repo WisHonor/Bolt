@@ -93,9 +93,9 @@ fn echo(line: &str) -> Option<(String, String, bool)> {
     (!path.is_empty() && !path.contains(' ')).then(|| (said.to_owned(), path.to_owned(), append))
 }
 
-/// The commands `opal help` lists, with those named beside another (`(and: redo)`).
+/// The commands `opalro help` lists, with those named beside another (`(and: redo)`).
 fn commands(env: &Env) -> BTreeSet<String> {
-    let out = env.opal().arg("help").output().unwrap();
+    let out = env.opalro().arg("help").output().unwrap();
     assert!(out.status.success());
     let mut names = BTreeSet::new();
     for line in text(&out.stdout).lines() {
@@ -139,12 +139,12 @@ fn every_command_in_the_guide_runs() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(args) = line.strip_prefix("opal ") {
+        if let Some(args) = line.strip_prefix("opalro ") {
             let args = words(args);
             let out = env
-                .opal()
-                .env_remove("OPAL_USER_NAME")
-                .env_remove("OPAL_USER_EMAIL")
+                .opalro()
+                .env_remove("OPALRO_USER_NAME")
+                .env_remove("OPALRO_USER_EMAIL")
                 .args(&args)
                 .output()
                 .unwrap();
@@ -168,7 +168,7 @@ fn every_command_in_the_guide_runs() {
             std::fs::write(&at, bytes).unwrap();
         } else {
             panic!(
-                "guide.md line {n}: `{line}` can't run in a test: an ```sh block holds only opal \
+                "guide.md line {n}: `{line}` can't run in a test: an ```sh block holds only opalro \
                  commands and `echo \"text\" > path` or `>> path`, so this line belongs in a \
                  ```text block"
             );
@@ -184,7 +184,7 @@ fn every_command_in_the_guide_runs() {
     let known = commands(&env);
     assert!(
         known.len() >= 17,
-        "opal help lists only {known:?}, so this check would check little"
+        "opalro help lists only {known:?}, so this check would check little"
     );
     let missing: Vec<String> = known
         .into_iter()
@@ -302,9 +302,14 @@ fn nothing_that_ships_points_into_the_repository() {
         let doc =
             std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         let lower = doc.to_lowercase();
-        // Also catches git@github.com:WisHonor/Bolt and raw.githubusercontent.com/WisHonor/Bolt.
-        if lower.contains("github.com/wishonor") || lower.contains("wishonor/opal") {
+        // The owner's account in any form (https, git@github.com:, raw files), whatever the
+        // repository is called.
+        if lower.contains("wishonor") {
             wrong.push(format!("{rel}: holds the repository's address"));
+        }
+        // Decision 150: the old name stays in the repository's history only.
+        if lower.contains("bolt") {
+            wrong.push(format!("{rel}: still says Bolt"));
         }
         // The README ships beside the guide and the agreement; the others link only to themselves.
         let beside: &[&str] = if rel == "README.md" {

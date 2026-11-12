@@ -11,7 +11,7 @@ use support::{Env, text};
 
 fn project() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -19,7 +19,7 @@ fn project() -> Env {
 }
 
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -43,7 +43,7 @@ fn kept(env: &Env, name: &str, bytes: &[u8]) -> bool {
 
 /// Makes every pack of the project `hours` old, so that `tidy` may change it.
 fn age_packs(env: &Env, hours: u64) {
-    let packs = env.root().join(".opal/store/packs");
+    let packs = env.root().join(".opalro/store/packs");
     for entry in fs::read_dir(packs).unwrap() {
         let file = fs::File::options()
             .write(true)
@@ -59,7 +59,7 @@ fn rt6_1_tidy_never_deletes_saves_made_after_an_older_head() {
     let env = project();
     fs::write(env.root().join("a.txt"), "one\n").unwrap();
     ok(&env, &["save", "One"]);
-    let head = env.root().join(".opal/state/head");
+    let head = env.root().join(".opalro/state/head");
     let older = fs::read(&head).unwrap();
     // A day's work, saved twice; the folder then moves on.
     fs::write(env.root().join("a.txt"), "monday's work\n").unwrap();
@@ -71,7 +71,7 @@ fn rt6_1_tidy_never_deletes_saves_made_after_an_older_head() {
     fs::write(&head, &older).unwrap();
     let status = ok(&env, &["status"]);
     age_packs(&env, 48);
-    let tidy = env.opal().arg("tidy").output().unwrap();
+    let tidy = env.opalro().arg("tidy").output().unwrap();
     let monday = kept(&env, "a.txt", b"monday's work\n");
     let tuesday = kept(&env, "a.txt", b"tuesday's work\n");
     assert!(
@@ -109,10 +109,10 @@ fn rt6_2_a_file_saved_while_undo_writes_over_it_is_never_lost() {
     fs::write(&file, big(2)).unwrap();
     ok(&env, &["save", "Second"]);
     ok(&env, &["goto", &first]);
-    // The undo writes the second version back. While it writes it in .opal/tmp, the artist's
+    // The undo writes the second version back. While it writes it in .opalro/tmp, the artist's
     // program saves their new work over the file it is about to replace.
     let theirs = big(3);
-    let tmp = env.root().join(".opal/tmp");
+    let tmp = env.root().join(".opalro/tmp");
     let watcher = {
         let (tmp, file, theirs) = (tmp.clone(), file.clone(), theirs.clone());
         std::thread::spawn(move || {
@@ -132,7 +132,7 @@ fn rt6_2_a_file_saved_while_undo_writes_over_it_is_never_lost() {
             false
         })
     };
-    let out = env.opal().arg("undo").output().unwrap();
+    let out = env.opalro().arg("undo").output().unwrap();
     let raced = watcher.join().unwrap();
     assert!(raced, "the undo never wrote a big temporary file");
     let survived = kept(&env, "art.psd", &theirs);
@@ -152,7 +152,7 @@ fn rt6_4_a_huge_journal_costs_status_little_time_and_memory() {
     fs::write(env.root().join("a.txt"), "one\n").unwrap();
     ok(&env, &["save", "One"]);
     // A hole of 4 GiB less a byte: nothing on disk, so it is planted in an instant.
-    let journal = fs::File::create(env.root().join(".opal/state/journal")).unwrap();
+    let journal = fs::File::create(env.root().join(".opalro/state/journal")).unwrap();
     journal.set_len((4 << 30) - 1).unwrap();
     drop(journal);
     let mut cmd = env.opal_process_in(env.root());
@@ -160,20 +160,20 @@ fn rt6_4_a_huge_journal_costs_status_little_time_and_memory() {
     let ended = support::run_limited(cmd, 120);
     assert!(
         ended.code == Some(0) && ended.secs < 10.0 && ended.peak_mb < 1024,
-        "opal status: {ended:?}"
+        "opalro status: {ended:?}"
     );
 }
 
-/// Runs `opal <args>` on copies of `template` until a run stops at `label`; that copy.
+/// Runs `opalro <args>` on copies of `template` until a run stops at `label`; that copy.
 #[cfg(feature = "fault-injection")]
 fn stopped_at(template: &Env, args: &[&str], label: &str) -> Env {
     for n in 1..100 {
         let env = Env::empty();
         support::copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .args(args)
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let said = text(&out.stderr);
@@ -199,7 +199,7 @@ fn rt6_3_picking_up_a_lost_head_after_a_stopped_switch_lets_the_project_go_on() 
     fs::write(template.root().join("b.txt"), "work B\n").unwrap();
     // The discard stops after its first file, and `state/head` is then lost.
     let env = stopped_at(&template, &["discard"], "switch:changed");
-    fs::remove_file(env.root().join(".opal/state/head")).unwrap();
+    fs::remove_file(env.root().join(".opalro/state/head")).unwrap();
     let ends: serde_json::Value =
         serde_json::from_str(&ok(&env, &["--json", "undo", "--list"])).unwrap();
     let ends = ends["ends"].as_array().unwrap();
@@ -217,9 +217,9 @@ fn rt6_3_picking_up_a_lost_head_after_a_stopped_switch_lets_the_project_go_on() 
         .map(|w| w["kind"].as_str().unwrap())
         .collect();
     assert!(kinds.contains(&"switch_dropped"), "{picked}");
-    assert!(!env.root().join(".opal/state/journal").exists());
-    let next = env.opal().args(["discard"]).output().unwrap();
-    let undo = env.opal().args(["undo"]).output().unwrap();
+    assert!(!env.root().join(".opalro/state/journal").exists());
+    let next = env.opalro().args(["discard"]).output().unwrap();
+    let undo = env.opalro().args(["undo"]).output().unwrap();
     assert!(
         next.status.success() && undo.status.success(),
         "undo --to {pick}: {picked}\ndiscard: {:?} {}\nundo: {:?} {}",

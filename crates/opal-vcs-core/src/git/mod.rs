@@ -115,7 +115,7 @@ impl Refusal {
                  update Opalro."
             }
             Refusal::Reftable => {
-                "Convert it with `git refs migrate --ref-storage-format=files`, then run opal \
+                "Convert it with `git refs migrate --ref-storage-format=files`, then run opalro \
                  import again."
             }
             Refusal::RefsElsewhere => {
@@ -123,25 +123,25 @@ impl Refusal {
                  folder."
             }
             Refusal::PartialClone => {
-                "Clone the repository again without `--filter`, and run opal import in the new \
+                "Clone the repository again without `--filter`, and run opalro import in the new \
                  clone."
             }
             Refusal::Shallow => {
-                "Fetch the rest with `git fetch --unshallow`, then run opal import again."
+                "Fetch the rest with `git fetch --unshallow`, then run opalro import again."
             }
             Refusal::Alternates => {
                 "Copy those objects in with `git repack -a -d`, delete \
-                 .git/objects/info/alternates, then run opal import again."
+                 .git/objects/info/alternates, then run opalro import again."
             }
             Refusal::GitFile => {
-                "Run opal import where the repository's own .git folder is, or in a fresh clone \
+                "Run opalro import where the repository's own .git folder is, or in a fresh clone \
                  of it."
             }
             Refusal::SparseCheckout => {
-                "Turn it off with `git sparse-checkout disable`, then run opal import again."
+                "Turn it off with `git sparse-checkout disable`, then run opalro import again."
             }
             Refusal::OldPackIndex => {
-                "Rewrite the packs with `git repack -a -d`, then run opal import again."
+                "Rewrite the packs with `git repack -a -d`, then run opalro import again."
             }
         }
         .to_owned()
@@ -153,7 +153,7 @@ impl Refusal {
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error(
-        "No Git repository here: run opal import at the top of a Git project, where its .git \
+        "No Git repository here: run opalro import at the top of a Git project, where its .git \
          folder is."
     )]
     NotAGitFolder,
@@ -248,26 +248,26 @@ impl GitError {
                      place, or import a fresh clone."
                 }
                 GitError::Unimportable { .. } => {
-                    "Nothing was changed. Rewrite the Git history that holds it, then run opal \
+                    "Nothing was changed. Rewrite the Git history that holds it, then run opalro \
                      import again."
                 }
                 GitError::TooManyRefs { .. } => {
                     "Nothing was changed. Delete refs you don't need, such as stale server \
                      branches (`git remote prune <server>`) or old tags (`git tag -d <tag>`), \
-                     then run opal import again."
+                     then run opalro import again."
                 }
                 GitError::TooManyObjects { .. } => {
                     "Nothing was changed. If its packs hold copies of the same objects, or objects \
-                     nothing uses, merge them with `git repack -a -d`, then run opal import again."
+                     nothing uses, merge them with `git repack -a -d`, then run opalro import again."
                 }
                 GitError::TooManyPacks { .. } => {
                     "Nothing was changed. Merge them into one with `git repack -a -d`, then run \
-                     opal import again."
+                     opalro import again."
                 }
                 GitError::TooMuchWork { .. } => {
                     "Nothing was changed. If you trust this repository, have Git store its files \
                      over 1 MiB whole and make its other deltas anew, with `git -c \
-                     core.bigFileThreshold=1m repack -a -d -f`, then run opal import again. Git's \
+                     core.bigFileThreshold=1m repack -a -d -f`, then run opalro import again. Git's \
                      packs stay bigger until its next `git gc`."
                 }
                 GitError::Bug { .. } => {
@@ -275,15 +275,15 @@ impl GitError {
                      repository."
                 }
                 GitError::Changed { .. } => {
-                    "Nothing was changed. Run opal import again once Git has finished."
+                    "Nothing was changed. Run opalro import again once Git has finished."
                 }
                 GitError::OutOfMemory { .. } => {
-                    "Nothing was changed. Close other programs to free memory, then run opal \
+                    "Nothing was changed. Close other programs to free memory, then run opalro \
                      import again."
                 }
                 GitError::Io { .. } => {
                     "Nothing was changed. Check that your account may read it and that no other \
-                     program has it locked, then run opal import again."
+                     program has it locked, then run opalro import again."
                 }
             }
             .to_owned(),
@@ -917,7 +917,7 @@ mod tests {
         assert!(matches!(err, GitError::NotAGitFolder), "{err:?}");
         assert_eq!(
             err.to_string(),
-            "No Git repository here: run opal import at the top of a Git project, where its \
+            "No Git repository here: run opalro import at the top of a Git project, where its \
              .git folder is."
         );
     }
@@ -1096,7 +1096,7 @@ mod tests {
         match kind(io::ErrorKind::NotFound) {
             e @ GitError::Changed { .. } => {
                 assert!(e.to_string().contains("refs/heads/main"), "{e}");
-                assert!(e.hint().unwrap().contains("opal import again"));
+                assert!(e.hint().unwrap().contains("opalro import again"));
             }
             other => panic!("{other:?}"),
         }

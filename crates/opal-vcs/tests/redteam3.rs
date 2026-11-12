@@ -32,14 +32,14 @@ impl Env {
         Env(support::Env::empty())
     }
 
-    fn opal(&self, args: &[&str]) -> Command {
+    fn opalro(&self, args: &[&str]) -> Command {
         let mut cmd = self.opal_process_in(self.root());
         cmd.args(args);
         cmd
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        self.opal(args).output().unwrap()
+        self.opalro(args).output().unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> Output {
@@ -47,7 +47,7 @@ impl Env {
         assert_eq!(
             out.status.code(),
             Some(0),
-            "opal {args:?}: {}",
+            "opalro {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         out
@@ -310,10 +310,10 @@ fn rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size() {
         [b"PACK\0\0\0\x02\0\0\0\0".as_slice(), &[0; 20]].concat(),
     )
     .unwrap();
-    let end = run_limited(env.opal(&["import"]), 120);
+    let end = run_limited(env.opalro(&["import"]), 120);
     assert!(
         end.peak_mb < 256,
-        "`opal import` of a repository whose only pack index is a {} MB hole took {} MB: {end:?}",
+        "`opalro import` of a repository whose only pack index is a {} MB hole took {} MB: {end:?}",
         (8 + 1024 + 28 * count + 40) >> 20,
         end.peak_mb
     );
@@ -321,7 +321,7 @@ fn rt3_1_a_sparse_git_pack_index_does_not_make_import_allocate_its_size() {
 
 // RT3-2: a chain of merges of 1,024 parents, each a ~60-byte delta in Git's pack. Pass 1 holds
 // every merge's parent list twice on its stack, and `order` keeps it through pass 2; each save then
-// stores 1,024 parent IDs whole. Memory and the new .opal grow ~80 KB and ~33 KB a merge.
+// stores 1,024 parent IDs whole. Memory and the new .opalro grow ~80 KB and ~33 KB a merge.
 
 /// `n` merges of 1,024 parents in a ~110-bytes-a-merge pack: 1,024 roots, then each merge has the
 /// one before and 1,023 of the roots as parents. Returns the size of `.git`.
@@ -385,9 +385,9 @@ fn dir_size(dir: &Path) -> u64 {
 fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
     let env = Env::new();
     let git_bytes = octopus_chain(env.root(), 8_000);
-    let end = run_limited(env.opal(&["import"]), 600);
-    let opal_bytes = if env.root().join(".opal").exists() {
-        dir_size(&env.root().join(".opal"))
+    let end = run_limited(env.opalro(&["import"]), 600);
+    let opal_bytes = if env.root().join(".opalro").exists() {
+        dir_size(&env.root().join(".opalro"))
     } else {
         0
     };
@@ -395,8 +395,8 @@ fn rt3_2_importing_a_small_chain_of_octopus_merges_needs_little_memory() {
     // them, under about 35 MB. A stop must not leave more behind either.
     assert!(
         matches!(end.code, Some(0 | 1)) && end.peak_mb < 256 && opal_bytes < 40 << 20,
-        "`opal import` of a {git_bytes}-byte Git repository took {} MB of memory and wrote a \
-         {opal_bytes}-byte .opal: {end:?}",
+        "`opalro import` of a {git_bytes}-byte Git repository took {} MB of memory and wrote a \
+         {opal_bytes}-byte .opalro: {end:?}",
         end.peak_mb
     );
 }
@@ -475,10 +475,10 @@ fn rt3_4_commits_on_one_huge_delta_base_import_in_reasonable_time() {
     let env = Env::new();
     let n = commits_on_one_huge_delta_base(env.root());
     let git_bytes = dir_size(&env.root().join(".git"));
-    let end = run_limited(env.opal(&["import"]), 20);
+    let end = run_limited(env.opalro(&["import"]), 20);
     assert!(
         !end.timed_out,
-        "`opal import` of {n} commits in a {git_bytes}-byte Git repository was still running \
+        "`opalro import` of {n} commits in a {git_bytes}-byte Git repository was still running \
          after 20 s: {end:?}"
     );
 }
@@ -509,7 +509,7 @@ fn rt3_4b_an_empty_pack_full_of_hole_does_not_raise_the_work_allowed() {
     pack.seek(SeekFrom::Start(12 + (64 << 20))).unwrap();
     pack.write_all(&checksum).unwrap();
     drop(pack);
-    let end = run_limited(env.opal(&["import"]), 20);
+    let end = run_limited(env.opalro(&["import"]), 20);
     assert!(
         !end.timed_out && end.code == Some(1) && end.stderr.contains("more than the 4 GiB of work"),
         "with an empty pack of 64 MiB beside it, the import wasn't stopped at the 4 GiB of \
@@ -560,7 +560,7 @@ fn rt3_8_streaming_a_deltified_blob_holds_it_at_most_twice() {
     pack.whole(1, &commit_data, commit.as_bytes());
     pack.finish(env.root());
     git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
-    let end = run_limited(env.opal(&["import"]), 600);
+    let end = run_limited(env.opalro(&["import"]), 600);
     assert!(
         end.code == Some(0) && end.peak_mb < 750,
         "importing one 300 MiB deltified file took {} MB: {end:?}",
@@ -590,7 +590,7 @@ fn rt3_9_storing_a_tag_list_takes_at_most_twice_its_size() {
         packed += &format!("{} refs/tags/t{n:03}\n", tag.to_hex());
     }
     git.packed_refs(&packed);
-    let end = run_limited(env.opal(&["import"]), 600);
+    let end = run_limited(env.opalro(&["import"]), 600);
     assert!(
         end.code == Some(0) && end.peak_mb < 650,
         "importing 300 tags (a 300 MiB tag list) took {} MB: {end:?}",
@@ -599,8 +599,8 @@ fn rt3_9_storing_a_tag_list_takes_at_most_twice_its_size() {
 }
 
 // RT3-10: a commit's `change-id` header (Jujutsu's) becomes its save's change ID, and nothing stops
-// two commits from carrying the same one. `opal history` then shows two saves as the same ID, and
-// `opal show` can't pick either by it: its hint says to type more of an ID that is already whole.
+// two commits from carrying the same one. `opalro history` then shows two saves as the same ID, and
+// `opalro show` can't pick either by it: its hint says to type more of an ID that is already whole.
 
 #[test]
 fn rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows() {
@@ -639,14 +639,14 @@ fn rt3_10_every_save_history_shows_can_be_picked_by_the_id_it_shows() {
     let shown = env.run(&["show", ids[1]]);
     assert!(
         ids[0] != ids[1] || shown.status.success(),
-        "two saves show as {:?} in `opal history`, and `opal show {}` said: {}",
+        "two saves show as {:?} in `opalro history`, and `opalro show {}` said: {}",
         ids[0],
         ids[1],
         text(&shown.stderr)
     );
 }
 
-// RT3-5: `opal save` stores the spellings of `.git` that `opal import` leaves out as dangerous
+// RT3-5: `opalro save` stores the spellings of `.git` that `opalro import` leaves out as dangerous
 // and Git refuses to track: `.GIT`, `git~1` and `.git` with characters HFS+ ignores (Windows and
 // macOS take each for `.git`, so writing them out there writes Git's config and hooks), and a
 // `.git` file in a folder that isn't a project link. Linux only: elsewhere `.GIT` is `.git` on

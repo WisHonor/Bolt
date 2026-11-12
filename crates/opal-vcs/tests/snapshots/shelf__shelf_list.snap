@@ -3,7 +3,7 @@ source: crates/opal-vcs/tests/shelf.rs
 expression: "doc(&[\"shelf\", \"--list\"])"
 ---
 {
-  "opal_json": 1,
+  "opalro_json": 1,
   "shelves": [
     {
       "files": 5,

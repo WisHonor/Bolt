@@ -29,13 +29,13 @@ fn rules_kept_in_force_give_the_verdicts_they_gave_then() {
     m.enter("other", vec![Rules::parse(b"*\n", "other", false)]);
     let later: Vec<Verdict> = paths.iter().map(|p| kept.verdict(p, false)).collect();
     assert_eq!(later, then);
-    assert_eq!(then[2].opal, Decision::Kept);
+    assert_eq!(then[2].opalro, Decision::Kept);
 }
 
 #[test]
 fn gits_verdict_comes_from_the_gitignore_lines_alone() {
     use Decision::*;
-    let both = |opal, git| Verdict { opal, git };
+    let both = |opalro, git| Verdict { opalro, git };
     let mut m = Matcher::new(PLAIN);
     m.enter(
         "",
@@ -44,7 +44,7 @@ fn gits_verdict_comes_from_the_gitignore_lines_alone() {
             Rules::parse(b"!.env\n!*.pem\n*.tmp\n!logs/\n", "", false),
         ],
     );
-    // A .opalignore line takes back what a .gitignore keeps out.
+    // A .opalroignore line takes back what a .gitignore keeps out.
     assert_eq!(m.verdict(".env", false), both(Kept, Ignored));
     assert_eq!(m.verdict("logs", true), both(Kept, Ignored));
     // It can keep out more; where nothing matches, both say so.

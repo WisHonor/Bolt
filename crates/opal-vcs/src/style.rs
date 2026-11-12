@@ -71,7 +71,7 @@ fn found(json: bool) -> Found {
     } else {
         utf8_locale(|name| std::env::var(name).ok())
     };
-    let ascii = std::env::var("OPAL_ASCII").ok();
+    let ascii = std::env::var("OPALRO_ASCII").ok();
     let symbols = !json && symbols_wanted(ascii.as_deref(), shows);
     let screen = |width: Option<usize>| Screen {
         color: color && width.is_some(),
@@ -96,7 +96,7 @@ fn console_reads_colour() -> bool {
 /// The width tests give both streams to make them count as terminals.
 #[cfg(feature = "fault-injection")]
 fn fake_terminal() -> Option<usize> {
-    std::env::var("OPAL_FAKE_TERMINAL").ok()?.parse().ok()
+    std::env::var("OPALRO_FAKE_TERMINAL").ok()?.parse().ok()
 }
 
 #[cfg(not(feature = "fault-injection"))]
@@ -115,7 +115,7 @@ fn utf8_locale(var: impl Fn(&str) -> Option<String>) -> bool {
         })
 }
 
-/// `OPAL_ASCII=1` and `OPAL_ASCII=0` win over what the terminal seems to show.
+/// `OPALRO_ASCII=1` and `OPALRO_ASCII=0` win over what the terminal seems to show.
 fn symbols_wanted(ascii: Option<&str>, shows: bool) -> bool {
     match ascii {
         Some("1") => false,
@@ -419,14 +419,14 @@ pub fn next(line: &str) {
     }
 }
 
-/// "Changed your mind? opal undo" on stderr, after an empty line, only when stderr is a terminal.
+/// "Changed your mind? opalro undo" on stderr, after an empty line, only when stderr is a terminal.
 pub fn changed_your_mind() {
     if for_people() {
         let e = err();
         tell("");
         tell(&format!(
             "Changed your mind? {}",
-            e.paint(Role::Command, "opal undo")
+            e.paint(Role::Command, "opalro undo")
         ));
     }
 }
@@ -702,24 +702,24 @@ mod tests {
 
     #[test]
     fn a_command_is_never_broken() {
-        // At 39 columns the break used to fall between `opal` and `status`.
+        // At 39 columns the break used to fall between `opalro` and `status`.
         let s = screen(true, false, Some(39));
         let line = format!(
             "Only what you named was saved: {} lists the changes left out.",
-            s.command("opal status")
+            s.command("opalro status")
         );
         let shown = s.detail(None, &line);
         let lines: Vec<&str> = shown.lines().collect();
         assert_eq!(lines[0], "    Only what you named was saved:", "{shown:?}");
         assert!(
-            lines[1].starts_with("    \x1b[36mopal status\x1b[0m lists"),
+            lines[1].starts_with("    \x1b[36mopalro status\x1b[0m lists"),
             "{shown:?}"
         );
         let plain = screen(false, false, None)
             .detail(None, &line.replace("\x1b[36m", "").replace("\x1b[0m", ""));
         assert_eq!(
             plain,
-            "    Only what you named was saved: opal status lists the changes left out."
+            "    Only what you named was saved: opalro status lists the changes left out."
         );
     }
 
@@ -760,11 +760,11 @@ mod tests {
     #[test]
     fn without_a_terminal_marks_are_taken_out_and_nothing_else_changes() {
         let s = screen(false, false, None);
-        let line = format!("x {} y {}.", whole("a  b"), s.command("opal setup"));
-        assert_eq!(s.detail(None, &line), "    x a  b y opal setup.");
+        let line = format!("x {} y {}.", whole("a  b"), s.command("opalro setup"));
+        assert_eq!(s.detail(None, &line), "    x a  b y opalro setup.");
         assert_eq!(
             s.prefixed(Role::Hint, "Next:", &line),
-            "Next: x a  b y opal setup."
+            "Next: x a  b y opalro setup."
         );
     }
 

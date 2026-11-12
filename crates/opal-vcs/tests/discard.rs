@@ -1,4 +1,4 @@
-//! `opal discard`, end to end.
+//! `opalro discard`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -16,18 +16,18 @@ use support::{Env, changed, files, holding, plant_save, saved_files, text, write
 /// A project with `entries` saved.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     for (path, bytes) in entries {
         write(&env, path, bytes.as_bytes());
     }
-    env.opal().args(["save", "Files"]).assert().success();
+    env.opalro().args(["save", "Files"]).assert().success();
     env
 }
 
-/// `opal discard <args>` in `dir`, which must succeed; what it printed.
+/// `opalro discard <args>` in `dir`, which must succeed; what it printed.
 fn discard_in(env: &Env, dir: &Path, args: &[&str]) -> String {
     let out = env.opal_in(dir).arg("discard").args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -40,7 +40,7 @@ fn discard(env: &Env, args: &[&str]) -> String {
 
 fn discard_json(env: &Env, args: &[&str]) -> serde_json::Value {
     let out = env
-        .opal()
+        .opalro()
         .arg("discard")
         .args(args)
         .arg("--json")
@@ -50,9 +50,9 @@ fn discard_json(env: &Env, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// `opal discard <args>`, which must fail; what it said.
+/// `opalro discard <args>`, which must fail; what it said.
 fn refused(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().arg("discard").args(args).output().unwrap();
+    let out = env.opalro().arg("discard").args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     text(&out.stderr)
 }
@@ -87,7 +87,7 @@ fn discard_restores_changed_and_deleted_files_and_removes_new_ones() {
     assert_eq!(files(env.root()), holding(SAVED));
     assert!(!env.root().join("newdir").exists());
     assert!(changed(&env).is_empty());
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
     // The project stays on its save; the diary records the discard.
     let (repo, state) = env.state();
     assert_eq!(state.lines, before.lines);
@@ -97,7 +97,7 @@ fn discard_restores_changed_and_deleted_files_and_removes_new_ones() {
 
 #[test]
 fn discard_leaves_ignored_files_alone() {
-    let env = project(&[(".opalignore", "*.log\nbuild/\n"), ("a.txt", "a\n")]);
+    let env = project(&[(".opalroignore", "*.log\nbuild/\n"), ("a.txt", "a\n")]);
     write(&env, "a.txt", b"mine\n");
     write(&env, "x.log", b"noise");
     write(&env, "build/out.bin", b"\0built");
@@ -105,7 +105,7 @@ fn discard_leaves_ignored_files_alone() {
     write(&env, "tmp/n.txt", b"new");
     write(&env, "tmp/t.log", b"kept");
     discard(&env, &[]);
-    let mut wanted = holding(&[(".opalignore", "*.log\nbuild/\n"), ("a.txt", "a\n")]);
+    let mut wanted = holding(&[(".opalroignore", "*.log\nbuild/\n"), ("a.txt", "a\n")]);
     wanted.insert("x.log".into(), b"noise".to_vec());
     wanted.insert("build/out.bin".into(), b"\0built".to_vec());
     wanted.insert("tmp/t.log".into(), b"kept".to_vec());
@@ -201,11 +201,11 @@ fn discard_refuses_paths_outside_the_project_or_in_opal() {
     let before = env.standing();
     let said = refused(&env, &["../elsewhere.txt"]);
     assert!(said.contains("outside the project"), "{said}");
-    let said = refused(&env, &[".opal/state"]);
-    assert!(said.contains(".opal"), "{said}");
+    let said = refused(&env, &[".opalro/state"]);
+    assert!(said.contains(".opalro"), "{said}");
     let said = refused(&env, &["a.txt", "nothing-here.txt"]);
     assert!(said.contains("nothing-here.txt"), "{said}");
-    assert!(said.contains("opal status"), "{said}");
+    assert!(said.contains("opalro status"), "{said}");
     // Nothing was thrown away.
     assert_eq!(env.standing(), before);
     assert_eq!(changed(&env), ["a.txt"]);
@@ -214,7 +214,7 @@ fn discard_refuses_paths_outside_the_project_or_in_opal() {
 #[test]
 fn discard_leaves_project_links_alone() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -262,7 +262,7 @@ fn discard_leaves_nested_projects_alone() {
 #[test]
 fn discard_leaves_entries_this_computer_cant_hold_unwritten() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -338,21 +338,21 @@ fn a_discard_with_a_file_in_use_fails_and_the_next_one_finishes() {
         .share_mode(0)
         .open(env.root().join("a.txt"))
         .unwrap();
-    let out = env.opal().arg("discard").output().unwrap();
+    let out = env.opalro().arg("discard").output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let said = text(&out.stderr);
     assert!(said.contains("error:") && said.contains("a.txt"), "{said}");
-    assert!(env.root().join(".opal/state/journal").exists());
+    assert!(env.root().join(".opalro/state/journal").exists());
     drop(held);
     discard(&env, &[]);
     assert_eq!(files(env.root()), holding(SAVED));
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
 }
 
 #[test]
 fn a_file_where_a_saved_empty_folder_was_is_reported_removed() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -403,8 +403,8 @@ fn a_file_where_a_saved_folder_was_is_counted_with_what_comes_back() {
 #[test]
 fn discard_refuses_when_an_ignored_file_is_in_the_way() {
     let env = project(SAVED);
-    write(&env, ".opalignore", b"dir\n");
-    env.opal().args(["save", "Ignore"]).assert().success();
+    write(&env, ".opalroignore", b"dir\n");
+    env.opalro().args(["save", "Ignore"]).assert().success();
     fs::remove_dir_all(env.root().join("dir")).unwrap();
     write(&env, "dir", b"ignored");
     write(&env, "a.txt", b"mine\n");
@@ -442,7 +442,7 @@ fn discard_removes_a_new_link() {
 fn discard_says_nothing_was_discarded_when_it_leaves_the_only_link() {
     let env = project(SAVED);
     std::os::unix::fs::symlink("/tmp", env.root().join("out")).unwrap();
-    let out = env.opal().arg("discard").output().unwrap();
+    let out = env.opalro().arg("discard").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let (said, warned) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(
@@ -490,7 +490,7 @@ fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n != ".opal")
+        .filter(|n| n != ".opalro")
         .collect();
     names.sort();
     names
@@ -513,7 +513,7 @@ fn on_a_drive_that_ignores_case_paths_match_in_any_case() {
 #[test]
 fn a_path_two_saved_names_fold_to_is_refused_with_both() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();

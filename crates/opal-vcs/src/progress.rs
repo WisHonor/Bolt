@@ -13,11 +13,11 @@ use crate::style::{self, Screen, Sym, columns};
 /// How long work goes before progress shows: a quick command shows none.
 const QUIET: Duration = Duration::from_millis(400);
 
-/// The quiet time, which tests may set with `OPAL_PROGRESS_QUIET_MS`.
+/// The quiet time, which tests may set with `OPALRO_PROGRESS_QUIET_MS`.
 #[cfg(feature = "fault-injection")]
 fn quiet() -> Duration {
     static SET: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let set = SET.get_or_init(|| std::env::var("OPAL_PROGRESS_QUIET_MS").ok()?.parse().ok());
+    let set = SET.get_or_init(|| std::env::var("OPALRO_PROGRESS_QUIET_MS").ok()?.parse().ok());
     set.map_or(QUIET, Duration::from_millis)
 }
 

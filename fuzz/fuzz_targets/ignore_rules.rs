@@ -22,8 +22,8 @@ fuzz_target!(|data: &[u8]| {
                 ignores_case,
                 composes_unicode,
             });
-            // A `.gitignore` at the top and a `.opalignore` below, so Git's verdict is looked
-            // for again where the `.opalignore` decides.
+            // A `.gitignore` at the top and a `.opalroignore` below, so Git's verdict is looked
+            // for again where the `.opalroignore` decides.
             matcher.enter("", vec![Rules::parse(data, "", true)]);
             matcher.enter("a/b", vec![Rules::parse(data, "a/b", false)]);
             for path in paths {

@@ -40,9 +40,9 @@ const LENGTHS: [usize; 3] = [1, 2, 5];
 const BIG: usize = 1 << 20;
 /// The shelf numbers `unshelf` asks for.
 const LABELS: [&str; 3] = ["1", "2", "3"];
-/// The presets `opal setup` switches between.
+/// The presets `opalro setup` switches between.
 const PRESETS: [Preset; 3] = [Preset::Code, Preset::Game, Preset::Custom];
-/// How many of the steps undo can take `opal undo --list` shows.
+/// How many of the steps undo can take `opalro undo --list` shows.
 const LISTED: usize = 20;
 
 /// The modified time a write leaves.
@@ -111,7 +111,7 @@ enum Act {
     Unshelf(Option<&'static str>),
     /// Status reading every file, not trusting the file cache.
     FullStatus,
-    /// Switches the rule files to a preset's, as `opal setup --preset` does.
+    /// Switches the rule files to a preset's, as `opalro setup --preset` does.
     Setup(Preset),
 }
 
@@ -856,17 +856,17 @@ fn flip(m: &mut Model, root: &Path, path: &str) {
 #[cfg(not(unix))]
 fn flip(_: &mut Model, _: &Path, _: &str) {}
 
-/// `setup --preset`: the preset's `opal.toml` and `.opalignore` block written as one step that
+/// `setup --preset`: the preset's `opalro.toml` and `.opalroignore` block written as one step that
 /// moves no line, or nothing when the files already are those. The model's names are no
-/// language's or engine's, and only this writes `.opalignore`, so it only ever holds a block.
+/// language's or engine's, and only this writes `.opalroignore`, so it only ever holds a block.
 fn set_up(repo: &mut Repository, m: &mut Model, root: &Path, preset: Preset) {
     let plan = plan_setup(root, preset).unwrap();
     let done = apply_setup(repo, &plan, &who(), None, &mut |_| {}).unwrap();
     let found = Found::default();
     let mut after = m.folder.clone();
     for (path, text) in [
-        ("opal.toml", presets::opal_toml(preset, &found)),
-        (".opalignore", presets::opalignore_block(preset, &found)),
+        ("opalro.toml", presets::opal_toml(preset, &found)),
+        (".opalroignore", presets::opalroignore_block(preset, &found)),
     ] {
         match text {
             Some(text) => {
@@ -1548,10 +1548,10 @@ fn steps_listed(m: &Model, which: &str, steps: &[&Step], got: &[StepInfo]) -> Re
     Ok(())
 }
 
-/// `opal undo --list --json`, against the model.
+/// `opalro undo --list --json`, against the model.
 fn listed_document(env: &Env, repo: &Repository, m: &Model) {
     let out = env
-        .opal()
+        .opalro()
         .args(["undo", "--list", "--json"])
         .output()
         .unwrap();
@@ -1564,13 +1564,13 @@ fn listed_document(env: &Env, repo: &Repository, m: &Model) {
     let entries =
         |steps: Vec<&Step>| -> Value { steps.into_iter().map(|s| step_json(repo, m, s)).collect() };
     let want = json!({
-        "opal_json": 1,
+        "opalro_json": 1,
         "redo": entries(m.undone.iter().rev().collect()),
         "undo": entries(m.done.iter().rev().take(LISTED).collect()),
         "more": m.done.len() > LISTED + 1,
     });
     let got = json!({
-        "opal_json": doc["opal_json"],
+        "opalro_json": doc["opalro_json"],
         "redo": doc["redo"],
         "undo": doc["undo"],
         "more": doc["more"],
@@ -1631,7 +1631,7 @@ fn executable(_: &std::fs::Metadata) -> bool {
     false
 }
 
-/// What the project folder holds, `.opal` left out.
+/// What the project folder holds, `.opalro` left out.
 fn folder_tree(root: &Path) -> Tree {
     let mut tree = Tree::default();
     let mut todo = vec![(root.to_owned(), String::new())];
@@ -1639,7 +1639,7 @@ fn folder_tree(root: &Path) -> Tree {
         for e in std::fs::read_dir(&dir).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().into_string().unwrap();
-            if prefix.is_empty() && name == ".opal" {
+            if prefix.is_empty() && name == ".opalro" {
                 continue;
             }
             let path = format!("{prefix}{name}");

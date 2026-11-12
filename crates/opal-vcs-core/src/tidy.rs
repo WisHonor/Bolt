@@ -1,4 +1,4 @@
-//! `opal tidy`: removes from the store what nothing needs any more, keeping what lines, shelves,
+//! `opalro tidy`: removes from the store what nothing needs any more, keeping what lines, shelves,
 //! tags, server lines, the diary and the undo window reach.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

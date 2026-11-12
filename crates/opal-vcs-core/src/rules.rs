@@ -1,4 +1,4 @@
-//! The project's rules in `opal.toml` (docs/storage-format.md section 12): what Opalro reads from
+//! The project's rules in `opalro.toml` (docs/storage-format.md section 12): what Opalro reads from
 //! it, and what it passes over. Nothing in the file ever stops a command.
 
 use std::ffi::OsStr;
@@ -13,7 +13,7 @@ use crate::safe_fs;
 use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 
-/// The longest `opal.toml` Opalro reads.
+/// The longest `opalro.toml` Opalro reads.
 pub const MAX_RULES_FILE_BYTES: u64 = 1 << 20;
 /// The longest `preset` label, in bytes.
 const MAX_PRESET_BYTES: usize = 64;
@@ -45,7 +45,7 @@ pub struct Rule {
     pub conflict_markers: Option<bool>,
 }
 
-/// What `opal.toml` says, with Opalro's own value for each setting it doesn't give.
+/// What `opalro.toml` says, with Opalro's own value for each setting it doesn't give.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rules {
     pub preset: Option<String>,
@@ -69,7 +69,7 @@ impl Default for Rules {
     }
 }
 
-/// A size as `opal.toml` writes it, in bytes: digits, any number of spaces, then a unit. `None`
+/// A size as `opalro.toml` writes it, in bytes: digits, any number of spaces, then a unit. `None`
 /// for anything else, or a size that doesn't fit 64 bits.
 #[must_use]
 pub fn parse_size(text: &str) -> Option<u64> {
@@ -81,7 +81,7 @@ pub fn parse_size(text: &str) -> Option<u64> {
     number.parse::<u64>().ok()?.checked_mul(*times)
 }
 
-/// A setting's size as `opal.toml` would write it: the largest unit that gives it exactly, the
+/// A setting's size as `opalro.toml` would write it: the largest unit that gives it exactly, the
 /// 1,024 family first.
 #[must_use]
 pub fn size_text(bytes: u64) -> String {
@@ -92,7 +92,7 @@ pub fn size_text(bytes: u64) -> String {
     format!("{} {name}", bytes.checked_div(*times).unwrap_or(bytes))
 }
 
-/// What an `opal.toml`'s text means, and each name passed over with why. `Err` says why the text
+/// What an `opalro.toml`'s text means, and each name passed over with why. `Err` says why the text
 /// isn't TOML.
 pub fn parse(text: &[u8]) -> Result<(Rules, Vec<(String, String)>), String> {
     let text = std::str::from_utf8(text).map_err(|e| {
@@ -254,7 +254,7 @@ fn shown(text: &str) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct RulesRead {
     pub rules: Rules,
-    /// Whether an `opal.toml` was read and used.
+    /// Whether an `opalro.toml` was read and used.
     pub file: bool,
     /// Why the whole file was passed over.
     pub skipped: Option<String>,
@@ -262,15 +262,15 @@ pub struct RulesRead {
     pub ignored: Vec<(String, String)>,
 }
 
-/// Reads `opal.toml` in `top`. Never fails: what can't be used is in `skipped` or `ignored`.
+/// Reads `opalro.toml` in `top`. Never fails: what can't be used is in `skipped` or `ignored`.
 #[must_use]
 pub fn read(top: &Dir) -> RulesRead {
-    let name = OsStr::new("opal.toml");
+    let name = OsStr::new("opalro.toml");
     let skipped = |why| RulesRead {
         skipped: Some(why),
         ..RulesRead::default()
     };
-    let shown = Path::new("opal.toml");
+    let shown = Path::new("opalro.toml");
     let bytes = match safe_fs::read_capped_in(top, name, shown, MAX_RULES_FILE_BYTES) {
         Ok(bytes) => bytes,
         // A link to nothing is there all the same, and is passed over as a link.
@@ -316,7 +316,7 @@ impl RulesRead {
         if let Some(why) = &self.skipped {
             let own = Rules::default();
             let message = format!(
-                "Opalro passed over opal.toml: {why}. Its own values apply instead: files of {} or \
+                "Opalro passed over opalro.toml: {why}. Its own values apply instead: files of {} or \
                  more are stored in chunks, and a save asks first over {} or {} new files. Fix or \
                  remove the file to use its rules.",
                 size_text(own.chunk_files_over),
@@ -328,7 +328,7 @@ impl RulesRead {
         if self.ignored.is_empty() {
             return vec![];
         }
-        let mut message = "Opalro passed over these parts of opal.toml, which it can't use, and \
+        let mut message = "Opalro passed over these parts of opalro.toml, which it can't use, and \
                            used its own values for them; the rest of the file counts:"
             .to_owned();
         for (name, why) in self.ignored.iter().take(NAMES_LISTED) {
@@ -437,7 +437,7 @@ mod tests {
             assert!(parse(text.as_bytes()).is_err());
         }
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("opal.toml"), "[".repeat(100_000)).unwrap();
+        fs::write(dir.path().join("opalro.toml"), "[".repeat(100_000)).unwrap();
         let read = read_in(dir.path());
         assert!(read.skipped.is_some());
         assert_eq!(read.rules, Rules::default());
@@ -484,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut text = b"chunk-files-over = \"2 MiB\"\n#".to_vec();
         text.resize(1 << 20, b'x');
-        fs::write(dir.path().join("opal.toml"), &text).unwrap();
+        fs::write(dir.path().join("opalro.toml"), &text).unwrap();
         let read = read_in(dir.path());
         assert!(read.file);
         assert_eq!(read.rules.chunk_files_over, 2 << 20);
@@ -496,9 +496,9 @@ mod tests {
         let over = tempfile::tempdir().unwrap();
         let mut text = b"chunk-files-over = \"2 MiB\"\n#".to_vec();
         text.resize((1 << 20) + 1, b'x');
-        fs::write(over.path().join("opal.toml"), &text).unwrap();
+        fs::write(over.path().join("opalro.toml"), &text).unwrap();
         let folder = tempfile::tempdir().unwrap();
-        fs::create_dir(folder.path().join("opal.toml")).unwrap();
+        fs::create_dir(folder.path().join("opalro.toml")).unwrap();
         let mut cases = vec![(over, "larger than 1 MiB"), (folder, "not a regular file")];
         let link = tempfile::tempdir().unwrap();
         fs::write(
@@ -508,7 +508,7 @@ mod tests {
         .unwrap();
         if symlink(
             &link.path().join("real.toml"),
-            &link.path().join("opal.toml"),
+            &link.path().join("opalro.toml"),
         ) {
             cases.push((link, "a link"));
         }
@@ -531,7 +531,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         if !symlink(
             &outside.path().join("secret.toml"),
-            &dir.path().join("opal.toml"),
+            &dir.path().join("opalro.toml"),
         ) {
             return;
         }
@@ -548,7 +548,7 @@ mod tests {
         // A link to nothing is no missing file: it is passed over, and said so.
         let dangling = tempfile::tempdir().unwrap();
         let nowhere = dangling.path().join("nowhere.toml");
-        assert!(symlink(&nowhere, &dangling.path().join("opal.toml")));
+        assert!(symlink(&nowhere, &dangling.path().join("opalro.toml")));
         let read = read_in(dangling.path());
         assert_eq!(kinds(&read), [warning::RULES_FILE_SKIPPED]);
         assert!(read.warnings()[0].message.contains("a link"));
@@ -559,7 +559,7 @@ mod tests {
     fn a_pipe_is_passed_over_without_waiting() {
         let dir = tempfile::tempdir().unwrap();
         let made = std::process::Command::new("mkfifo")
-            .arg(dir.path().join("opal.toml"))
+            .arg(dir.path().join("opalro.toml"))
             .status()
             .unwrap();
         assert!(made.success());
@@ -700,7 +700,7 @@ mod tests {
             found
         }
 
-        /// The kinds of a save's warnings about `opal.toml`.
+        /// The kinds of a save's warnings about `opalro.toml`.
         fn rules_warnings(outcome: &SaveOutcome) -> Vec<&'static str> {
             let (SaveOutcome::Saved { warnings, .. }
             | SaveOutcome::NothingChanged { warnings, .. }) = outcome;
@@ -718,7 +718,7 @@ mod tests {
             ] {
                 let (dir, mut repo) = project();
                 if let Some(rules) = rules {
-                    fs::write(dir.path().join("opal.toml"), rules).unwrap();
+                    fs::write(dir.path().join("opalro.toml"), rules).unwrap();
                 }
                 for (name, bytes) in [("two", &two), ("four", &four), ("five", &five)] {
                     fs::write(dir.path().join(name), bytes).unwrap();
@@ -781,7 +781,7 @@ mod tests {
         fn the_question_uses_the_files_numbers() {
             let (dir, mut repo) = project();
             let rules = "ask-before-saving-over = \"1 KiB\"\n";
-            fs::write(dir.path().join("opal.toml"), rules).unwrap();
+            fs::write(dir.path().join("opalro.toml"), rules).unwrap();
             fs::write(dir.path().join("a"), [7; 2048]).unwrap();
             let (result, asked) = save(&mut repo, false);
             assert!(asked);
@@ -789,7 +789,7 @@ mod tests {
 
             let (dir, mut repo) = project();
             let rules = "ask-before-saving-files-over = 0\n";
-            fs::write(dir.path().join("opal.toml"), rules).unwrap();
+            fs::write(dir.path().join("opalro.toml"), rules).unwrap();
             let (result, asked) = save(&mut repo, false);
             assert!(asked, "the rules file is a new file");
             assert!(matches!(result, Err(SaveError::LargeSave(_))), "{result:?}");
@@ -798,7 +798,7 @@ mod tests {
             let (dir, mut repo) = project();
             let rules =
                 "ask-before-saving-over = \"1 TiB\"\nask-before-saving-files-over = 1000000\n";
-            fs::write(dir.path().join("opal.toml"), rules).unwrap();
+            fs::write(dir.path().join("opalro.toml"), rules).unwrap();
             for i in 0..10_001 {
                 let folder = dir.path().join(format!("many/{}", i % 10));
                 fs::create_dir_all(&folder).unwrap();
@@ -838,8 +838,8 @@ mod tests {
             for (case, text, kind) in cases {
                 let (dir, mut repo) = project();
                 match text {
-                    Some(text) => fs::write(dir.path().join("opal.toml"), text).unwrap(),
-                    None => fs::create_dir(dir.path().join("opal.toml")).unwrap(),
+                    Some(text) => fs::write(dir.path().join("opalro.toml"), text).unwrap(),
+                    None => fs::create_dir(dir.path().join("opalro.toml")).unwrap(),
                 }
                 fs::write(dir.path().join("a.txt"), "a").unwrap();
                 let (result, asked) = save(&mut repo, false);
@@ -851,7 +851,10 @@ mod tests {
             }
             let (dir, mut repo) = project();
             fs::write(dir.path().join("real.toml"), "zebra = 1\n").unwrap();
-            if symlink(&dir.path().join("real.toml"), &dir.path().join("opal.toml")) {
+            if symlink(
+                &dir.path().join("real.toml"),
+                &dir.path().join("opalro.toml"),
+            ) {
                 let (result, _) = save(&mut repo, false);
                 let outcome = result.unwrap();
                 assert_eq!(rules_warnings(&outcome), [warning::RULES_FILE_SKIPPED]);
@@ -861,7 +864,7 @@ mod tests {
         #[test]
         fn the_rules_are_read_from_the_folder_not_the_save() {
             let (dir, mut repo) = project();
-            let rules = dir.path().join("opal.toml");
+            let rules = dir.path().join("opalro.toml");
             fs::write(&rules, "chunk-files-over = \"4 MiB\"\n").unwrap();
             assert_eq!(repo.rules().rules, Rules::default(), "nothing read yet");
             assert_eq!(repo.read_rules().rules.chunk_files_over, 4 << 20);

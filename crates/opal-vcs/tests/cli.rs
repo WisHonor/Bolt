@@ -1,4 +1,4 @@
-//! End-to-end tests of the `opal` command.
+//! End-to-end tests of the `opalro` command.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use assert_cmd::Command;
@@ -26,11 +26,11 @@ impl Env {
         Env(support::Env::empty())
     }
 
-    /// `opal`, run in `dir`, with no user identity set.
+    /// `opalro`, run in `dir`, with no user identity set.
     fn opal_anonymous(&self, dir: &Path) -> Command {
         let mut cmd = self.opal_in(dir);
-        cmd.env_remove("OPAL_USER_NAME")
-            .env_remove("OPAL_USER_EMAIL");
+        cmd.env_remove("OPALRO_USER_NAME")
+            .env_remove("OPALRO_USER_EMAIL");
         cmd
     }
 }
@@ -48,23 +48,23 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 #[test]
 fn version_is_0_1_0() {
     let env = Env::new();
-    let out = env.opal().arg("--version").output().unwrap();
+    let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "opal 0.1.0\n");
+    assert_eq!(text(&out.stdout), "opalro 0.1.0\n");
 }
 
 #[test]
 fn start_creates_a_project() {
     let env = Env::new();
     let out = env
-        .opal()
+        .opalro()
         .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let format = std::fs::read_to_string(env.root().join(".opal/format")).unwrap();
+    let format = std::fs::read_to_string(env.root().join(".opalro/format")).unwrap();
     assert_eq!(format, FORMAT_TEXT);
-    assert!(env.root().join(".opal/state/head").is_file());
+    assert!(env.root().join(".opalro/state/head").is_file());
     assert!(text(&out.stdout).contains("Started an Opalro project"));
 }
 
@@ -73,13 +73,13 @@ fn start_creates_a_project() {
 #[test]
 fn start_and_save_work_in_a_normal_folder() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    env.opal().args(["save", "first"]).assert().success();
-    env.opal().arg("history").assert().success();
+    env.opalro().args(["save", "first"]).assert().success();
+    env.opalro().arg("history").assert().success();
 }
 
 /// A variable that places the user's Git settings, set to what Git refuses, stops a save as it
@@ -87,13 +87,13 @@ fn start_and_save_work_in_a_normal_folder() {
 #[test]
 fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "first"])
         .env("GIT_CONFIG_COUNT", "two")
         .output()
@@ -107,14 +107,14 @@ fn a_git_settings_variable_git_refuses_stops_a_save_and_is_named() {
         ),
         "{err}"
     );
-    env.opal().args(["save", "first"]).assert().success();
+    env.opalro().args(["save", "first"]).assert().success();
 }
 
 /// A project reached through a link (a junction on Windows) is the folder the link leads to.
 #[test]
 fn save_works_through_a_link_to_the_project_folder() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -127,7 +127,7 @@ fn save_works_through_a_link_to_the_project_folder() {
     support::junction(&link, env.root());
     let out = env.opal_in(&link).args(["save", "first"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     assert!(text(&history.stdout).contains("first"));
 }
 
@@ -142,7 +142,7 @@ fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
         &["--json", "start", "--preset", "custom"],
     ] {
         let env = Env::new();
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
         assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
         let expected = opal_core::repo::elevated_only_note(env.root()).is_some();
@@ -163,12 +163,12 @@ fn start_says_when_its_project_opens_only_from_an_administrator_terminal() {
 #[test]
 fn start_twice_is_refused() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let out = env
-        .opal()
+        .opalro()
         .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
@@ -184,7 +184,7 @@ fn start_twice_is_refused() {
 #[test]
 fn start_inside_a_project_is_refused() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -202,37 +202,37 @@ fn start_inside_a_project_is_refused() {
         let said = err.lines().next().unwrap();
         assert!(said.contains("inside an Opalro project at "), "{err}");
         assert!(said.ends_with(&format!("{project}.")), "{err}");
-        assert!(!sub.join(".opal").exists());
+        assert!(!sub.join(".opalro").exists());
     }
 }
 
-/// Another tool's `.opal` folder is never taken over: Opalro never settles into one.
+/// Another tool's `.opalro` folder is never taken over: Opalro never settles into one.
 #[test]
 fn start_refuses_another_tools_opal_folder() {
     let env = Env::new();
-    let opal = env.root().join(".opal");
-    std::fs::create_dir(&opal).unwrap();
-    std::fs::write(opal.join("prompt"), "Build me an app").unwrap();
+    let opalro = env.root().join(".opalro");
+    std::fs::create_dir(&opalro).unwrap();
+    std::fs::write(opalro.join("prompt"), "Build me an app").unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains(
-            "There's a .opal folder here that Opalro didn't make (another tool may use \
+            "There's a .opalro folder here that Opalro didn't make (another tool may use \
              that name); move or rename it first."
         ),
         "{}",
         text(&out.stderr)
     );
-    let inside: Vec<_> = std::fs::read_dir(&opal).unwrap().collect();
+    let inside: Vec<_> = std::fs::read_dir(&opalro).unwrap().collect();
     assert_eq!(inside.len(), 1, "nothing was made in it");
     // An interrupted start of Opalro's own, with only its own folders, is finished.
-    std::fs::remove_file(opal.join("prompt")).unwrap();
-    std::fs::create_dir(opal.join("store")).unwrap();
-    env.opal()
+    std::fs::remove_file(opalro.join("prompt")).unwrap();
+    std::fs::create_dir(opalro.join("store")).unwrap();
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -251,7 +251,7 @@ fn start_without_a_name_explains_how_to_set_it() {
     assert!(err.contains("[user]") && err.contains("name ="), "{err}");
     // The snippet to add is lines of its own, not one line with `\x0a` between them.
     assert!(err.contains(":\n[user]\nname = "), "{err}");
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 }
 
 /// The error says which file it is once, not in the message and again in the reason.
@@ -269,7 +269,7 @@ fn a_settings_file_that_cant_be_read_is_named_once() {
     let err = text(&out.stderr);
     assert_eq!(err.matches("config.toml").count(), 1, "{err}");
     assert!(err.contains("is not a valid Opalro settings file: it is not a regular file"));
-    assert!(!env.root().join(".opal").exists());
+    assert!(!env.root().join(".opalro").exists());
 }
 
 /// Dotfile managers (stow, Nix home-manager) keep the user's own settings as links.
@@ -278,7 +278,7 @@ fn a_settings_file_that_cant_be_read_is_named_once() {
 fn start_reads_the_users_own_config_through_a_link() {
     let env = Env::new();
     let dotfiles = tempfile::tempdir().unwrap();
-    let real = dotfiles.path().join("opal.toml");
+    let real = dotfiles.path().join("opalro.toml");
     std::fs::write(
         &real,
         "[user]\nname = \"Ada\"\nemail = \"ada@example.com\"\n",
@@ -299,7 +299,7 @@ fn start_reads_the_users_own_config_through_a_link() {
 const REAL_USER: &str = "[user]\nname = \"Real User\"\nemail = \"real@example.com\"\n";
 const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n";
 
-/// The user's own settings, a started project, and a `.opal/config.toml` in it (the one a shared
+/// The user's own settings, a started project, and a `.opalro/config.toml` in it (the one a shared
 /// project can bring) that names someone else; `a.txt` is waiting to be saved.
 fn project_naming_mallory() -> Env {
     let env = Env::new();
@@ -308,7 +308,7 @@ fn project_naming_mallory() -> Env {
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    std::fs::write(env.root().join(".opal/config.toml"), MALLORY).unwrap();
+    std::fs::write(env.root().join(".opalro/config.toml"), MALLORY).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     env
 }
@@ -376,14 +376,14 @@ fn save_notes_an_ignored_project_identity() {
 #[test]
 fn the_note_says_when_the_environment_comes_first() {
     let env = project_naming_mallory();
-    let out = env.opal().args(["save", "my work"]).output().unwrap();
+    let out = env.opalro().args(["save", "my work"]).output().unwrap();
     let stdout = text(&out.stdout);
     let hint = stdout
         .lines()
         .find(|l| l.starts_with("hint:"))
         .expect(&stdout);
     assert!(
-        hint.starts_with("hint: OPAL_USER_NAME and OPAL_USER_EMAIL are set")
+        hint.starts_with("hint: OPALRO_USER_NAME and OPALRO_USER_EMAIL are set")
             && hint.contains("take no effect until you unset them"),
         "{stdout}"
     );
@@ -392,7 +392,7 @@ fn the_note_says_when_the_environment_comes_first() {
     std::fs::write(env.root().join("b.txt"), "b").unwrap();
     let out = env
         .opal_anonymous(env.root())
-        .env("OPAL_USER_NAME", "Test")
+        .env("OPALRO_USER_NAME", "Test")
         .args(["save", "settings decide"])
         .output()
         .unwrap();
@@ -401,7 +401,7 @@ fn the_note_says_when_the_environment_comes_first() {
         stdout.contains("hint: To save as them in this project, add this to"),
         "{stdout}"
     );
-    assert!(!stdout.contains("OPAL_USER"), "{stdout}");
+    assert!(!stdout.contains("OPALRO_USER"), "{stdout}");
 }
 
 #[test]
@@ -421,11 +421,11 @@ fn save_json_names_the_ignored_project_identity() {
 
     // A project that names nobody, or the user themselves, has nothing to say.
     for named in ["", REAL_USER] {
-        std::fs::write(env.root().join(".opal/config.toml"), named).unwrap();
+        std::fs::write(env.root().join(".opalro/config.toml"), named).unwrap();
         let again = json_of(&env, &["--json", "save", "again"]);
         assert_eq!(
             again,
-            serde_json::json!({"opal_json": 1, "result": "nothing_changed", "paths": [], "warnings": []})
+            serde_json::json!({"opalro_json": 1, "result": "nothing_changed", "paths": [], "warnings": []})
         );
         let out = env
             .opal_anonymous(env.root())
@@ -497,19 +497,19 @@ fn start_uses_the_project_entry_for_its_folder() {
 #[test]
 fn save_with_an_identity_ignores_a_fifo_project_config() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let made = std::process::Command::new("mkfifo")
-        .arg(env.root().join(".opal/config.toml"))
+        .arg(env.root().join(".opalro/config.toml"))
         .status()
         .unwrap();
     assert!(made.success());
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     // Opening a pipe to read waits for someone to write to it, so a save that did would never end.
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "my work"])
         .timeout(std::time::Duration::from_secs(30))
         .output()
@@ -518,7 +518,7 @@ fn save_with_an_identity_ignores_a_fifo_project_config() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "opal save hung on a pipe at .opal/config.toml, or failed: {:?}\n{}",
+        "opalro save hung on a pipe at .opalro/config.toml, or failed: {:?}\n{}",
         out.status,
         text(&out.stderr)
     );
@@ -531,11 +531,11 @@ fn save_with_an_identity_ignores_a_fifo_project_config() {
 #[test]
 fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    std::os::unix::fs::symlink("/dev/zero", env.root().join(".opal/config.toml")).unwrap();
+    std::os::unix::fs::symlink("/dev/zero", env.root().join(".opalro/config.toml")).unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     // The address space is capped at about 1.5 GB, so a read of the link that did not stop could
     // not take the machine down.
@@ -545,7 +545,7 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "opal save read a link to /dev/zero, or failed: {:?}\n{stderr}",
+        "opalro save read a link to /dev/zero, or failed: {:?}\n{stderr}",
         out.status
     );
     assert!(!stderr.contains("memory"), "{stderr}");
@@ -556,7 +556,7 @@ fn save_with_an_identity_ignores_a_dev_zero_project_config() {
     // later. The peak memory shows it (no /proc on macOS: the peak is unknown and this passes).
     assert!(
         peak_kb < 200_000,
-        "opal save held {} MB: it read the link to /dev/zero",
+        "opalro save held {} MB: it read the link to /dev/zero",
         peak_kb / 1024
     );
 }
@@ -569,7 +569,7 @@ fn a_deep_tree_saves_within_macos_open_file_limit() {
     use opal_platform::dir::Dir;
     use std::ffi::OsStr;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -593,7 +593,7 @@ fn a_deep_tree_saves_within_macos_open_file_limit() {
 fn start_json_output() {
     let env = Env::new();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "start", "--preset", "custom"])
         .output()
         .unwrap();
@@ -601,7 +601,7 @@ fn start_json_output() {
     let mut json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     // Check what the redactions hide, so a missing field can't hide behind one.
     // Compare canonical forms: on macOS the temp folder is under a symlink (/var is
-    // /private/var), and `opal` reports the resolved path its working folder has.
+    // /private/var), and `opalro` reports the resolved path its working folder has.
     let root = std::fs::canonicalize(json["root"].as_str().unwrap()).unwrap();
     assert_eq!(root, std::fs::canonicalize(env.root()).unwrap());
     let save = &json["save"];
@@ -641,18 +641,18 @@ fn start_json_output() {
 #[test]
 fn json_errors_go_to_stdout() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "start", "--preset", "custom"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(json["opal_json"], 1);
+    assert_eq!(json["opalro_json"], 1);
     assert_eq!(
         json["error"]["message"],
         "This folder is already an Opalro project."
@@ -664,19 +664,19 @@ fn json_errors_go_to_stdout() {
 #[test]
 fn usage_errors_exit_2() {
     let env = Env::new();
-    env.opal().arg("frobnicate").assert().code(2);
+    env.opalro().arg("frobnicate").assert().code(2);
 }
 
 #[cfg(feature = "fault-injection")]
 #[test]
 fn interrupted_start_can_be_finished() {
     for n in 1.. {
-        assert!(n < 50, "opal start never finished");
+        assert!(n < 50, "opalro start never finished");
         let env = Env::new();
         let out = env
-            .opal()
+            .opalro()
             .args(["start", "--preset", "custom"])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         if !text(&out.stderr).contains("injected crash") {
@@ -686,13 +686,13 @@ fn interrupted_start_can_be_finished() {
         }
         // The read-back comes after the project is made, so it is whole: only the report is lost.
         if text(&out.stderr).contains("injected crash at start:read-back") {
-            assert!(env.root().join(".opal/format").exists(), "fault {n}");
-            env.opal().arg("history").assert().success();
+            assert!(env.root().join(".opalro/format").exists(), "fault {n}");
+            env.opalro().arg("history").assert().success();
             continue;
         }
-        assert!(!env.root().join(".opal/format").exists(), "fault {n}");
+        assert!(!env.root().join(".opalro/format").exists(), "fault {n}");
         let out = env
-            .opal()
+            .opalro()
             .args(["start", "--preset", "custom"])
             .output()
             .unwrap();
@@ -702,7 +702,7 @@ fn interrupted_start_can_be_finished() {
             "fault {n}: {}",
             text(&out.stderr)
         );
-        let report = opal_core::verify::verify_store(&env.root().join(".opal/store/packs"));
+        let report = opal_core::verify::verify_store(&env.root().join(".opalro/store/packs"));
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
     }
 }
@@ -714,13 +714,13 @@ fn interrupted_start_can_be_finished() {
 fn start_reports_success_when_its_first_save_cannot_be_read_back() {
     for json in [false, true] {
         let env = Env::new();
-        let mut opal = env.opal();
+        let mut opalro = env.opalro();
         if json {
-            opal.arg("--json");
+            opalro.arg("--json");
         }
-        let out = opal
+        let out = opalro
             .args(["start", "--preset", "custom"])
-            .env("OPAL_FAULT_FAIL", "start:read-back")
+            .env("OPALRO_FAULT_FAIL", "start:read-back")
             .output()
             .unwrap();
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
@@ -729,7 +729,7 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
             stderr.contains(
                 "warning: The project was made, but Opalro couldn't read its first save back. \
                  injected fault at start:read-back\n\
-                 Run `opal history` to check that the project reads.\n"
+                 Run `opalro history` to check that the project reads.\n"
             ),
             "{stderr}"
         );
@@ -746,14 +746,14 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
             assert!(!stdout.contains("first save is"), "{stdout}");
         }
         // The project is whole: it has its first save, and nothing is missing.
-        let history = env.opal().args(["--json", "history"]).output().unwrap();
+        let history = env.opalro().args(["--json", "history"]).output().unwrap();
         let history: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
         assert_eq!(
             history["saves"].as_array().map(Vec::len),
             Some(1),
             "{history}"
         );
-        let packs = env.root().join(".opal/store/packs");
+        let packs = env.root().join(".opalro/store/packs");
         assert!(opal_core::verify::verify_store(&packs).is_ok());
     }
 }
@@ -762,11 +762,11 @@ fn start_reports_success_when_its_first_save_cannot_be_read_back() {
 #[test]
 fn opal_folder_is_hidden_on_windows() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    assert!(opal_platform::is_hidden(&env.root().join(".opal")).unwrap());
+    assert!(opal_platform::is_hidden(&env.root().join(".opalro")).unwrap());
 }
 
 #[cfg(windows)]
@@ -774,49 +774,49 @@ fn opal_folder_is_hidden_on_windows() {
 fn a_command_names_its_own_file_another_program_holds() {
     use std::os::windows::fs::OpenOptionsExt;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    let opal = env.root().join(".opal");
+    let opalro = env.root().join(".opalro");
     // As a virus scanner or sync tool may hold it, for longer than Opalro tries.
     let held = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
-        .open(opal.join("state/lock-info"))
+        .open(opalro.join("state/lock-info"))
         .unwrap();
-    let out = env.opal().args(["save", "Add a"]).output().unwrap();
+    let out = env.opalro().args(["save", "Add a"]).output().unwrap();
     drop(held);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
-    assert!(err.contains(r"\.opal\state\lock-info: "), "{err}");
+    assert!(err.contains(r"\.opalro\state\lock-info: "), "{err}");
     assert!(err.contains("virus scanner"), "{err}");
-    assert_eq!(std::fs::read_dir(opal.join("tmp")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(opalro.join("tmp")).unwrap().count(), 0);
 }
 
 #[test]
 fn ordinary_commands_still_write_one_pack() {
     let env = Env::new();
     let packs = || {
-        std::fs::read_dir(env.root().join(".opal/store/packs"))
+        std::fs::read_dir(env.root().join(".opalro/store/packs"))
             .unwrap()
             .count()
     };
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     assert_eq!(packs(), 1);
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    env.opal().args(["save", "Add a"]).assert().success();
+    env.opalro().args(["save", "Add a"]).assert().success();
     assert_eq!(packs(), 2);
 }
 
 #[test]
 fn save_then_nothing_to_save() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -824,7 +824,7 @@ fn save_then_nothing_to_save() {
     std::fs::create_dir(env.root().join("src")).unwrap();
     std::fs::write(env.root().join("src/b.txt"), "b").unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "Add two files\n\nThe details."])
         .output()
         .unwrap();
@@ -835,14 +835,14 @@ fn save_then_nothing_to_save() {
         .and_then(|s| s.strip_suffix(" \"Add two files\" on main  (2 files)\n"))
         .unwrap_or_else(|| panic!("{stdout:?}"));
     assert_eq!(short.len(), 4);
-    let out = env.opal().args(["save", "Again"]).output().unwrap();
+    let out = env.opalro().args(["save", "Again"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout),
         format!("Nothing to save: no changes since your last save, {short} \"Add two files\".\n")
     );
     std::fs::write(env.root().join("a.txt"), "changed").unwrap();
-    let out = env.opal().args(["save", "Change a"]).output().unwrap();
+    let out = env.opalro().args(["save", "Change a"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(
@@ -851,37 +851,37 @@ fn save_then_nothing_to_save() {
     );
 }
 
-/// What `opal.toml` Opalro can't use is told by `opal save`, in words and in `--json`, and by no
+/// What `opalro.toml` Opalro can't use is told by `opalro save`, in words and in `--json`, and by no
 /// command that isn't a save.
 #[test]
 fn only_save_shows_the_rules_warnings() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
-    let rules = env.root().join("opal.toml");
+    let rules = env.root().join("opalro.toml");
     std::fs::write(&rules, "zebra = 1\n").unwrap();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    let out = env.opal().args(["save", "First"]).output().unwrap();
+    let out = env.opalro().args(["save", "First"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let err = text(&out.stderr);
     assert!(
-        err.starts_with("warning: Opalro passed over these parts of opal.toml")
+        err.starts_with("warning: Opalro passed over these parts of opalro.toml")
             && err.contains("\n  zebra: Opalro doesn't know this key"),
         "{err}"
     );
     let first = main_tip(&env).to_hex();
     std::fs::write(&rules, "this is not = = toml\n").unwrap();
     let json = |args: &[&str]| -> serde_json::Value {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         serde_json::from_slice(&out.stdout).unwrap()
     };
     let doc = json(&["save", "--json", "Second"]);
     assert_eq!(warning_kinds(&doc), ["rules_file_skipped"], "{doc}");
     let quiet = |args: &[&str]| {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -909,7 +909,7 @@ fn only_save_shows_the_rules_warnings() {
 /// A started project holding a new file of 100,000,001 zeros, made without writing them.
 fn project_adding_100_mb() -> Env {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -922,7 +922,7 @@ fn project_adding_100_mb() -> Env {
 #[test]
 fn without_a_terminal_it_stops_and_names_yes() {
     let env = project_adding_100_mb();
-    let out = env.opal().args(["save", "Add art"]).output().unwrap();
+    let out = env.opalro().args(["save", "Add art"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(
@@ -934,7 +934,7 @@ fn without_a_terminal_it_stops_and_names_yes() {
         "{err}"
     );
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "--json", "Add art"])
         .output()
         .unwrap();
@@ -944,7 +944,7 @@ fn without_a_terminal_it_stops_and_names_yes() {
         doc["error"]["hint"].as_str().unwrap().contains("--yes"),
         "{doc}"
     );
-    let out = env.opal().arg("status").output().unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
     assert!(text(&out.stdout).contains("art/huge.bin"), "still unsaved");
 }
 
@@ -952,7 +952,7 @@ fn without_a_terminal_it_stops_and_names_yes() {
 fn yes_skips_the_question() {
     let env = project_adding_100_mb();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "--yes", "Add art"])
         .output()
         .unwrap();
@@ -966,7 +966,7 @@ fn yes_skips_the_question() {
 #[test]
 fn com0_and_lpt0_save_on_windows() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -978,7 +978,7 @@ fn com0_and_lpt0_save_on_windows() {
         );
     }
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "Device-like names"])
         .output()
         .unwrap();
@@ -990,17 +990,17 @@ fn com0_and_lpt0_save_on_windows() {
 #[test]
 fn save_requires_a_message() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     for args in [&["save"][..], &["save", ""], &["save", "  \n"]] {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{args:?}");
         let err = text(&out.stderr);
         assert!(
-            err.contains("error: ") && err.contains("hint: ") && err.contains("opal save \""),
+            err.contains("error: ") && err.contains("hint: ") && err.contains("opalro save \""),
             "{err}"
         );
     }
@@ -1009,7 +1009,7 @@ fn save_requires_a_message() {
 /// A started project with a `LICENSE` to save, and a pack that holds a damaged copy of its content.
 fn project_with_a_damaged_copy_of_its_licence() -> Env {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1020,7 +1020,7 @@ fn project_with_a_damaged_copy_of_its_licence() -> Env {
     w.add_content(licence).unwrap();
     let mut pack = std::fs::read(w.finish(made.path()).unwrap().unwrap()).unwrap();
     pack[16 + 50] ^= 1; // the first byte after the pack header and the entry header
-    std::fs::write(env.root().join(".opal/store/packs/00.pack"), pack).unwrap();
+    std::fs::write(env.root().join(".opalro/store/packs/00.pack"), pack).unwrap();
     std::fs::write(env.root().join("LICENSE"), licence).unwrap();
     env
 }
@@ -1030,7 +1030,7 @@ fn project_with_a_damaged_copy_of_its_licence() -> Env {
 fn save_json_carries_a_damaged_pack_warning() {
     let env = project_with_a_damaged_copy_of_its_licence();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "Add licence"])
         .output()
         .unwrap();
@@ -1051,7 +1051,7 @@ fn save_json_carries_a_damaged_pack_warning() {
 #[test]
 fn save_warns_about_a_pack_holding_a_damaged_copy() {
     let env = project_with_a_damaged_copy_of_its_licence();
-    let out = env.opal().args(["save", "Add licence"]).output().unwrap();
+    let out = env.opalro().args(["save", "Add licence"]).output().unwrap();
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert!(
@@ -1070,14 +1070,14 @@ fn save_warns_about_a_pack_holding_a_damaged_copy() {
 /// Bit rot in the only copy of a save, as `rot` makes it. The change-ID cache goes too, so that the
 /// line is read again.
 fn damage_the_only_copy_of(root: &Path, id: &Id) {
-    std::fs::remove_file(root.join(".opal/cache/change-ids")).unwrap();
+    std::fs::remove_file(root.join(".opalro/cache/change-ids")).unwrap();
     rot(root, id);
 }
 
 /// Bit rot in the only copy of a save: its first stored byte is flipped.
 fn rot(root: &Path, id: &Id) {
     use opal_core::pack::{ENTRY_HEADER_LEN, PackReader};
-    for e in std::fs::read_dir(root.join(".opal/store/packs")).unwrap() {
+    for e in std::fs::read_dir(root.join(".opalro/store/packs")).unwrap() {
         let path = e.unwrap().path();
         let found = PackReader::open(&path).unwrap().find(id).unwrap();
         if let Some(entry) = found {
@@ -1102,7 +1102,7 @@ fn plant_damaged_copy_of(root: &Path, id: &Id, kind: ObjectKind) {
     let mut bytes = std::fs::read(&path).unwrap();
     let entry = PackReader::open(&path).unwrap().find(id).unwrap().unwrap();
     bytes[usize::try_from(entry.offset + ENTRY_HEADER_LEN).unwrap()] ^= 1;
-    std::fs::write(root.join(".opal/store/packs/00.pack"), bytes).unwrap();
+    std::fs::write(root.join(".opalro/store/packs/00.pack"), bytes).unwrap();
 }
 
 /// A started project with two saves, the first of which can no longer be read, and a file
@@ -1110,7 +1110,7 @@ fn plant_damaged_copy_of(root: &Path, id: &Id, kind: ObjectKind) {
 fn project_whose_first_save_is_damaged() -> Env {
     use opal_core::repo::Repository;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1122,7 +1122,7 @@ fn project_whose_first_save_is_damaged() -> Env {
         .state
         .lines["main"];
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
-    env.opal().args(["save", "one"]).assert().success();
+    env.opalro().args(["save", "one"]).assert().success();
     damage_the_only_copy_of(env.root(), &first);
     std::fs::write(env.root().join("mine.txt"), "my work").unwrap();
     env
@@ -1135,7 +1135,7 @@ fn save_is_reported_as_saved_when_the_line_cant_be_read_to_shorten_its_id() {
     use opal_core::repo::Repository;
     let env = project_whose_first_save_is_damaged();
     let before = Repository::open(env.root()).unwrap().head().unwrap();
-    let out = env.opal().args(["save", "two"]).output().unwrap();
+    let out = env.opalro().args(["save", "two"]).output().unwrap();
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert_ne!(
@@ -1164,9 +1164,9 @@ fn save_is_reported_as_saved_when_the_line_cant_be_read_to_shorten_its_id() {
 #[test]
 fn nothing_to_save_and_show_work_when_the_line_cant_be_read_to_shorten_ids() {
     let env = project_whose_first_save_is_damaged();
-    env.opal().args(["save", "two"]).assert().success();
+    env.opalro().args(["save", "two"]).assert().success();
     for args in [&["save", "again"][..], &["show"]] {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
         assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
         assert!(
@@ -1184,7 +1184,11 @@ fn nothing_to_save_and_show_work_when_the_line_cant_be_read_to_shorten_ids() {
 #[test]
 fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
     let env = project_whose_first_save_is_damaged();
-    let out = env.opal().args(["--json", "save", "two"]).output().unwrap();
+    let out = env
+        .opalro()
+        .args(["--json", "save", "two"])
+        .output()
+        .unwrap();
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1210,8 +1214,8 @@ fn save_json_is_the_same_when_the_line_cant_be_read_to_shorten_its_id() {
 #[test]
 fn show_json_carries_the_warning_about_the_id_it_couldnt_shorten() {
     let env = project_whose_first_save_is_damaged();
-    env.opal().args(["save", "two"]).assert().success();
-    let out = env.opal().args(["--json", "show"]).output().unwrap();
+    env.opalro().args(["save", "two"]).assert().success();
+    let out = env.opalro().args(["--json", "show"]).output().unwrap();
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -1231,13 +1235,13 @@ fn show_json_carries_the_warning_about_the_id_it_couldnt_shorten() {
 #[test]
 fn save_json_output() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "Add a"])
         .output()
         .unwrap();
@@ -1263,7 +1267,7 @@ fn save_json_output() {
     }
     insta::assert_json_snapshot!(json);
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "Again"])
         .output()
         .unwrap();
@@ -1277,18 +1281,18 @@ fn save_json_output() {
 fn interrupted_save_changes_nothing_until_its_head_moves() {
     use opal_core::repo::Repository;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = Repository::open(env.root()).unwrap().current().unwrap().1;
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     for n in 1.. {
-        assert!(n < 50, "opal save never finished");
+        assert!(n < 50, "opalro save never finished");
         let out = env
-            .opal()
+            .opalro()
             .args(["save", "Add a"])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let said = text(&out.stderr);
@@ -1308,7 +1312,7 @@ fn interrupted_save_changes_nothing_until_its_head_moves() {
         }
         assert_eq!(entry.state, first.state, "fault {n}");
     }
-    let out = env.opal().args(["save", "Add a"]).output().unwrap();
+    let out = env.opalro().args(["save", "Add a"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let (_, entry) = Repository::open(env.root()).unwrap().current().unwrap();
     assert_ne!(entry.state.lines["main"], first.state.lines["main"]);
@@ -1328,19 +1332,19 @@ fn redact_save(save: &mut serde_json::Value) {
 /// A started project with saves `one` (adds a.txt) and `two` (adds b.txt).
 fn project_with_two_saves() -> Env {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     for (name, msg) in [("a.txt", "one"), ("b.txt", "two")] {
         std::fs::write(env.root().join(name), name).unwrap();
-        env.opal().args(["save", msg]).assert().success();
+        env.opalro().args(["save", msg]).assert().success();
     }
     env
 }
 
 fn stdout_of(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     text(&out.stdout)
 }
@@ -1374,17 +1378,20 @@ fn history_lists_newest_first() {
 #[test]
 fn show_lists_what_a_save_changed() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("b.txt"), "b").unwrap();
     std::fs::write(env.root().join("c.txt"), "c").unwrap();
-    env.opal().args(["save", "base"]).assert().success();
+    env.opalro().args(["save", "base"]).assert().success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     std::fs::write(env.root().join("b.txt"), "bbbb").unwrap();
     std::fs::remove_file(env.root().join("c.txt")).unwrap();
-    env.opal().args(["save", "mix\n\nmore"]).assert().success();
+    env.opalro()
+        .args(["save", "mix\n\nmore"])
+        .assert()
+        .success();
     let out = stdout_of(&env, &["show"]);
     let lines: Vec<&str> = out.lines().collect();
     assert!(lines[0].starts_with("Save "), "{out}");
@@ -1414,13 +1421,13 @@ fn show_lists_what_a_save_changed() {
 #[test]
 fn show_indents_the_message_so_it_cannot_fake_a_change() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("invoice.pdf"), "pdf").unwrap();
     let message = "add the invoice\n\n    removed  payroll.xlsx  12 KiB";
-    env.opal().args(["save", message]).assert().success();
+    env.opalro().args(["save", message]).assert().success();
     let out = stdout_of(&env, &["show"]);
     // The only line that can pass for a change is the one real change.
     let kinds = ["added ", "removed ", "modified ", "kind changed "];
@@ -1457,14 +1464,14 @@ fn show_indents_the_message_so_it_cannot_fake_a_change() {
 #[test]
 fn show_with_no_file_changes() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     assert!(stdout_of(&env, &["show"]).ends_with("\n\nNo files changed.\n"));
 }
 
-/// The 12 hex digits `opal show` names after `After`, the first parent's first.
+/// The 12 hex digits `opalro show` names after `After`, the first parent's first.
 fn after(env: &Env, what: &[&str]) -> Vec<String> {
     let out = stdout_of(env, &[&["show"], what].concat());
     let line = out.lines().find(|l| l.starts_with("    After ")).unwrap();
@@ -1475,7 +1482,7 @@ fn after(env: &Env, what: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// `opal show` takes back the fingerprints it names after `After` where a line's history reaches
+/// `opalro show` takes back the fingerprints it names after `After` where a line's history reaches
 /// that save, and only then: a merge's other parent, or the parent of a save past every line.
 #[test]
 fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
@@ -1494,7 +1501,7 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
         let parents = after(&env, &[]);
         assert_eq!(parents.len(), 2, "{parents:?}");
         assert_eq!(after(&env, &[&parents[0]]).len(), 1);
-        let out = env.opal().args(["show", &parents[1]]).output().unwrap();
+        let out = env.opalro().args(["show", &parents[1]]).output().unwrap();
         let taken_back = out.status.code() == Some(0);
         assert_eq!(taken_back, keep_the_branch, "{}", text(&out.stderr));
     }
@@ -1508,16 +1515,16 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
     env.import();
     let b = &after(&env, &[])[0];
     assert!(stdout_of(&env, &["show"]).contains("\"B\""));
-    let out = env.opal().args(["show", b]).output().unwrap();
+    let out = env.opalro().args(["show", b]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     // A save made on a new line from an older one: its parent is on main's history.
     let env = project_with_two_saves();
     let history: serde_json::Value =
         serde_json::from_str(&stdout_of(&env, &["--json", "history"])).unwrap();
     let older = history["saves"][1]["id"].as_str().unwrap().to_owned();
-    env.opal().args(["goto", &older]).assert().success();
+    env.opalro().args(["goto", &older]).assert().success();
     std::fs::write(env.root().join("new.txt"), "new\n").unwrap();
-    env.opal()
+    env.opalro()
         .args(["save", "--line", "feature", "Away"])
         .assert()
         .success();
@@ -1541,7 +1548,7 @@ fn show_resolves_lines_prefixes_and_fingerprints() {
     let letters = one["change_id"].as_str().unwrap();
     assert_eq!(json(&letters[..4])["save"]["id"], one["id"]);
     assert_eq!(json(&id[..8])["save"]["id"], id);
-    let out = env.opal().args(["show", "nosuch"]).output().unwrap();
+    let out = env.opalro().args(["show", "nosuch"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains("nosuch"),
@@ -1569,7 +1576,7 @@ fn history_and_show_json_output() {
 #[test]
 fn show_json_is_the_one_compact_line_serde_json_would_write() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1582,11 +1589,11 @@ fn show_json_is_the_one_compact_line_serde_json_would_write() {
 
     std::fs::write(env.root().join("b.txt"), "b").unwrap();
     std::fs::write(env.root().join("c.txt"), "c").unwrap();
-    env.opal().args(["save", "base"]).assert().success();
+    env.opalro().args(["save", "base"]).assert().success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     std::fs::write(env.root().join("b.txt"), "bbbb").unwrap();
     std::fs::remove_file(env.root().join("c.txt")).unwrap();
-    env.opal().args(["save", "mix"]).assert().success();
+    env.opalro().args(["save", "mix"]).assert().success();
     let raw = stdout_of(&env, &["--json", "show"]);
     let three: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(raw, format!("{three}\n"));
@@ -1622,7 +1629,7 @@ fn history_json_is_the_one_compact_line_serde_json_would_write() {
 fn every_json_document_has_warnings() {
     let env = Env::new();
     let run = |args: &[&str]| -> serde_json::Value {
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -1666,11 +1673,11 @@ fn history_json_stays_valid_when_a_save_is_unreadable() {
     let middle = Id::from_hex(history["saves"][1]["id"].as_str().unwrap()).unwrap();
     damage_the_only_copy_of(env.root(), &middle);
     for command in ["history", "show"] {
-        let out = env.opal().args(["--json", command]).output().unwrap();
+        let out = env.opalro().args(["--json", command]).output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{command}");
         // `from_slice` takes one document and nothing after it.
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(doc["opal_json"], 1, "{command}: {doc}");
+        assert_eq!(doc["opalro_json"], 1, "{command}: {doc}");
         let error = doc["error"]["message"].as_str().unwrap();
         assert!(error.contains("damaged"), "{command}: {error}");
         assert!(
@@ -1694,7 +1701,7 @@ fn history_and_show_json_carry_a_damaged_pack_warning() {
     let head = Repository::open(env.root()).unwrap().head().unwrap();
     plant_damaged_copy_of(env.root(), &head, ObjectKind::DiaryEntry);
     for command in ["history", "show"] {
-        let out = env.opal().args(["--json", command]).output().unwrap();
+        let out = env.opalro().args(["--json", command]).output().unwrap();
         let stderr = text(&out.stderr);
         assert_eq!(out.status.code(), Some(0), "{command}: {stderr}");
         let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -1708,11 +1715,11 @@ fn history_and_show_json_carry_a_damaged_pack_warning() {
 #[test]
 fn commands_outside_a_project_explain_what_to_do() {
     let env = Env::new();
-    let out = env.opal().arg("history").output().unwrap();
+    let out = env.opalro().arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
     assert!(
-        err.contains("Not inside an Opalro project") && err.contains("opal start"),
+        err.contains("Not inside an Opalro project") && err.contains("opalro start"),
         "{err}"
     );
 }
@@ -1720,7 +1727,7 @@ fn commands_outside_a_project_explain_what_to_do() {
 #[test]
 fn commands_work_from_a_subfolder() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1747,15 +1754,15 @@ fn stdout_of_in(env: &Env, dir: &Path, args: &[&str]) -> String {
 #[test]
 fn hostile_text_cannot_drive_the_terminal() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(env.root().join("a.txt"), "a").unwrap();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "\u{1b}[31mred\n\n\u{1b}]0;x\u{7}body"])
-        .env("OPAL_USER_NAME", "Eve\u{1b}[2J")
+        .env("OPALRO_USER_NAME", "Eve\u{1b}[2J")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -1800,22 +1807,22 @@ fn folder_names_are_shown_escaped() {
 }
 
 #[test]
-fn opalignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
+fn opalroignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     // Each file is well within its own limit; together they are past the limit for one folder.
     let comment = "#".repeat(600 * 1024);
     std::fs::create_dir(env.root().join("sub")).unwrap();
-    std::fs::write(env.root().join(".opalignore"), &comment).unwrap();
-    std::fs::write(env.root().join("sub/.opalignore"), &comment).unwrap();
-    let out = env.opal().args(["save", "x"]).output().unwrap();
+    std::fs::write(env.root().join(".opalroignore"), &comment).unwrap();
+    std::fs::write(env.root().join("sub/.opalroignore"), &comment).unwrap();
+    let out = env.opalro().args(["save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(
-        shown.contains("problem: sub/.opalignore: with the other ignore files in force at its "),
+        shown.contains("problem: sub/.opalroignore: with the other ignore files in force at its "),
         "{shown:?}"
     );
     assert!(
@@ -1828,7 +1835,7 @@ fn opalignore_files_past_the_size_limit_stop_the_save_and_name_the_file() {
 #[test]
 fn text_quoted_in_an_error_is_shown_escaped() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1836,18 +1843,18 @@ fn text_quoted_in_an_error_is_shown_escaped() {
     // terminal.
     let folder = env.root().join("x\u{202e}");
     std::fs::create_dir(&folder).unwrap();
-    std::fs::write(folder.join(".opalignore"), vec![b'#'; (1 << 20) + 1]).unwrap();
-    let out = env.opal().args(["save", "x"]).output().unwrap();
+    std::fs::write(folder.join(".opalroignore"), vec![b'#'; (1 << 20) + 1]).unwrap();
+    let out = env.opalro().args(["save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let shown = text(&out.stderr);
     assert!(!shown.contains('\u{202e}'), "{shown:?}");
-    assert!(shown.contains("x\\u{202e}/.opalignore"), "{shown:?}");
+    assert!(shown.contains("x\\u{202e}/.opalroignore"), "{shown:?}");
     // The message is for people in JSON too, so it is just as safe to print.
-    let out = env.opal().args(["--json", "save", "x"]).output().unwrap();
+    let out = env.opalro().args(["--json", "save", "x"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let message = json["error"]["message"].as_str().unwrap();
     assert!(!message.contains('\u{202e}'), "{message:?}");
-    assert!(message.contains("x\\u{202e}/.opalignore"), "{message:?}");
+    assert!(message.contains("x\\u{202e}/.opalroignore"), "{message:?}");
 }
 
 /// Two names that would not work on every system, so the error has two lines of problems. Where
@@ -1874,14 +1881,14 @@ fn plant_two_non_portable_names(root: &Path) {
 fn save_json_error_lists_the_warnings_found_before_it_failed() {
     use opal_core::repo::Repository;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let head = Repository::open(env.root()).unwrap().head().unwrap();
     plant_damaged_copy_of(env.root(), &head, ObjectKind::DiaryEntry);
     plant_two_non_portable_names(env.root());
-    let out = env.opal().args(["--json", "save", "x"]).output().unwrap();
+    let out = env.opalro().args(["--json", "save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let error = doc["error"]["message"].as_str().unwrap();
@@ -1895,12 +1902,12 @@ fn save_json_error_lists_the_warnings_found_before_it_failed() {
 #[test]
 fn multi_line_error_prints_lines() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     plant_two_non_portable_names(env.root());
-    let out = env.opal().args(["save", "x"]).output().unwrap();
+    let out = env.opalro().args(["save", "x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = text(&out.stderr);
     assert!(!err.contains("\\x0a"), "{err}");
@@ -1918,14 +1925,14 @@ fn multi_line_error_prints_lines() {
     assert!(lines[4].starts_with("hint: "), "{err}");
 }
 
-/// RT-11: a folder that can't be entered is unreadable, not a problem with a `.opalignore` in it.
+/// RT-11: a folder that can't be entered is unreadable, not a problem with a `.opalroignore` in it.
 /// (Windows never made this mistake: only unix refuses to look inside a folder for a name.)
 #[cfg(unix)]
 #[test]
 fn unreadable_folder_is_reported_as_unreadable() {
     use std::os::unix::fs::PermissionsExt;
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -1935,7 +1942,7 @@ fn unreadable_folder_is_reported_as_unreadable() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     // root reads everything, so there is nothing to test.
     let root_user = std::fs::read_dir(&locked).is_ok();
-    let out = env.opal().args(["save", "x"]).output().unwrap();
+    let out = env.opalro().args(["save", "x"]).output().unwrap();
     // Back to normal first, so that the temporary folder can be removed whatever happens.
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     if root_user {
@@ -1996,7 +2003,7 @@ fn plant_history(
 /// a file `mine.txt` to save next to it.
 fn project_with_a_save_too_deep_to_walk() -> Env {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2015,7 +2022,7 @@ fn project_with_a_save_too_deep_to_walk() -> Env {
 #[test]
 fn show_of_a_save_too_deep_to_walk_prints_only_the_error() {
     let env = project_with_a_save_too_deep_to_walk();
-    let out = env.opal().arg("show").output().unwrap();
+    let out = env.opalro().arg("show").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stdout),
@@ -2028,7 +2035,7 @@ fn show_of_a_save_too_deep_to_walk_prints_only_the_error() {
         text(&out.stderr)
     );
     // As JSON, the error alone: no half of the save's own document in front of it.
-    let out = env.opal().args(["--json", "show"]).output().unwrap();
+    let out = env.opalro().args(["--json", "show"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
@@ -2045,7 +2052,7 @@ fn show_of_a_save_too_deep_to_walk_prints_only_the_error() {
 #[test]
 fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
     let env = project_with_a_save_too_deep_to_walk();
-    let out = env.opal().args(["save", "my work"]).output().unwrap();
+    let out = env.opalro().args(["save", "my work"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(stdout.starts_with("Saved "), "{stdout:?}");
@@ -2057,8 +2064,9 @@ fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
     // The reason is on stderr, with the words the document has.
     let stderr = text(&out.stderr);
     assert!(
-        stderr
-            .contains("warning: The save was made, but Opalro couldn't count the files it changed."),
+        stderr.contains(
+            "warning: The save was made, but Opalro couldn't count the files it changed."
+        ),
         "{stderr}"
     );
     assert!(stdout_of(&env, &["history"]).contains("my work"));
@@ -2068,7 +2076,7 @@ fn save_next_to_a_save_too_large_to_compare_still_succeeds_without_a_count() {
 fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
     let env = project_with_a_save_too_deep_to_walk();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "my work"])
         .output()
         .unwrap();
@@ -2089,7 +2097,7 @@ fn save_json_next_to_a_save_too_large_to_compare_has_no_count() {
 
 /// Fourteen nested folders, then 250 folders that are one listing of 250 files, all names 255
 /// bytes: each file's path is 4,095 bytes, just within a path's limit, and the 62,500 paths
-/// together over 250 MB, far more than `opal` is given below. This is within the format's limits
+/// together over 250 MB, far more than `opalro` is given below. This is within the format's limits
 /// (paths of 4,096 bytes, 10 million entries), so it must be readable.
 #[cfg(unix)]
 const LONG_LEVELS: usize = 14;
@@ -2098,7 +2106,7 @@ const LONG_FOLDERS: usize = 250;
 #[cfg(unix)]
 const LONG_FILES: usize = 250;
 
-/// The address space `opal` gets: well under all the long paths together, and under 64 MiB, so the
+/// The address space `opalro` gets: well under all the long paths together, and under 64 MiB, so the
 /// C library can't reserve a whole arena for a thread and starve the rest. `save` needs under
 /// 40 MB.
 #[cfg(unix)]
@@ -2118,7 +2126,7 @@ fn plant_long_paths(root: &Path) {
     });
 }
 
-/// `opal <args>` in the project, with its address space capped, so that holding too much aborts
+/// `opalro <args>` in the project, with its address space capped, so that holding too much aborts
 /// ("memory allocation of … bytes failed") instead of slowing the machine down. Where the cap isn't
 /// enforced (macOS), the test passes without proving anything.
 #[cfg(unix)]
@@ -2142,7 +2150,7 @@ fn run_noting_peak_memory(
         .unwrap();
     let started = std::time::Instant::now();
     let mut peak_kb = 0;
-    // What `opal` prints is a few lines, which wait in the pipes until it has ended.
+    // What `opalro` prints is a few lines, which wait in the pipes until it has ended.
     while child.try_wait().unwrap().is_none() && started.elapsed().as_secs() < secs {
         let status = std::fs::read_to_string(format!("/proc/{}/status", child.id()));
         let held = status
@@ -2169,7 +2177,7 @@ fn run_noting_peak_memory(
 #[test]
 fn show_does_not_hold_every_long_path_of_a_save_at_once() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2186,7 +2194,7 @@ fn show_does_not_hold_every_long_path_of_a_save_at_once() {
 #[test]
 fn save_does_not_hold_every_long_path_of_the_save_before_it() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2221,7 +2229,7 @@ fn shortest_unique(all: &[String]) -> Vec<String> {
 #[test]
 fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2255,12 +2263,12 @@ fn history_shows_every_save_with_the_fewest_letters_that_keep_it_unique() {
 }
 
 /// 150 messages of 1 MiB take a few hundred bytes each on disk but 150 MiB together, more than
-/// `opal` is given here; one at a time they take a few MiB.
+/// `opalro` is given here; one at a time they take a few MiB.
 #[cfg(unix)]
 #[test]
 fn history_show_and_save_hold_one_save_at_a_time() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2296,7 +2304,7 @@ fn history_show_and_save_hold_one_save_at_a_time() {
 #[test]
 fn history_holds_a_bounded_amount_of_long_first_lines() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2336,7 +2344,7 @@ fn a_cache_key_opal_cant_use_is_a_warning_not_a_failure() {
             "{said}"
         );
     }
-    let out = env.opal().arg("history").output().unwrap();
+    let out = env.opalro().arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(
         text(&out.stderr).contains("warning: Opalro can't use its cache key"),
@@ -2358,7 +2366,7 @@ fn a_current_cache_reads_a_damaged_older_save_only_when_history_reaches_it() {
     let saved = json_as_user(&env, &["--json", "save", "three"]);
     assert_eq!(saved["result"], "saved", "{saved}");
     assert!(warning_kinds(&saved).is_empty(), "{saved}");
-    let out = env.opal().args(["--json", "history"]).output().unwrap();
+    let out = env.opalro().args(["--json", "history"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["saves"].as_array().unwrap().len(), 3, "{doc}");
@@ -2388,7 +2396,7 @@ fn project_whose_oldest_save_is_damaged() -> Env {
 #[test]
 fn history_in_words_shows_the_saves_before_a_damaged_one_then_the_error() {
     let env = project_whose_oldest_save_is_damaged();
-    let out = env.opal().arg("history").output().unwrap();
+    let out = env.opalro().arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let (shown, said) = (text(&out.stdout), text(&out.stderr));
     let lines: Vec<&str> = shown.lines().collect();
@@ -2416,15 +2424,15 @@ fn history_that_fails_before_its_first_save_prints_nothing() {
         let id = |n: usize| history["saves"][n]["id"].as_str().unwrap().to_owned();
         if at_a_save {
             // At a save, that save is the first row: damage there comes before any row.
-            let at = env.opal().args(["goto", &id(1)]).output().unwrap();
+            let at = env.opalro().args(["goto", &id(1)]).output().unwrap();
             assert_eq!(at.status.code(), Some(0), "{}", text(&at.stderr));
         } else {
             // Without the cache, the line is read whole before the first row.
-            std::fs::remove_file(env.root().join(".opal/cache/change-ids")).unwrap();
+            std::fs::remove_file(env.root().join(".opalro/cache/change-ids")).unwrap();
         }
         let damaged = if at_a_save { id(1) } else { id(2) };
         rot(env.root(), &Id::from_hex(&damaged).unwrap());
-        let out = env.opal().arg("history").output().unwrap();
+        let out = env.opalro().arg("history").output().unwrap();
         let said = text(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{at_a_save}: {said}");
         assert_eq!(text(&out.stdout), "", "{at_a_save}");
@@ -2453,7 +2461,7 @@ fn show_names_the_save_before_by_a_fingerprint_it_takes_back() {
 #[test]
 fn show_reads_no_older_save_to_name_the_one_before() {
     let env = project_whose_oldest_save_is_damaged();
-    let out = env.opal().arg("show").output().unwrap();
+    let out = env.opalro().arg("show").output().unwrap();
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert_eq!(said, "");
@@ -2466,7 +2474,7 @@ fn show_reads_no_older_save_to_name_the_one_before() {
 #[test]
 fn history_rows_past_what_it_holds_still_print_in_order() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2497,7 +2505,7 @@ fn history_rows_past_what_it_holds_still_print_in_order() {
 
 /// `json_of`, run as the test user, so that a save may be made.
 fn json_as_user(env: &Env, args: &[&str]) -> serde_json::Value {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -2505,7 +2513,7 @@ fn json_as_user(env: &Env, args: &[&str]) -> serde_json::Value {
 #[test]
 fn paths_are_relative_to_the_current_folder() {
     let env = Env::new();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2569,7 +2577,7 @@ fn paths_are_relative_to_the_current_folder() {
     assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
 }
 
-/// `opal <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
+/// `opalro <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
 /// starts: how it ended, and what it said on stderr.
 fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
     let (reader, writer) = std::io::pipe().unwrap();
@@ -2583,8 +2591,8 @@ fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) 
     (out.status.code(), text(&out.stderr))
 }
 
-/// `opal <args>` in `env`'s folder with stdout and stderr on one pipe whose reader has gone before
-/// the command starts (`opal status 2>&1 | true`): its exit code.
+/// `opalro <args>` in `env`'s folder with stdout and stderr on one pipe whose reader has gone before
+/// the command starts (`opalro status 2>&1 | true`): its exit code.
 fn with_both_readers_gone(env: &support::Env, args: &[&str]) -> Option<i32> {
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
@@ -2601,7 +2609,7 @@ fn with_both_readers_gone(env: &support::Env, args: &[&str]) -> Option<i32> {
 #[test]
 fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2612,7 +2620,7 @@ fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
     for args in [&["status"][..], &["status", "--json"], &["save", "Add a"]] {
         assert_eq!(with_both_readers_gone(&env, args), Some(0), "{args:?}");
     }
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     assert!(text(&history.stdout).contains("Add a"));
 }
 
@@ -2620,19 +2628,19 @@ fn a_command_with_warnings_ends_quietly_when_stderr_shares_the_gone_reader() {
 #[test]
 fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_stderr() {
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = support::main_tip(&env).to_hex();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
-    env.opal().args(["save", "Two files"]).assert().success();
+    env.opalro().args(["save", "Two files"]).assert().success();
     // A goto stopped after removing a.txt, then a.txt written again.
     let stopped = env
-        .opal()
+        .opalro()
         .args(["goto", &first])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
@@ -2666,20 +2674,20 @@ fn a_failed_json_command_whose_reader_has_gone_tells_its_error_and_warnings_on_s
 #[test]
 fn a_json_listing_tells_the_error_it_ended_with_when_stdout_loses_the_end() {
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
-    env.opal().args(["save", "Two files"]).assert().success();
+    env.opalro().args(["save", "Two files"]).assert().success();
     let top = support::top_folder(env.root());
     let b = top.entries().iter().find(|e| e.name == "b.txt").unwrap().id;
     rot(env.root(), &b);
     env.overwrite("a.txt", "A\n");
     env.overwrite("b.txt", "B\n");
     // a.txt is listed, then b.txt's saved copy can't be read, and the document ends with that.
-    let out = env.opal().args(["changes", "--json"]).output().unwrap();
+    let out = env.opalro().args(["changes", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["changes"].as_array().unwrap().len(), 1, "{doc}");
@@ -2738,7 +2746,7 @@ fn every_command_ends_quietly_when_its_reader_has_gone() {
 }
 
 /// A project at its first save with one planted after it holding a link that leads out of the
-/// project, which `opal goto` writes as a plain file and warns about; that save's ID.
+/// project, which `opalro goto` writes as a plain file and warns about; that save's ID.
 fn warned_about() -> (support::Env, String) {
     let link = ("out", EntryKind::Symlink, b"../outside" as &[u8]);
     let (env, ids) = support::planted_saves(&[&[link]]);
@@ -2785,7 +2793,7 @@ fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
     assert!(
         after.ends_with(
             "\nhint: The command did its work all the same: only what Opalro printed was lost. \
-             opal status and opal undo --list show where the project stands.\n"
+             opalro status and opalro undo --list show where the project stands.\n"
         ),
         "{said}"
     );
@@ -2796,20 +2804,20 @@ fn a_commands_warnings_come_before_the_error_when_stdout_fails() {
 #[test]
 fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = support::main_tip(&env).to_hex();
     env.overwrite("a.txt", "a\n");
     env.overwrite("b.txt", "b\n");
-    env.opal().args(["save", "Two files"]).assert().success();
+    env.opalro().args(["save", "Two files"]).assert().success();
     // A goto stopped after its first change. The next one finishes it first and says so, in its
     // own warnings and in the store's, which a failure tells too.
     let stopped = env
-        .opal()
+        .opalro()
         .args(["goto", &first])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(stopped.status.code(), Some(1), "{}", text(&stopped.stderr));
@@ -2829,7 +2837,7 @@ fn a_warning_the_store_keeps_is_told_once_when_stdout_fails() {
 #[test]
 fn a_command_that_did_its_work_but_couldnt_print_says_so() {
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -2849,12 +2857,12 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
     assert!(
         said.ends_with(
             "\nhint: The command did its work all the same: only what Opalro printed was lost. \
-             opal status and opal undo --list show where the project stands.\n"
+             opalro status and opalro undo --list show where the project stands.\n"
         ),
         "{said}"
     );
     // It did: the save is made.
-    let history = env.opal().arg("history").output().unwrap();
+    let history = env.opalro().arg("history").output().unwrap();
     assert!(text(&history.stdout).contains("Add a"));
 }
 
@@ -2879,14 +2887,14 @@ const COMMANDS: [(&str, &[&str]); 17] = [
     ("verify", &[]),
 ];
 
-/// `opal <args>` in an empty folder: its exit code, stdout and stderr.
+/// `opalro <args>` in an empty folder: its exit code, stdout and stderr.
 fn opal_says(args: &[&str]) -> (Option<i32>, String, String) {
     let env = Env::new();
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     (out.status.code(), text(&out.stdout), text(&out.stderr))
 }
 
-/// What `opal help <command>` prints, which must work.
+/// What `opalro help <command>` prints, which must work.
 fn help_of(command: &str) -> String {
     let (code, shown, said) = opal_says(&["help", command]);
     assert_eq!(code, Some(0), "{command}: {said}");
@@ -2911,13 +2919,14 @@ fn opal_alone_help_and_dash_dash_help_print_the_overview() {
     assert!(
         overview.starts_with(
             "Opalro keeps every version of your project: code and big files together.\n\nUsage: \
-             opal <command> [options]\n\nEvery day\n"
+             opalro <command> [options]\n\nEvery day\n"
         ),
         "{overview}"
     );
     assert!(
-        overview
-            .ends_with("\n\nHelp on one command: opal help <command>    Version: opal --version\n"),
+        overview.ends_with(
+            "\n\nHelp on one command: opalro help <command>    Version: opalro --version\n"
+        ),
         "{overview}"
     );
     for args in [&["--help"][..], &["-h"], &["--json", "help"]] {
@@ -3003,7 +3012,10 @@ fn each_commands_help_leads_with_examples_then_usage_then_options() {
             "{command}"
         );
         let lines: Vec<&str> = help.lines().collect();
-        assert!(lines[0].starts_with(&format!("opal {command}: ")), "{help}");
+        assert!(
+            lines[0].starts_with(&format!("opalro {command}: ")),
+            "{help}"
+        );
         assert_eq!(&lines[1..3], ["", "Examples"], "{help}");
         let titles: Vec<&str> = lines
             .iter()
@@ -3016,11 +3028,11 @@ fn each_commands_help_leads_with_examples_then_usage_then_options() {
             "{help}"
         );
         for example in section(&help, "Examples") {
-            assert!(example.starts_with(&format!("opal {command}")), "{help}");
+            assert!(example.starts_with(&format!("opalro {command}")), "{help}");
         }
         assert_eq!(section(&help, "Usage").len(), 1, "{help}");
         assert!(
-            section(&help, "Usage")[0].starts_with(&format!("opal {command} ")),
+            section(&help, "Usage")[0].starts_with(&format!("opalro {command} ")),
             "{help}"
         );
         assert!(!help.ends_with("\n\n"), "{help}");
@@ -3072,18 +3084,18 @@ fn help_on_help_shows_the_overview() {
 fn the_undo_page_is_exactly_this() {
     assert_eq!(
         help_of("undo"),
-        "opal undo: take back the last step, or the last N, one at a time: the lines, where you \
+        "opalro undo: take back the last step, or the last N, one at a time: the lines, where you \
          are and what the step did to your files go back as they were\n\
          \n\
          Examples\n\
-         opal undo                Take back your last step\n\
-         opal undo 3              Take back the last three steps\n\
-         opal undo --shelve       Set unsaved changes in the way aside first\n\
-         opal undo --list         List the steps you can take back or bring back\n\
-         opal undo --to 3f9a2c7e  Make things as they were after this entry\n\
+         opalro undo                Take back your last step\n\
+         opalro undo 3              Take back the last three steps\n\
+         opalro undo --shelve       Set unsaved changes in the way aside first\n\
+         opalro undo --list         List the steps you can take back or bring back\n\
+         opalro undo --to 3f9a2c7e  Make things as they were after this entry\n\
          \n\
          Usage\n\
-         opal undo [OPTIONS] [N]\n\
+         opalro undo [OPTIONS] [N]\n\
          \n\
          Arguments\n\
          [N]  How many steps [default: 1]\n\
@@ -3095,7 +3107,7 @@ fn the_undo_page_is_exactly_this() {
          --list        List the steps redo can bring back and undo can take, numbered for N\n    \
          --all         With --list: every entry of the diary, undos and redos included\n    \
          --to <ENTRY>  Make things as they were right after this diary entry, named by at least \
-         8 hex digits of its ID, as opal undo --list shows them\n\
+         8 hex digits of its ID, as opalro undo --list shows them\n\
          -h, --help        Print help\n"
     );
 }

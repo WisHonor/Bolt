@@ -67,11 +67,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install hyperfine
         run: cargo install --locked hyperfine --version 1.20.0
-      - name: Build opal
+      - name: Build opalro
         run: cargo build --release -p opal-vcs
       - name: Versions
         run: |
-          echo "opal at $GITHUB_SHA"
+          echo "opalro at $GITHUB_SHA"
           git --version && git lfs version && hyperfine --version && jq --version && openssl version
       - name: Fetch the code project and Godot's demos
         run: |
@@ -79,7 +79,7 @@ jobs:
           bash bench/data.sh godot "$BENCH_DATA/godot"
       - name: Speeds of the parts, and what compressing again would save
         run: |
-          export OPAL_BENCH_CODE=$BENCH_DATA/code OPAL_BENCH_GODOT=$BENCH_DATA/godot
+          export OPALRO_BENCH_CODE=$BENCH_DATA/code OPALRO_BENCH_GODOT=$BENCH_DATA/godot
           cargo test --release -p opal-vcs-core --test throughput -- --ignored --nocapture --test-threads=1 2>&1 | tee throughput.txt
           # A name that matches no test passes too, so the tests must have run.
           grep -q "test result: ok. 2 passed" throughput.txt
@@ -97,7 +97,7 @@ jobs:
           path: ${{ env.BENCH_RESULTS }}
           if-no-files-found: ignore
 
-  # Imports git/git with main's opal and this commit's in turn, three times each on the same
+  # Imports git/git with main's opalro and this commit's in turn, three times each on the same
   # machine, with each one's time and peak memory, and the first save after each import.
   import-git:
     if: "!startsWith(github.ref, 'refs/heads/redteam/')"
@@ -125,8 +125,8 @@ jobs:
           echo "main at $(git -C main-build rev-parse HEAD), this branch at $GITHUB_SHA"
       - name: Clone git/git with its whole history
         run: git clone --quiet https://github.com/git/git "$RUNNER_TEMP/git"
-      - name: Import it with each opal in turn
-        run: bash bench/run.sh import "$RUNNER_TEMP/git" "$PWD/main-build/target/release/opal" "$PWD/target/release/opal"
+      - name: Import it with each opalro in turn
+        run: bash bench/run.sh import "$RUNNER_TEMP/git" "$PWD/main-build/target/release/opalro" "$PWD/target/release/opalro"
 
   # The red team's RT4-1 repository: 100 commits sharing a 1 MB message, each stored whole in Opalro
   # since records aren't chunked. Attack code, so it runs only on redteam/ branches. The test's

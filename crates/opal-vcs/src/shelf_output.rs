@@ -1,4 +1,4 @@
-//! What `opal shelf`, `opal shelf --list` and `opal unshelf` show people.
+//! What `opalro shelf`, `opalro shelf --list` and `opalro unshelf` show people.
 
 use opal_core::shelf::{ShelfInfo, ShelfOutcome, UnshelfOutcome};
 use opal_core::text::{escape, thousands};
@@ -6,7 +6,7 @@ use opal_core::text::{escape, thousands};
 use crate::output::{self, counted, relative_time};
 use crate::style::{self, Role};
 
-/// What `opal shelf` set aside, and on which shelf.
+/// What `opalro shelf` set aside, and on which shelf.
 pub fn shelved(made: &ShelfOutcome) -> String {
     let what = match made.files {
         0 => String::new(),
@@ -19,7 +19,7 @@ pub fn shelved(made: &ShelfOutcome) -> String {
     )
 }
 
-/// What `opal unshelf` brought back; `title` is the shelf's message, quoted, if it could be read.
+/// What `opalro unshelf` brought back; `title` is the shelf's message, quoted, if it could be read.
 pub fn unshelved(done: &UnshelfOutcome, title: &str) -> String {
     let (written, removed) = (done.applied.written, done.applied.removed);
     let what = match (written, removed) {
@@ -47,12 +47,12 @@ pub fn unshelved(done: &UnshelfOutcome, title: &str) -> String {
     text
 }
 
-/// The shelves, newest first, in columns: the number `opal unshelf` takes, the message's first
+/// The shelves, newest first, in columns: the number `opalro unshelf` takes, the message's first
 /// line, then how many files, when, and where it was made. On a terminal the message is cut at
 /// its end to fit.
 pub fn listed(list: &[ShelfInfo], now_ms: i64) -> String {
     if list.is_empty() {
-        return "No shelves: opal shelf sets your unsaved changes aside on one.\n".to_owned();
+        return "No shelves: opalro shelf sets your unsaved changes aside on one.\n".to_owned();
     }
     let s = style::out();
     let rows: Vec<[String; 5]> = list

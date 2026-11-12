@@ -4,23 +4,23 @@ What is known not to work, or not to work well yet, and what to do about each. T
 
 ## Not there yet: a server, merging, locking, repair, export to Git
 
-Opalro 0.1 is for one person on one computer. It can't share a project, combine two lines (a line is Opalro's word for a branch), lock files for a team, or repair a damaged project: `opal verify` finds damage but can't fix it. It can bring in a Git repository, but can't yet turn a project back into one; the import never changes the Git repository, so you can carry on in Git.
+Opalro 0.1 is for one person on one computer. It can't share a project, combine two lines (a line is Opalro's word for a branch), lock files for a team, or repair a damaged project: `opalro verify` finds damage but can't fix it. It can bring in a Git repository, but can't yet turn a project back into one; the import never changes the Git repository, so you can carry on in Git.
 
-**What to do:** keep another copy of anything that matters, such as a copy of the whole project folder, `.opal` included. If `opal verify` reports damage, go back to that copy, and please tell us.
+**What to do:** keep another copy of anything that matters, such as a copy of the whole project folder, `.opalro` included. If `opalro verify` reports damage, go back to that copy, and please tell us.
 
 ## Going back to another save is slower than Git on Linux
 
-`opal goto` takes about twice Git's time on Linux, sometimes more (1.8 to 2.7 times in GitHub's runs). Opalro's own bar is twice Git's time. In this version `goto` is held to three and a half times Git's time instead; getting back within twice is a goal for v0.2.
+`opalro goto` takes about twice Git's time on Linux, sometimes more (1.8 to 2.7 times in GitHub's runs). Opalro's own bar is twice Git's time. In this version `goto` is held to three and a half times Git's time instead; getting back within twice is a goal for v0.2.
 
 **What to do:** nothing; it is only slower.
 
 ## Files another program has open, on Windows
 
-On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opal goto`, `opal discard`, `opal shelf`, `opal unshelf`, `opal undo`, `opal redo` and `opal setup --preset`) write everything else, name the file, and stop.
+On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opalro goto`, `opalro discard`, `opalro shelf`, `opalro unshelf`, `opalro undo`, `opalro redo` and `opalro setup --preset`) write everything else, name the file, and stop.
 
-`opal save` stops too, when the program doesn't let others read the file (Opalro says "Can't read" and the file's name), or writes to it while Opalro reads it (Opalro says it "changed while Opalro was reading it").
+`opalro save` stops too, when the program doesn't let others read the file (Opalro says "Can't read" and the file's name), or writes to it while Opalro reads it (Opalro says it "changed while Opalro was reading it").
 
-**What to do:** close that program. After an `opal save`, save again; after any other command, run any command that changes the project, and it finishes what was left.
+**What to do:** close that program. After an `opalro save`, save again; after any other command, run any command that changes the project, and it finishes what was left.
 
 ## Windows and macOS warn about Opalro
 
@@ -30,7 +30,7 @@ The programs aren't signed yet, so either system may warn the first time Opalro 
 
 ## Online-only files of sync tools other than OneDrive
 
-Opalro works in a OneDrive folder. Other sync tools may show Opalro a placeholder, a file kept online with nothing on your disk yet. Opalro can't read one, so `opal save` and `opal status` stop at it.
+Opalro works in a OneDrive folder. Other sync tools may show Opalro a placeholder, a file kept online with nothing on your disk yet. Opalro can't read one, so `opalro save` and `opalro status` stop at it.
 
 **What to do:** make the project's files available offline in the sync tool (often "Always keep on this device" or "Make available offline"), then run the command again.
 

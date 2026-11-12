@@ -8,7 +8,7 @@ mod support;
 #[cfg(target_os = "linux")]
 use support::{Env, text};
 
-/// The bytes `opal <args>` read (`rchar`) in `env`, which the shell that waited for it counts;
+/// The bytes `opalro <args>` read (`rchar`) in `env`, which the shell that waited for it counts;
 /// "failed" if it did.
 #[cfg(target_os = "linux")]
 fn reads(env: &Env, args: &str) -> String {
@@ -17,11 +17,11 @@ fn reads(env: &Env, args: &str) -> String {
         .arg(format!(
             "\"$0\" {args} >/dev/null 2>&1 || echo failed; grep rchar /proc/$$/io"
         ))
-        .arg(assert_cmd::cargo::cargo_bin("opal"))
+        .arg(assert_cmd::cargo::cargo_bin("opalro"))
         .current_dir(env.root())
-        .env("OPAL_USER_NAME", "Test")
-        .env("OPAL_USER_EMAIL", "test@example.com")
-        .env("OPAL_CONFIG_DIR", env.config())
+        .env("OPALRO_USER_NAME", "Test")
+        .env("OPALRO_USER_EMAIL", "test@example.com")
+        .env("OPALRO_CONFIG_DIR", env.config())
         .env("HOME", env.config());
     text(&cmd.output().unwrap().stdout)
 }
@@ -37,17 +37,17 @@ fn rchar(said: &str) -> u64 {
         .unwrap()
 }
 
-/// The bytes `opal discard` read (`rchar`) in `env`, checked to have written `whole` to `big`.
+/// The bytes `opalro discard` read (`rchar`) in `env`, checked to have written `whole` to `big`.
 #[cfg(target_os = "linux")]
 fn discard_reads(env: &Env, whole: &[u8]) -> u64 {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg("\"$0\" discard >/dev/null 2>&1 || echo failed; grep rchar /proc/$$/io")
-        .arg(assert_cmd::cargo::cargo_bin("opal"))
+        .arg(assert_cmd::cargo::cargo_bin("opalro"))
         .current_dir(env.root())
-        .env("OPAL_USER_NAME", "Test")
-        .env("OPAL_USER_EMAIL", "test@example.com")
-        .env("OPAL_CONFIG_DIR", env.config())
+        .env("OPALRO_USER_NAME", "Test")
+        .env("OPALRO_USER_EMAIL", "test@example.com")
+        .env("OPALRO_CONFIG_DIR", env.config())
         .env("HOME", env.config());
     let said = text(&cmd.output().unwrap().stdout);
     assert!(!said.contains("failed"), "{said}");
@@ -74,7 +74,7 @@ fn rt13_1_small_reads_in_pairs_cost_small_reads() {
     // Columns of pairs, each over 64 KiB, so the next pair is always in another block.
     const COLUMNS: usize = 15;
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();

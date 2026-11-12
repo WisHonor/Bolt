@@ -1,4 +1,4 @@
-//! `opal start`'s preset, and `opal setup`: the project's rules shown, and a preset switched.
+//! `opalro start`'s preset, and `opalro setup`: the project's rules shown, and a preset switched.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -9,9 +9,9 @@ use opal_core::presets::{self, Found, Language, Preset};
 mod support;
 use support::{Env, Files, files, head, text};
 
-/// Runs `opal` with `args` and gives the exit code, stdout and stderr.
+/// Runs `opalro` with `args` and gives the exit code, stdout and stderr.
 fn run(env: &Env, args: &[&str]) -> (Option<i32>, String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     (out.status.code(), text(&out.stdout), text(&out.stderr))
 }
 
@@ -27,7 +27,7 @@ fn json(env: &Env, args: &[&str]) -> (Option<i32>, serde_json::Value) {
     (code, doc)
 }
 
-/// What one of `presets.json`'s vectors gives: its `opal.toml` and `.opalignore` block.
+/// What one of `presets.json`'s vectors gives: its `opalro.toml` and `.opalroignore` block.
 fn vector(name: &str) -> (String, String) {
     let all: serde_json::Value = serde_json::from_str(include_str!(
         "../../opal-vcs-core/tests/vectors/presets.json"
@@ -41,7 +41,7 @@ fn vector(name: &str) -> (String, String) {
         .unwrap();
     (
         v["opal_toml"].as_str().unwrap().to_owned(),
-        v["opalignore_block"].as_str().unwrap().to_owned(),
+        v["opalroignore_block"].as_str().unwrap().to_owned(),
     )
 }
 
@@ -59,7 +59,7 @@ fn unity_folder() -> Env {
 }
 
 fn is_project(dir: &Path) -> bool {
-    dir.join(".opal").exists()
+    dir.join(".opalro").exists()
 }
 
 fn command_of_head(env: &Env) -> String {
@@ -85,9 +85,9 @@ fn start_without_a_terminal_needs_a_preset_and_names_the_flag() {
 fn start_with_json_never_asks() {
     let env = unity_folder();
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "start"])
-        .env("OPAL_FAKE_TERMINAL", "80")
+        .env("OPALRO_FAKE_TERMINAL", "80")
         .write_stdin("2\n")
         .output()
         .unwrap();
@@ -118,11 +118,11 @@ fn start_preset_game_in_a_unity_folder_writes_unitys_rules() {
     let said = ok(&env, &["start", "--preset", "game"]);
     let (toml, block) = vector("game-unity");
     assert_eq!(
-        fs::read_to_string(env.root().join("opal.toml")).unwrap(),
+        fs::read_to_string(env.root().join("opalro.toml")).unwrap(),
         toml
     );
     assert_eq!(
-        fs::read_to_string(env.root().join(".opalignore")).unwrap(),
+        fs::read_to_string(env.root().join(".opalroignore")).unwrap(),
         block
     );
     assert_eq!(command_of_head(&env), "setup", "{said}");
@@ -140,11 +140,11 @@ fn start_preset_code_writes_the_lists_of_the_languages_found() {
         languages: vec![Language::Node, Language::Rust],
     };
     assert_eq!(
-        fs::read_to_string(env.root().join(".opalignore")).unwrap(),
-        presets::opalignore_block(Preset::Code, &found).unwrap()
+        fs::read_to_string(env.root().join(".opalroignore")).unwrap(),
+        presets::opalroignore_block(Preset::Code, &found).unwrap()
     );
     assert_eq!(
-        fs::read_to_string(env.root().join("opal.toml")).unwrap(),
+        fs::read_to_string(env.root().join("opalro.toml")).unwrap(),
         presets::opal_toml(Preset::Code, &found).unwrap()
     );
     assert_eq!(
@@ -153,7 +153,7 @@ fn start_preset_code_writes_the_lists_of_the_languages_found() {
     );
     assert_eq!(
         doc["rules_written"],
-        serde_json::json!(["opal.toml", ".opalignore"])
+        serde_json::json!(["opalro.toml", ".opalroignore"])
     );
 }
 
@@ -162,14 +162,17 @@ fn start_says_what_the_rules_are_in_words() {
     let env = unity_folder();
     let said = ok(&env, &["start", "--preset", "game"]);
     let lines: Vec<&str> = said.lines().collect();
-    assert!(lines[0].starts_with("Started an Opalro project in "), "{said}");
+    assert!(
+        lines[0].starts_with("Started an Opalro project in "),
+        "{said}"
+    );
     assert_eq!(lines[1], "", "{said}");
     assert_eq!(lines[2], "Using Game settings (Unity):", "{said}");
     for words in [
         "    * Files of 1 MiB or more are stored in chunks, so a changed part is stored once",
         "    * Unity's Library/, Temp/, Logs/ and other generated files are left out",
         "    * A save that adds over 1 GiB or 10,000 new files asks first",
-        "    The rules are in opal.toml and .opalignore. See them any time with: opal setup",
+        "    The rules are in opalro.toml and .opalroignore. See them any time with: opalro setup",
     ] {
         assert!(lines.contains(&words), "{words}\n{said}");
     }
@@ -186,14 +189,14 @@ fn start_says_what_the_rules_are_in_words() {
     let env = Env::empty();
     let said = ok(&env, &["start", "--preset", "custom"]);
     assert!(said.contains("Using Custom settings"), "{said}");
-    assert!(!said.contains("The rules are in opal.toml"), "{said}");
+    assert!(!said.contains("The rules are in opalro.toml"), "{said}");
 }
 
 #[test]
 fn undo_after_a_start_gives_the_folder_back() {
     let env = Env::empty();
     fs::write(env.root().join("Cargo.toml"), "[package]\n").unwrap();
-    fs::write(env.root().join(".opalignore"), "mine/\n").unwrap();
+    fs::write(env.root().join(".opalroignore"), "mine/\n").unwrap();
     let before = files(env.root());
     ok(&env, &["start", "--preset", "code"]);
     assert_ne!(files(env.root()), before);
@@ -206,7 +209,7 @@ fn undo_after_a_start_gives_the_folder_back() {
 fn a_folder_with_its_own_rules_file_keeps_it_and_is_asked_nothing() {
     let env = unity_folder();
     let own = "preset = \"team\"\nchunk-files-over = \"4 MiB\"\n";
-    fs::write(env.root().join("opal.toml"), own).unwrap();
+    fs::write(env.root().join("opalro.toml"), own).unwrap();
     let before = files(env.root());
     let (code, doc) = json(&env, &["start"]);
     assert_eq!(code, Some(0), "{doc}");
@@ -217,9 +220,9 @@ fn a_folder_with_its_own_rules_file_keeps_it_and_is_asked_nothing() {
     assert_eq!(command_of_head(&env), "start");
     // For people it says the rules stay, in words.
     let env = Env::empty();
-    fs::write(env.root().join("opal.toml"), own).unwrap();
+    fs::write(env.root().join("opalro.toml"), own).unwrap();
     let said = ok(&env, &["start"]);
-    assert!(said.contains("opal.toml"), "{said}");
+    assert!(said.contains("opalro.toml"), "{said}");
     assert!(said.contains("stay"), "{said}");
     assert!(said.contains("Files of 4 MiB or more"), "{said}");
 }
@@ -227,15 +230,15 @@ fn a_folder_with_its_own_rules_file_keeps_it_and_is_asked_nothing() {
 #[test]
 fn preset_with_a_rules_file_already_there_is_refused_before_anything_is_made() {
     let env = Env::empty();
-    fs::write(env.root().join("opal.toml"), "preset = \"code\"\n").unwrap();
+    fs::write(env.root().join("opalro.toml"), "preset = \"code\"\n").unwrap();
     let (code, out, err) = run(&env, &["start", "--preset", "game"]);
     assert_eq!(code, Some(1), "{err}");
     assert!(out.is_empty());
     assert!(!is_project(env.root()));
-    assert!(err.contains("opal setup --preset"), "{err}");
+    assert!(err.contains("opalro setup --preset"), "{err}");
     // A folder by that name counts too.
     let env = Env::empty();
-    fs::create_dir(env.root().join("opal.toml")).unwrap();
+    fs::create_dir(env.root().join("opalro.toml")).unwrap();
     let (code, _, err) = run(&env, &["start", "--preset", "code"]);
     assert_eq!(code, Some(1), "{err}");
     assert!(!is_project(env.root()));
@@ -245,7 +248,7 @@ fn preset_with_a_rules_file_already_there_is_refused_before_anything_is_made() {
 fn a_start_whose_rule_files_cant_be_written_says_how_to_write_them() {
     for json in [false, true] {
         let env = Env::empty();
-        fs::create_dir(env.root().join(".opalignore")).unwrap();
+        fs::create_dir(env.root().join(".opalroignore")).unwrap();
         let args: &[&str] = if json {
             &["--json", "start", "--preset", "code"]
         } else {
@@ -255,17 +258,17 @@ fn a_start_whose_rule_files_cant_be_written_says_how_to_write_them() {
         assert_eq!(code, Some(1), "{err}");
         // The project is there, with no rule files yet.
         assert!(is_project(env.root()));
-        assert!(!env.root().join("opal.toml").exists());
+        assert!(!env.root().join("opalro.toml").exists());
         assert_eq!(command_of_head(&env), "start");
         if json {
             let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
             assert_eq!(doc["preset"], "code");
             assert_eq!(doc["rules_written"], serde_json::json!([]));
             let hint = doc["error"]["hint"].as_str().unwrap();
-            assert!(hint.contains("opal setup --preset code"), "{hint}");
+            assert!(hint.contains("opalro setup --preset code"), "{hint}");
         } else {
             assert!(err.contains("The project was started"), "{err}");
-            assert!(err.contains("opal setup --preset code"), "{err}");
+            assert!(err.contains("opalro setup --preset code"), "{err}");
         }
     }
 }
@@ -322,14 +325,14 @@ fn setup_shows_the_rules_as_opal_reads_them() {
     ok(&env, &["start", "--preset", "game"]);
     let said = ok(&env, &["setup"]);
     let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(lines[0], "Using game settings, from opal.toml:", "{said}");
+    assert_eq!(lines[0], "Using game settings, from opalro.toml:", "{said}");
     for words in [
         "Files stored in chunks",
         "1 MiB or more",
         "over 1 GiB or 10,000 new files",
         "*.psd",
         "*.unity",
-        "lines in .opalignore",
+        "lines in .opalroignore",
     ] {
         assert!(said.contains(words), "{words}\n{said}");
     }
@@ -355,7 +358,7 @@ fn setup_without_a_rules_file_shows_opals_own_values() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
     let said = ok(&env, &["setup"]);
-    assert!(said.starts_with("No opal.toml here"), "{said}");
+    assert!(said.starts_with("No opalro.toml here"), "{said}");
     assert!(said.contains("Opalro's own values"), "{said}");
     assert!(said.contains("over 100 MB or 10,000 new files"), "{said}");
     let (_, doc) = json(&env, &["setup"]);
@@ -370,20 +373,20 @@ fn setup_without_a_rules_file_shows_opals_own_values() {
 fn setup_shows_what_in_the_rules_file_was_passed_over() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
-    fs::write(env.root().join("opal.toml"), "colour = \"blue\"\n").unwrap();
+    fs::write(env.root().join("opalro.toml"), "colour = \"blue\"\n").unwrap();
     let (code, _, err) = run(&env, &["setup"]);
     assert_eq!(code, Some(0));
     assert!(err.starts_with("warning: "), "{err}");
     assert!(err.contains("colour"), "{err}");
     let (_, doc) = json(&env, &["setup"]);
     assert_eq!(doc["warnings"][0]["kind"], "rules_ignored");
-    fs::write(env.root().join("opal.toml"), "not toml [").unwrap();
+    fs::write(env.root().join("opalro.toml"), "not toml [").unwrap();
     let (_, doc) = json(&env, &["setup"]);
     assert_eq!(doc["has_rules_file"], false);
     assert_eq!(doc["warnings"][0]["kind"], "rules_file_skipped");
     let said = ok(&env, &["setup"]);
     assert!(
-        said.starts_with("opal.toml couldn't be used, so Opalro's own values apply:"),
+        said.starts_with("opalro.toml couldn't be used, so Opalro's own values apply:"),
         "{said}"
     );
 }
@@ -392,10 +395,10 @@ fn setup_shows_what_in_the_rules_file_was_passed_over() {
 #[test]
 fn a_start_without_its_rule_files_tells_its_warnings_before_the_error() {
     let env = Env::empty();
-    fs::create_dir(env.root().join(".opalignore")).unwrap();
+    fs::create_dir(env.root().join(".opalroignore")).unwrap();
     let out = env
-        .opal()
-        .env("OPAL_FAULT_FAIL", "start:read-back")
+        .opalro()
+        .env("OPALRO_FAULT_FAIL", "start:read-back")
         .args(["start", "--preset", "code"])
         .output()
         .unwrap();
@@ -433,7 +436,7 @@ fn setup_preset_yes_applies_and_undo_takes_it_back() {
     assert_eq!(command_of_head(&env), "setup");
     let (toml, _) = vector("game-no-engine");
     assert_eq!(
-        fs::read_to_string(env.root().join("opal.toml")).unwrap(),
+        fs::read_to_string(env.root().join("opalro.toml")).unwrap(),
         toml
     );
     ok(&env, &["undo"]);
@@ -475,7 +478,7 @@ fn setup_json_matches_json_md() {
     insta::assert_json_snapshot!("setup_applied", applied);
 }
 
-/// A preview heads each file as `opal changes` does: kind, name, lines added and removed, size.
+/// A preview heads each file as `opalro changes` does: kind, name, lines added and removed, size.
 #[test]
 fn a_preview_heads_each_file_as_opal_changes_does() {
     let env = Env::empty();
@@ -485,7 +488,7 @@ fn a_preview_heads_each_file_as_opal_changes_does() {
     let (toml, _) = vector("code-nothing-found");
     let lines = toml.lines().count();
     let size = opal_core::text::bytes(toml.len() as u64);
-    let header = format!("\nadded  opal.toml  +{lines} -0  ({size})\n@@ -0,0 +1,{lines} @@\n");
+    let header = format!("\nadded  opalro.toml  +{lines} -0  ({size})\n@@ -0,0 +1,{lines} @@\n");
     assert!(out.contains(&header), "{out}");
     let first = toml.lines().next().unwrap();
     assert!(out.contains(&format!("@@\n+{first}\n")), "{out}");
@@ -496,7 +499,7 @@ fn a_preview_escapes_the_lines_it_shows() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
     fs::write(
-        env.root().join(".opalignore"),
+        env.root().join(".opalroignore"),
         "# >>> Opalro preset\n\x1b[31mred/\n# <<< Opalro preset\n",
     )
     .unwrap();
@@ -510,14 +513,14 @@ fn a_preview_escapes_the_lines_it_shows() {
 fn setup_refuses_a_rules_file_that_is_a_folder() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
-    fs::create_dir(env.root().join(".opalignore")).unwrap();
+    fs::create_dir(env.root().join(".opalroignore")).unwrap();
     let (code, _, err) = run(&env, &["setup", "--preset", "code", "--yes"]);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("isn't a regular file"), "{err}");
     assert!(err.contains("hint: "), "{err}");
 }
 
-/// The lines of `.opalignore` outside its first preset block, each with its own line ending.
+/// The lines of `.opalroignore` outside its first preset block, each with its own line ending.
 fn outside_the_block(file: &[u8]) -> Vec<&[u8]> {
     let mut lines = Vec::new();
     let mut inside = false;
@@ -538,17 +541,18 @@ fn outside_the_block(file: &[u8]) -> Vec<&[u8]> {
 
 #[test]
 fn line_endings_and_odd_bytes_outside_the_block_survive_a_round_trip() {
-    let block = presets::opalignore_block(Preset::Game, &Found::default()).unwrap();
+    let block = presets::opalroignore_block(Preset::Game, &Found::default()).unwrap();
     // CRLF everywhere, a block included.
-    let crlf = b"mine/\r\n*.log\r\n\r\n# >>> Opalro preset: code, version 1.\r\nold/\r\n# <<< Opalro \
+    let crlf =
+        b"mine/\r\n*.log\r\n\r\n# >>> Opalro preset: code, version 1.\r\nold/\r\n# <<< Opalro \
                  preset\r\nafter/\r\nno-end"
-        .to_vec();
+            .to_vec();
     // Bytes that aren't UTF-8, and no block.
     let odd = b"caf\xe9/\n\xff\xfe raw \x80\nlast".to_vec();
     for before in [crlf, odd] {
         let env = Env::empty();
         ok(&env, &["start", "--preset", "custom"]);
-        let path = env.root().join(".opalignore");
+        let path = env.root().join(".opalroignore");
         fs::write(&path, &before).unwrap();
         ok(&env, &["setup", "--preset", "game", "--yes"]);
         let after = fs::read(&path).unwrap();
@@ -570,7 +574,7 @@ fn the_executable_bit_of_a_rule_file_stays_through_setup_and_undo() {
     use std::os::unix::fs::PermissionsExt;
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
-    let rule_files = [("opal.toml", "# mine\n"), (".opalignore", "own/\n")];
+    let rule_files = [("opalro.toml", "# mine\n"), (".opalroignore", "own/\n")];
     for (name, bytes) in rule_files {
         let path = env.root().join(name);
         fs::write(&path, bytes).unwrap();
@@ -587,17 +591,17 @@ fn the_executable_bit_of_a_rule_file_stays_through_setup_and_undo() {
     // Rewritten, not left alone.
     let code = presets::opal_toml(Preset::Code, &Found::default()).unwrap();
     assert_eq!(
-        fs::read_to_string(env.root().join("opal.toml")).unwrap(),
+        fs::read_to_string(env.root().join("opalro.toml")).unwrap(),
         code
     );
-    assert!(executable("opal.toml") && executable(".opalignore"));
+    assert!(executable("opalro.toml") && executable(".opalroignore"));
     ok(&env, &["undo"]);
     for (name, bytes) in rule_files {
         assert_eq!(fs::read_to_string(env.root().join(name)).unwrap(), bytes);
         assert!(executable(name), "{name}");
     }
     ok(&env, &["redo"]);
-    assert!(executable("opal.toml") && executable(".opalignore"));
+    assert!(executable("opalro.toml") && executable(".opalroignore"));
 }
 
 #[test]
@@ -614,14 +618,14 @@ fn a_hostile_preset_label_is_shown_escaped_and_bounded() {
     ok(&env, &["start", "--preset", "custom"]);
     for label in [short.to_owned(), long] {
         let file = format!("preset = \"{}\"\n", in_toml(&label));
-        fs::write(env.root().join("opal.toml"), file).unwrap();
+        fs::write(env.root().join("opalro.toml"), file).unwrap();
         let (code, out, err) = run(&env, &["setup"]);
         assert_eq!(code, Some(0), "{err}");
         support::assert_escaped(&out, "setup");
         support::assert_escaped(&err, "setup's warnings");
         assert!(out.len() + err.len() < 2_000, "{out}{err}");
         let out_bytes = env
-            .opal()
+            .opalro()
             .args(["--json", "setup"])
             .output()
             .unwrap()
@@ -637,7 +641,7 @@ fn a_hostile_preset_label_is_shown_escaped_and_bounded() {
             assert_eq!(doc["preset"], short);
         } else {
             // Longer than 64 bytes: passed over, named but not shown.
-            assert!(out.starts_with("Using the rules in opal.toml:"), "{out}");
+            assert!(out.starts_with("Using the rules in opalro.toml:"), "{out}");
             assert!(err.contains("preset: it is longer than 64 bytes"), "{err}");
             assert!(!err.contains("xxxxx"), "{err}");
             assert_eq!(doc["preset"], serde_json::Value::Null);
@@ -652,7 +656,7 @@ fn start_with_a_link_or_another_spelling_at_opal_toml_starts_nothing() {
     fs::write(outside.path().join("rules.toml"), "preset = \"x\"\n").unwrap();
     for to_a_file in [false, true] {
         let env = Env::empty();
-        let link = env.root().join("opal.toml");
+        let link = env.root().join("opalro.toml");
         if to_a_file {
             if !support::link_file(&outside.path().join("rules.toml"), &link) {
                 continue;
@@ -663,10 +667,13 @@ fn start_with_a_link_or_another_spelling_at_opal_toml_starts_nothing() {
         let (code, out, err) = run(&env, &["start", "--preset", "code"]);
         assert_eq!(code, Some(1), "{err}");
         assert!(out.is_empty(), "{out}");
-        assert!(err.contains("this folder already has an opal.toml"), "{err}");
+        assert!(
+            err.contains("this folder already has an opalro.toml"),
+            "{err}"
+        );
         assert!(!is_project(env.root()));
         assert!(fs::symlink_metadata(&link).is_ok());
-        assert!(!env.root().join(".opalignore").exists());
+        assert!(!env.root().join(".opalroignore").exists());
     }
     assert_eq!(
         fs::read_to_string(outside.path().join("rules.toml")).unwrap(),
@@ -678,16 +685,19 @@ fn start_with_a_link_or_another_spelling_at_opal_toml_starts_nothing() {
     );
     // Another letter case: the same name where the drive ignores case, another name elsewhere.
     let env = Env::empty();
-    fs::write(env.root().join("Opal.toml"), "# mine\n").unwrap();
-    let ignores_case = env.root().join("opal.toml").exists();
+    fs::write(env.root().join("Opalro.toml"), "# mine\n").unwrap();
+    let ignores_case = env.root().join("opalro.toml").exists();
     let (code, _, err) = run(&env, &["start", "--preset", "code"]);
     assert_eq!(
-        fs::read_to_string(env.root().join("Opal.toml")).unwrap(),
+        fs::read_to_string(env.root().join("Opalro.toml")).unwrap(),
         "# mine\n"
     );
     if ignores_case {
         assert_eq!(code, Some(1), "{err}");
-        assert!(err.contains("this folder already has an opal.toml"), "{err}");
+        assert!(
+            err.contains("this folder already has an opalro.toml"),
+            "{err}"
+        );
         assert!(!is_project(env.root()));
     } else {
         assert_eq!(code, Some(0), "{err}");
@@ -698,15 +708,15 @@ fn start_with_a_link_or_another_spelling_at_opal_toml_starts_nothing() {
 mod on_a_terminal {
     use super::*;
 
-    /// `opal` in the project's folder as if at a terminal 80 columns wide, plain, with `input`
+    /// `opalro` in the project's folder as if at a terminal 80 columns wide, plain, with `input`
     /// typed in.
     fn asked(env: &Env, args: &[&str], input: &str) -> (Option<i32>, String, String) {
         let out = env
-            .opal()
+            .opalro()
             .args(args)
-            .env("OPAL_FAKE_TERMINAL", "80")
-            .env("OPAL_PROGRESS_QUIET_MS", "600000")
-            .env("OPAL_ASCII", "1")
+            .env("OPALRO_FAKE_TERMINAL", "80")
+            .env("OPALRO_PROGRESS_QUIET_MS", "600000")
+            .env("OPALRO_ASCII", "1")
             .env("NO_COLOR", "1")
             .write_stdin(input)
             .output()
@@ -790,7 +800,7 @@ mod on_a_terminal {
     #[test]
     fn a_folder_with_a_rules_file_is_asked_nothing() {
         let env = Env::empty();
-        fs::write(env.root().join("opal.toml"), "preset = \"code\"\n").unwrap();
+        fs::write(env.root().join("opalro.toml"), "preset = \"code\"\n").unwrap();
         let (code, _, err) = asked(&env, &["start"], "");
         assert_eq!(code, Some(0), "{err}");
         assert!(!err.contains("Choice"), "{err}");
@@ -813,7 +823,7 @@ mod on_a_terminal {
         let (code, out, err) = asked(&env, &["setup", "--preset", "game"], "y\n");
         assert_eq!(code, Some(0), "{err}");
         assert!(out.contains("Switched to Game settings"), "{out}");
-        assert!(err.ends_with("Changed your mind? opal undo\n"), "{err:?}");
+        assert!(err.ends_with("Changed your mind? opalro undo\n"), "{err:?}");
         assert_eq!(command_of_head(&env), "setup");
     }
 }

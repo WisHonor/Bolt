@@ -1,4 +1,4 @@
-//! The change-ID cache, `.opal/cache/change-ids` (storage-format.md section 10): each line's
+//! The change-ID cache, `.opalro/cache/change-ids` (storage-format.md section 10): each line's
 //! saves in order, each with its change ID, so that shortening a change ID or finding a save
 //! needn't read the line. Only ever a hint: one that is missing, sealed by another key, edited or
 //! unreadable is rebuilt from the store.
@@ -468,7 +468,7 @@ mod tests {
         let state = repo.current().unwrap().1.state;
         // A list the state has no line for is left out of the file, but stays in memory.
         let mut ids = with(&[("gone", vec![save(1)]), ("main", vec![save(2)])]);
-        let file = dir.path().join(".opal/cache/change-ids");
+        let file = dir.path().join(".opalro/cache/change-ids");
         ids.store(&repo, &state);
         assert!(file.exists());
         std::fs::remove_file(&file).unwrap();
@@ -501,7 +501,7 @@ mod tests {
             shelves: vec![],
             server_lines: None,
         };
-        let file = dir.path().join(".opal/cache/change-ids");
+        let file = dir.path().join(".opalro/cache/change-ids");
         let fill = || with(&names.map(|n| (n, vec![save(1)])));
         // The magic, version, count and seal, then 51 bytes a line of one save.
         let (fixed, line) = (8 + 1 + 1 + 32, 1 + 1 + 1 + SAVE_BYTES as u64);

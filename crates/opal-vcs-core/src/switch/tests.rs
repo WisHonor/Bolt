@@ -41,7 +41,7 @@ fn write_all(dir: &Path, files: &[(&str, &[u8])]) {
     }
 }
 
-/// Every file below `dir` but `.opal`, with what it holds.
+/// Every file below `dir` but `.opalro`, with what it holds.
 fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut found = BTreeMap::new();
     let mut folders = vec![(dir.to_path_buf(), String::new())];
@@ -49,7 +49,7 @@ fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         for e in fs::read_dir(&at).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().to_string_lossy().into_owned();
-            if rel.is_empty() && name == ".opal" {
+            if rel.is_empty() && name == ".opalro" {
                 continue;
             }
             let path = if rel.is_empty() {
@@ -264,7 +264,7 @@ fn a_link_renamed_only_in_letter_case_is_left_as_it_is() {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, [".opal", "Node", "a.txt"]);
+        assert_eq!(names, [".opalro", "Node", "a.txt"]);
     } else {
         assert_eq!(done.applied.placeholders, ["node"]);
     }

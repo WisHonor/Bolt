@@ -1,5 +1,5 @@
 //! Settings: who the user is (from the environment or the user's own `config.toml`) and the
-//! `safe-folders` they trust. A project's own `.opal/config.toml` is never asked: a shared zip
+//! `safe-folders` they trust. A project's own `.opalro/config.toml` is never asked: a shared zip
 //! carries it, so a stranger could make the user's saves claim to be someone else (decision 025).
 
 use std::ffi::{OsStr, OsString};
@@ -27,7 +27,7 @@ pub struct Identity {
 }
 
 /// A settings file's path and what is wrong with it can hold text from outside Opalro (a project's
-/// `.opal/config.toml` sits in a folder with any name), so they are shown escaped.
+/// `.opalro/config.toml` sits in a folder with any name), so they are shown escaped.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("Opalro needs your name and email to record who made each save.")]
@@ -80,7 +80,7 @@ impl ConfigError {
                 escape(&path.display().to_string(), false)
             )),
             ConfigError::MissingIdentity { path: None } => Some(format!(
-                "Set OPAL_CONFIG_DIR to a folder and add this to config.toml there:\n{SNIPPET}"
+                "Set OPALRO_CONFIG_DIR to a folder and add this to config.toml there:\n{SNIPPET}"
             )),
             ConfigError::Invalid { .. } => None,
             ConfigError::NotAtTop { .. } => {
@@ -163,7 +163,7 @@ pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
 }
 
 /// The `config.toml` at `path`, or `None` if there is none. `read` reads a project's file through
-/// its held `.opal` (never following a link) and the user's with
+/// its held `.opalro` (never following a link) and the user's with
 /// `safe_fs::read_capped_following_links`.
 fn read_file(
     path: &Path,
@@ -237,12 +237,12 @@ fn from_file(
     Ok(for_folder.or_else(|| file.user.and_then(|u| both(u.name, u.email))))
 }
 
-/// `config.toml` in `OPAL_CONFIG_DIR` if set, else in the system's settings folder for Opalro.
+/// `config.toml` in `OPALRO_CONFIG_DIR` if set, else in the system's settings folder for Opalro.
 #[must_use]
 pub fn user_config_path() -> Option<PathBuf> {
-    let dir = match std::env::var_os("OPAL_CONFIG_DIR") {
+    let dir = match std::env::var_os("OPALRO_CONFIG_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => directories::ProjectDirs::from("", "", "opal")?
+        _ => directories::ProjectDirs::from("", "", "opalro")?
             .config_dir()
             .to_owned(),
     };
@@ -260,7 +260,7 @@ pub fn git_excludes_file(project_root: &Path) -> Result<Option<PathBuf>, ConfigE
     git_excludes_file_in(&UserGit::from_env(project_root))
 }
 
-/// What the user's own Git settings set that `opal import` in `top` reads: `lfs.storage`, only to
+/// What the user's own Git settings set that `opalro import` in `top` reads: `lfs.storage`, only to
 /// tell whether Git LFS keeps its files elsewhere, and `core.sparseCheckout`, which it refuses.
 pub fn git_import_settings(top: &Path) -> Result<UserImportSettings, ConfigError> {
     git_import_settings_in(&UserGit::from_env(top))
@@ -769,17 +769,17 @@ fn git_home(
 }
 
 /// The user's name and email, from the first source that names both (decision 025): the environment
-/// (`OPAL_USER_NAME`, `OPAL_USER_EMAIL`), the user's own `config.toml` (the `[[project]]` entry for
-/// `project_root`, then `[user]`). The project's own `.opal/config.toml` is never used.
+/// (`OPALRO_USER_NAME`, `OPALRO_USER_EMAIL`), the user's own `config.toml` (the `[[project]]` entry for
+/// `project_root`, then `[user]`). The project's own `.opalro/config.toml` is never used.
 pub fn load_identity(project_root: Option<&Path>) -> Result<Identity, ConfigError> {
     identity_from(identity_from_env(), user_config_path(), project_root)
 }
 
-/// The identity the environment names: `OPAL_USER_NAME` and `OPAL_USER_EMAIL`, both set. One alone
+/// The identity the environment names: `OPALRO_USER_NAME` and `OPALRO_USER_EMAIL`, both set. One alone
 /// names nobody.
 fn identity_from_env() -> Option<Identity> {
     let env = |key| std::env::var(key).ok();
-    both(env("OPAL_USER_NAME"), env("OPAL_USER_EMAIL"))
+    both(env("OPALRO_USER_NAME"), env("OPALRO_USER_EMAIL"))
 }
 
 /// `load_identity` with the places it looks in given, so that tests can choose them: the
@@ -801,23 +801,23 @@ fn identity_from(
     Err(ConfigError::MissingIdentity { path: user_config })
 }
 
-/// The identity the project's own `.opal/config.toml` names, if Opalro did not use it (it differs
+/// The identity the project's own `.opalro/config.toml` names, if Opalro did not use it (it differs
 /// from the one `load_identity` gives, which is none if that fails). Read like every file in
-/// `.opal`: through the `.opal` the project holds open, never through a link, at most 1 MiB; one
+/// `.opalro`: through the `.opalro` the project holds open, never through a link, at most 1 MiB; one
 /// that can't be read names nobody.
 #[must_use]
 pub fn ignored_project_identity(repo: &Repository) -> Option<Identity> {
     let used = load_identity(Some(repo.root())).ok();
-    let opal = repo.root().join(".opal");
-    ignored_given(repo.opal_folder(), &opal, used.as_ref())
+    let opalro = repo.root().join(".opalro");
+    ignored_given(repo.opal_folder(), &opalro, used.as_ref())
 }
 
-/// `ignored_project_identity`, given the project's `.opal` held open (at `opal`) and the identity
+/// `ignored_project_identity`, given the project's `.opalro` held open (at `opalro`) and the identity
 /// in use.
-fn ignored_given(held: &Dir, opal: &Path, used: Option<&Identity>) -> Option<Identity> {
+fn ignored_given(held: &Dir, opalro: &Path, used: Option<&Identity>) -> Option<Identity> {
     let name = OsStr::new("config.toml");
     let read = |shown: &Path, max| safe_fs::read_capped_in(held, name, shown, max);
-    let named = from_file(&opal.join(name), &read, None).ok().flatten()?;
+    let named = from_file(&opalro.join(name), &read, None).ok().flatten()?;
     (used != Some(&named)).then_some(named)
 }
 
@@ -883,10 +883,10 @@ fn note_for(
             "add this to {}:",
             escape(&path.display().to_string(), false)
         ),
-        None => "set OPAL_CONFIG_DIR to a folder and add this to config.toml there:".to_owned(),
+        None => "set OPALRO_CONFIG_DIR to a folder and add this to config.toml there:".to_owned(),
     };
     let first = if env_first {
-        "OPAL_USER_NAME and OPAL_USER_EMAIL are set, and they come before your settings, so the \
+        "OPALRO_USER_NAME and OPALRO_USER_EMAIL are set, and they come before your settings, so the \
          lines below take no effect until you unset them. "
     } else {
         ""
@@ -899,7 +899,7 @@ fn note_for(
 }
 
 /// The folders whose projects the user trusts although another account owns the folder or its
-/// `.opal`, or Opalro can't tell who does (decisions 025 to 027, T23): the `safe-folders` list in the
+/// `.opalro`, or Opalro can't tell who does (decisions 025 to 027, T23): the `safe-folders` list in the
 /// user's own `config.toml`, never a project's. Entries must be full paths, since a relative one
 /// names a different folder wherever a command runs.
 pub fn safe_folders() -> Result<Vec<PathBuf>, ConfigError> {
@@ -966,7 +966,7 @@ fn undo_window_days_in(path: &Path) -> Result<u32, ConfigError> {
 }
 
 /// What the user can do about a project Opalro may not use (another account owns the folder or its
-/// `.opal`, or Opalro can't tell who does): the line that trusts its folder `root`, and where it goes
+/// `.opalro`, or Opalro can't tell who does): the line that trusts its folder `root`, and where it goes
 /// (decisions 025 to 027). For a folder other accounts can write to, why Opalro offers none.
 #[must_use]
 pub fn trust_hint(root: &Path) -> String {
@@ -2023,17 +2023,17 @@ mod tests {
         path
     }
 
-    /// `ignored_given` for the project at `root`, its `.opal` held open as a project holds it.
+    /// `ignored_given` for the project at `root`, its `.opalro` held open as a project holds it.
     fn named_by(root: &Path, used: Option<&Identity>) -> Option<Identity> {
-        let opal = root.join(".opal");
-        std::fs::create_dir_all(&opal).unwrap();
-        ignored_given(&Dir::open_top(&opal).unwrap(), &opal, used)
+        let opalro = root.join(".opalro");
+        std::fs::create_dir_all(&opalro).unwrap();
+        ignored_given(&Dir::open_top(&opalro).unwrap(), &opalro, used)
     }
 
-    /// The `.opal/config.toml` a shared project can bring.
+    /// The `.opalro/config.toml` a shared project can bring.
     fn project_settings(root: &Path, text: &str) {
-        std::fs::create_dir_all(root.join(".opal")).unwrap();
-        std::fs::write(root.join(".opal").join("config.toml"), text).unwrap();
+        std::fs::create_dir_all(root.join(".opalro")).unwrap();
+        std::fs::write(root.join(".opalro").join("config.toml"), text).unwrap();
     }
 
     const MALLORY: &str = "[user]\nname = \"Mallory\"\nemail = \"mallory@evil.example\"\n";
@@ -2194,23 +2194,23 @@ mod tests {
         }
     }
 
-    /// The project's settings are read through its `.opal` as the project holds it open: a `.opal`
+    /// The project's settings are read through its `.opalro` as the project holds it open: a `.opalro`
     /// swapped for a link since can't bring settings from elsewhere.
     #[test]
     fn project_settings_are_read_through_the_held_opal_folder() {
         let dir = tempfile::tempdir().unwrap();
         let project = folder(dir.path(), "project");
         project_settings(&project, "");
-        let opal = project.join(".opal");
-        let held = Dir::open_top(&opal).unwrap();
+        let opalro = project.join(".opalro");
+        let held = Dir::open_top(&opalro).unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         std::fs::write(elsewhere.path().join("config.toml"), MALLORY).unwrap();
-        std::fs::rename(&opal, project.join("checked")).unwrap();
+        std::fs::rename(&opalro, project.join("checked")).unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(elsewhere.path(), &opal).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &opalro).unwrap();
         #[cfg(windows)]
-        crate::test_support::junction(&opal, elsewhere.path());
-        assert_eq!(ignored_given(&held, &opal, None), None);
+        crate::test_support::junction(&opalro, elsewhere.path());
+        assert_eq!(ignored_given(&held, &opalro, None), None);
     }
 
     #[test]
@@ -2218,7 +2218,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = folder(dir.path(), "project");
         let ada = person("Ada", "ada@example.com");
-        let path = project.join(".opal").join("config.toml");
+        let path = project.join(".opalro").join("config.toml");
         let unreadable = |what: &str| assert_eq!(named_by(&project, Some(&ada)), None, "{what}");
 
         project_settings(&project, "[user\n");
@@ -2262,11 +2262,11 @@ mod tests {
     #[test]
     fn the_note_says_what_was_ignored_and_offers_the_lines() {
         let mallory = person("Mallory", "mallory@evil.example");
-        let cfg = Path::new("/home/me/.config/opal/config.toml");
+        let cfg = Path::new("/home/me/.config/opalro/config.toml");
         let note = note_for(&mallory, Path::new("/home/me/Work"), Some(cfg), false);
         let expected = [
             MALLORY_NOTE,
-            "hint: To save as them in this project, add this to /home/me/.config/opal/config.toml:",
+            "hint: To save as them in this project, add this to /home/me/.config/opalro/config.toml:",
             "[[project]]",
             "folder = \"/home/me/Work\"",
             "name = \"Mallory\"",
@@ -2287,7 +2287,7 @@ mod tests {
             "{note}"
         );
         // With nowhere known to put them, the way to get one is said instead.
-        let hint = "hint: To save as them in this project, set OPAL_CONFIG_DIR to a folder \
+        let hint = "hint: To save as them in this project, set OPALRO_CONFIG_DIR to a folder \
                     and add this to config.toml there:\n[[project]]\n";
         assert!(note.contains(hint), "{note}");
     }
@@ -2379,11 +2379,11 @@ mod tests {
 
     #[test]
     fn the_trust_hint_offers_the_line_to_add() {
-        let cfg = Path::new("/home/me/.config/opal/config.toml");
+        let cfg = Path::new("/home/me/.config/opalro/config.toml");
         assert_eq!(
             trust_hint_for(Path::new("/srv/shared/work"), Some(cfg)),
             "If you trust it, add its folder to safe-folders at the top of \
-             /home/me/.config/opal/config.toml:\nsafe-folders = [\"/srv/shared/work\"]"
+             /home/me/.config/opalro/config.toml:\nsafe-folders = [\"/srv/shared/work\"]"
         );
         // Decision 025's form for a Windows folder; and with no known settings file, the words.
         let hint = trust_hint_for(Path::new(r"C:\Shared\Work"), None);
@@ -2446,7 +2446,7 @@ mod tests {
     #[test]
     fn the_identity_note_is_short_and_honest() {
         let root = Path::new("/home/me/Work");
-        let cfg = Path::new("/home/me/.config/opal/config.toml");
+        let cfg = Path::new("/home/me/.config/opalro/config.toml");
         // At most 256 characters of a name or an email, cut between characters (these take two
         // bytes each), then `…`. Exactly 256 are shown whole.
         let (long, whole) = ("é".repeat(300), "x".repeat(256));
@@ -2474,19 +2474,19 @@ mod tests {
         assert!(!note.contains('\u{202e}'), "{note}");
         assert_eq!(note.matches("\\u{202e}").count(), 256, "{note}");
 
-        // While OPAL_USER_NAME and OPAL_USER_EMAIL are set they come before the user's settings,
+        // While OPALRO_USER_NAME and OPALRO_USER_EMAIL are set they come before the user's settings,
         // so the lines the hint offers would change nothing.
         let mallory = person("Mallory", "mallory@evil.example");
         let plain = note_for(&mallory, root, Some(cfg), false);
         let first = note_for(&mallory, root, Some(cfg), true);
-        assert!(!plain.contains("OPAL_USER"), "{plain}");
+        assert!(!plain.contains("OPALRO_USER"), "{plain}");
         let hint = first.lines().nth(1).unwrap();
         assert!(
-            hint.starts_with("hint: OPAL_USER_NAME and OPAL_USER_EMAIL are set")
+            hint.starts_with("hint: OPALRO_USER_NAME and OPALRO_USER_EMAIL are set")
                 && hint.contains("take no effect until you unset them. To save as them"),
             "{hint}"
         );
-        assert!(hint.ends_with("add this to /home/me/.config/opal/config.toml:"));
+        assert!(hint.ends_with("add this to /home/me/.config/opalro/config.toml:"));
         assert_eq!(snippet(&first), snippet(&plain));
     }
 

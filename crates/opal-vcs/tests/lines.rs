@@ -1,4 +1,4 @@
-//! Saving away from a line, and `opal line`.
+//! Saving away from a line, and `opalro line`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::diary::Position;
@@ -11,16 +11,16 @@ use support::{Env, text};
 /// A started project with two saves on `main`, at its first save: returns that save.
 fn at_first_save() -> (Env, Id) {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     env.overwrite("a.txt", "a");
-    env.opal().args(["save", "A"]).assert().success();
+    env.opalro().args(["save", "A"]).assert().success();
     let first = env.state().1.lines["main"];
     env.overwrite("a.txt", "b");
-    env.opal().args(["save", "B"]).assert().success();
-    env.opal()
+    env.opalro().args(["save", "B"]).assert().success();
+    env.opalro()
         .args(["goto", &first.to_hex()])
         .assert()
         .success();
@@ -28,7 +28,7 @@ fn at_first_save() -> (Env, Id) {
     (env, first)
 }
 
-/// Runs `opal save args`, which must fail without changing anything; returns its error output.
+/// Runs `opalro save args`, which must fail without changing anything; returns its error output.
 fn refused_save(env: &Env, args: &[&str]) -> String {
     let before = env.standing();
     let out = env.save(args);
@@ -42,7 +42,7 @@ fn saving_at_a_save_without_a_terminal_names_the_flag() {
     let (env, first) = at_first_save();
     env.overwrite("a.txt", "c");
     let err = refused_save(&env, &["C"]);
-    assert!(err.contains("opal save --line <name>"), "{err}");
+    assert!(err.contains("opalro save --line <name>"), "{err}");
     assert_eq!(env.state().1.position, Position::AtSave(first));
 }
 
@@ -52,7 +52,7 @@ fn at_a_save_a_large_save_asks_for_the_line_name_first() {
     let huge = std::fs::File::create(env.root().join("huge.bin")).unwrap();
     huge.set_len(100_000_001).unwrap();
     let err = refused_save(&env, &["C"]);
-    assert!(err.contains("opal save --line <name>"), "{err}");
+    assert!(err.contains("opalro save --line <name>"), "{err}");
     let err = refused_save(&env, &["--line", "art", "C"]);
     assert!(err.contains("--yes"), "{err}");
 }
@@ -79,7 +79,7 @@ fn save_with_line_makes_the_line_and_moves_onto_it() {
     drop(repo);
     // Saving again stays on it.
     env.overwrite("a.txt", "d");
-    env.opal().args(["save", "D"]).assert().success();
+    env.opalro().args(["save", "D"]).assert().success();
     assert_eq!(env.state().1.position, Position::OnLine("feature/x".into()));
 }
 
@@ -99,11 +99,11 @@ fn a_line_name_taken_in_another_case_is_refused() {
     );
 }
 
-/// `opal save --json args`, which must fail without changing anything; returns its document.
+/// `opalro save --json args`, which must fail without changing anything; returns its document.
 fn refused_save_json(env: &Env, args: &[&str]) -> serde_json::Value {
     let before = env.standing();
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "--json"])
         .args(args)
         .output()
@@ -133,7 +133,7 @@ fn bad_line_names_give_an_error_document() {
     // Without a name, `--json` never asks.
     let doc = refused_save_json(&env, &["C"]);
     let hint = doc["error"]["hint"].as_str().unwrap();
-    assert!(hint.contains("opal save --line <name>"), "{doc}");
+    assert!(hint.contains("opalro save --line <name>"), "{doc}");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn save_json_with_line_gives_the_line() {
     let (env, _) = at_first_save();
     env.overwrite("a.txt", "c");
     let out = env
-        .opal()
+        .opalro()
         .args(["save", "--json", "--line", "feature", "C"])
         .output()
         .unwrap();
@@ -188,7 +188,7 @@ fn line_with_nothing_changed_says_no_line_was_made() {
 #[test]
 fn line_is_refused_on_a_line() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -205,25 +205,25 @@ fn line_lists_lines_and_server_lines() {
     env.git(&["branch", "b"]);
     env.git(&["update-ref", "refs/remotes/origin/x", "HEAD"]);
     env.import();
-    let out = env.opal().arg("line").output().unwrap();
+    let out = env.opalro().arg("line").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let name = env.root().file_name().unwrap().to_string_lossy();
     assert_eq!(
         text(&out.stdout),
         format!("Lines in {name}:\n\n  b\n> main\n  zz\n\nOn the server (origin):\n  x@origin\n")
     );
-    let out = env.opal().args(["line", "--json"]).output().unwrap();
+    let out = env.opalro().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
     assert_eq!(doc["lines"], serde_json::json!(["b", "main", "zz"]));
     assert_eq!(doc["server_lines"], serde_json::json!(["x@origin"]));
     // At a save, no line is current.
     let first = env.state().1.lines["main"];
-    env.opal()
+    env.opalro()
         .args(["goto", &first.to_hex()])
         .assert()
         .success();
-    let out = env.opal().arg("line").output().unwrap();
+    let out = env.opalro().arg("line").output().unwrap();
     assert_eq!(
         text(&out.stdout),
         format!(
@@ -232,7 +232,7 @@ fn line_lists_lines_and_server_lines() {
             &first.to_hex()[..12]
         )
     );
-    let out = env.opal().args(["line", "--json"]).output().unwrap();
+    let out = env.opalro().args(["line", "--json"]).output().unwrap();
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(doc["position"], serde_json::json!({"save": first.to_hex()}));
 }
@@ -247,9 +247,9 @@ fn a_crash_never_keeps_the_save_without_its_line() {
         let (env, first) = at_first_save();
         env.overwrite("a.txt", "c");
         let out = env
-            .opal()
+            .opalro()
             .args(["save", "--line", "feature", "C"])
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
@@ -281,7 +281,7 @@ fn a_partial_save_at_a_save_needs_a_line_name_too() {
     env.overwrite("a.txt", "c");
     env.overwrite("b.txt", "new");
     let err = refused_save(&env, &["C", "a.txt"]);
-    assert!(err.contains("opal save --line <name>"), "{err}");
+    assert!(err.contains("opalro save --line <name>"), "{err}");
     let out = env.save(&["--line", "part", "C", "a.txt"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let (repo, state) = env.state();
@@ -302,7 +302,7 @@ fn a_partial_save_at_a_save_needs_a_line_name_too() {
 fn line_json_matches_its_snapshots() {
     let (env, first) = at_first_save();
     let line = |env: &Env| -> serde_json::Value {
-        let out = env.opal().args(["line", "--json"]).output().unwrap();
+        let out = env.opalro().args(["line", "--json"]).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         serde_json::from_slice(&out.stdout).unwrap()
     };
@@ -310,14 +310,14 @@ fn line_json_matches_its_snapshots() {
     assert_eq!(doc["position"]["save"], first.to_hex(), "{doc}");
     doc["position"]["save"] = "[redacted]".into();
     insta::assert_json_snapshot!("line_at_a_save", doc);
-    env.opal().args(["goto", "main"]).assert().success();
+    env.opalro().args(["goto", "main"]).assert().success();
     insta::assert_json_snapshot!("line_on_a_line", line(&env));
 }
 
 #[test]
 fn history_json_at_a_save_gives_that_save_as_position() {
     let (env, first) = at_first_save();
-    let out = env.opal().args(["history", "--json"]).output().unwrap();
+    let out = env.opalro().args(["history", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(

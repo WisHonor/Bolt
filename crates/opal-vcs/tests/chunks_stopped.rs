@@ -128,7 +128,7 @@ fn a_save_stopped_between_chunks_leaves_the_project_as_it_was() {
             "fault {n}"
         );
         assert!(files_named(dir.path()).contains(&id), "fault {n}");
-        let report = verify_store(&dir.path().join(".opal/store/packs"));
+        let report = verify_store(&dir.path().join(".opalro/store/packs"));
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
     }
     assert!(
@@ -177,7 +177,7 @@ fn a_discard_or_shelf_of_a_big_file_stopped_anywhere_loses_nothing() {
                     "fault {n}: the {which} version is lost"
                 );
             }
-            let report = verify_store(&dir.path().join(".opal/store/packs"));
+            let report = verify_store(&dir.path().join(".opalro/store/packs"));
             assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
             if done.is_ok() && !warned {
                 assert!(n > 10, "only {n} fault points");
@@ -212,7 +212,7 @@ fn stopped_at(n: u64, count: usize) -> (Option<String>, Vec<String>) {
             None => said,
         }
     });
-    (place, packs_in(&dir.path().join(".opal/store/packs")))
+    (place, packs_in(&dir.path().join(".opalro/store/packs")))
 }
 
 #[test]

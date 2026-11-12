@@ -1,7 +1,7 @@
 //! Hostile diaries written out (security.md T26): each case plants diary records, and the saves
-//! they name, as a hostile `.opal` could hold them, makes them current through `state/head`, runs
-//! `opal undo`, `redo`, `unshelf` or `undo --to`, and checks what Opalro said, what was written, and
-//! that nothing reached the folder beside the project or went into `.git` or `.opal`.
+//! they name, as a hostile `.opalro` could hold them, makes them current through `state/head`, runs
+//! `opalro undo`, `redo`, `unshelf` or `undo --to`, and checks what Opalro said, what was written, and
+//! that nothing reached the folder beside the project or went into `.git` or `.opalro`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -50,7 +50,7 @@ fn hostile(pack: &mut PackSet) -> Id {
     listings(pack, HOSTILE)
 }
 
-/// A top folder holding `.OPAL/pwned`.
+/// A top folder holding `.OPALRO/pwned`.
 fn opal_spelling(pack: &mut PackSet) -> Id {
     let inside = listings(pack, &[("pwned", File, PAYLOAD)]);
     holding_opal_spelling(pack, inside)
@@ -145,7 +145,7 @@ fn named_save(repo: &Repository, pack: &mut PackSet, named: Named, on: Id) -> Id
 }
 
 /// Stores what `make` puts in a pack and the diary entry it gives, made after the current one,
-/// through Opalro's own library; then makes that entry current as a hostile `.opal` could, by
+/// through Opalro's own library; then makes that entry current as a hostile `.opalro` could, by
 /// writing `state/head`. The entry's ID.
 fn plant(
     case: &Case,
@@ -157,7 +157,7 @@ fn plant(
     let mut pack = repo.new_packs().unwrap();
     let entry = make(&repo, &mut pack, head, now);
     let id = repo.store_entry(&lock, pack, &entry).unwrap();
-    std::fs::write(case.root().join(".opal/state/head"), format!("{id}\n")).unwrap();
+    std::fs::write(case.root().join(".opalro/state/head"), format!("{id}\n")).unwrap();
     id
 }
 
@@ -194,30 +194,30 @@ fn undone(head: Id, now: DiaryEntry, done: Id, before: &State) -> DiaryEntry {
     }
 }
 
-/// `opal <args> --json`: its exit code and its document.
+/// `opalro <args> --json`: its exit code and its document.
 fn run(case: &Case, args: &[impl AsRef<OsStr>]) -> (Option<i32>, serde_json::Value) {
-    let out = case.env.opal().args(args).arg("--json").output().unwrap();
+    let out = case.env.opalro().args(args).arg("--json").output().unwrap();
     let doc = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}{}", text(&out.stdout), text(&out.stderr)));
     (out.status.code(), doc)
 }
 
-/// Runs `opal <args> --json`, which must fail having changed nothing; its document.
+/// Runs `opalro <args> --json`, which must fail having changed nothing; its document.
 fn refused(case: &Case, args: &[impl AsRef<OsStr> + Debug]) -> serde_json::Value {
     let before = opal_folder(case);
     let (code, doc) = run(case, args);
     assert_eq!(code, Some(1), "{args:?}: {doc}");
     let changed = differing(&before, &opal_folder(case));
-    assert!(changed.is_empty(), "{args:?} changed .opal: {changed:?}");
+    assert!(changed.is_empty(), "{args:?} changed .opalro: {changed:?}");
     assert!(project_entries(&case.env).is_empty(), "{args:?}");
     case.assert_nothing_escaped();
     doc
 }
 
-/// Everything in `.opal` but `cache`, which a command may write even when it changes nothing, and
+/// Everything in `.opalro` but `cache`, which a command may write even when it changes nothing, and
 /// `state/lock-info`.
 fn opal_folder(case: &Case) -> BTreeMap<String, Seen> {
-    let mut all = seen(&case.root().join(".opal"));
+    let mut all = seen(&case.root().join(".opalro"));
     // Only informational, and rewritten on taking the change lock, before a refusal is known.
     all.retain(|path, _| path.split('/').next() != Some("cache") && path != "state/lock-info");
     all
@@ -297,7 +297,7 @@ fn assert_written_as_goto_would(
     let said = message(doc, "not_written_here");
     let left = format!("Left {} entries unwritten", not_written.len());
     assert!(
-        said.starts_with(&left) && said.contains("a spelling of .git or .opal"),
+        said.starts_with(&left) && said.contains("a spelling of .git or .opalro"),
         "{said}"
     );
     let said = message(doc, "placeholders_written");
@@ -333,9 +333,9 @@ fn assert_step_gone(doc: &serde_json::Value, step: Id) {
     );
     assert_eq!(
         doc["error"]["hint"],
-        "opal tidy removes what steps older than the undo window changed, and a damaged store \
+        "opalro tidy removes what steps older than the undo window changed, and a damaged store \
          can lose it too, so undo and redo can't go past this step. To get back to an older save, \
-         find it with opal history and go to it with opal goto.",
+         find it with opalro history and go to it with opalro goto.",
         "{doc}"
     );
 }
@@ -402,7 +402,7 @@ fn a_save_holding_a_spelling_of_opal_is_refused_whole_by_every_command() {
         assert_eq!(
             doc["error"]["message"],
             format!(
-                "Save {} holds a name spelled like Opalro's own folder (.opal), which Opalro never \
+                "Save {} holds a name spelled like Opalro's own folder (.opalro), which Opalro never \
                  writes, so it can't be used.",
                 lead.save.short_hex()
             ),
@@ -494,9 +494,9 @@ fn a_state_naming_a_save_the_store_lacks_is_refused() {
     );
     assert_eq!(
         doc["error"]["hint"],
-        "opal tidy removes the saves only entries older than the undo window needed, and a \
+        "opalro tidy removes the saves only entries older than the undo window needed, and a \
          damaged store can lose them too, so undo --to can't go back to this entry. To get back \
-         to an older save, find it with opal history and go to it with opal goto.",
+         to an older save, find it with opalro history and go to it with opalro goto.",
         "{doc}"
     );
     // Unshelf brings back what a shelf names.

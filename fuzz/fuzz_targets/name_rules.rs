@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
                 let _ = names::own_folder(n, drive);
             }
             // Whatever write-out may write, this system can hold, and it is neither `.git` nor
-            // `.opal`.
+            // `.opalro`.
             if names::writable_here(n, &short_names).is_ok() {
                 assert!(names::holdable_here(n));
                 assert!(!names::is_git_alias(n) && !names::is_opal_alias(n));

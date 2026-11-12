@@ -1,4 +1,4 @@
-//! A project `opal import` made, compared with the Git repository it came from (decision 002):
+//! A project `opalro import` made, compared with the Git repository it came from (decision 002):
 //! every commit, tree, file, branch, server branch and tag, as Git itself reads them.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 use super::{git, git_command, spawn, text};
 
-/// Asserts that the project `opal import` made in `dir` holds what the Git repository there
+/// Asserts that the project `opalro import` made in `dir` holds what the Git repository there
 /// holds. Each commit `git rev-list --all` lists has exactly one save, which rebuilds to the
 /// commit's bytes. Each Git tree is a listing of the entries Opalro keeps, of the kinds their modes
 /// make, with the files' bytes. The branches, server branches and tags are the lines, server
@@ -238,12 +238,12 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
     let lines = renamed(branches, Rules::Line);
     let want: BTreeMap<String, Id> = lines
         .iter()
-        .map(|(opal, _, target)| (opal.clone(), saved(target)))
+        .map(|(opalro, _, target)| (opalro.clone(), saved(target)))
         .collect();
     assert_eq!(state.lines, want, "the lines");
     let server_names: Vec<&[u8]> = by_server.keys().copied().collect();
     let mut want = BTreeMap::new();
-    for (opal, (_, own)) in rename(&server_names, Rules::Line)
+    for (opalro, (_, own)) in rename(&server_names, Rules::Line)
         .into_iter()
         .zip(by_server)
     {
@@ -251,7 +251,7 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
             .into_iter()
             .map(|(line, _, target)| (line, saved(&target)))
             .collect();
-        want.insert(opal, own);
+        want.insert(opalro, own);
     }
     assert_eq!(servers, want, "the server lines");
 
@@ -267,7 +267,7 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
 
     // Each tag that ends at a commit, with the tag objects on the way there, outermost first.
     let mut want: BTreeMap<String, (Id, Vec<Vec<u8>>)> = BTreeMap::new();
-    for (opal, _, target) in renamed(git_tags, Rules::Tag) {
+    for (opalro, _, target) in renamed(git_tags, Rules::Tag) {
         let mut chain = Vec::new();
         let mut at = target;
         let end = loop {
@@ -280,7 +280,7 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
             chain.push(raw);
         };
         if let Some(commit) = end {
-            want.insert(opal, (saved(&commit), chain));
+            want.insert(opalro, (saved(&commit), chain));
         }
     }
     let names: Vec<&String> = tags.keys().collect();
@@ -371,7 +371,7 @@ fn renamed(mut refs: Vec<(&[u8], GitId)>, rules: Rules) -> Vec<(String, &[u8], G
     rename(&names, rules)
         .into_iter()
         .zip(refs)
-        .map(|(opal, (git, target))| (opal, git, target))
+        .map(|(opalro, (git, target))| (opalro, git, target))
         .collect()
 }
 

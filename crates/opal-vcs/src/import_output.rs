@@ -1,11 +1,11 @@
-//! What `opal import` prints: its summary for people, and its `--json` document.
+//! What `opalro import` prints: its summary for people, and its `--json` document.
 
 use opal_core::import::{ImportReport, MAX_LISTED};
 use opal_core::text::{bytes, escape, escape_all, thousands};
 use opal_core::warning::Warning;
 use serde_json::json;
 
-use crate::output::{self, OPAL_JSON};
+use crate::output::{self, OPALRO_JSON};
 use crate::style::{self, Role};
 
 /// "1 tag" or "2 tags", with the count as `thousands` writes it.
@@ -45,7 +45,7 @@ fn list(text: &mut String, heading: &str, items: &[String]) {
     }
 }
 
-/// What `opal import` tells people it did: the outcome line with what came in, then what was
+/// What `opalro import` tells people it did: the outcome line with what came in, then what was
 /// renamed or left out, then where they stand.
 pub fn import_text(report: &ImportReport, standing: &str) -> String {
     let outcome = style::out().paint(Role::Ok, "Imported");
@@ -74,7 +74,7 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
                 "{kind}{} {} {}",
                 escape(&r.git, false),
                 crate::style::out().sym(crate::style::Sym::Arrow),
-                escape(&r.opal, false)
+                escape(&r.opalro, false)
             )
         })
         .collect();
@@ -123,12 +123,12 @@ pub fn import_text(report: &ImportReport, standing: &str) -> String {
         .collect();
     let entries = and_the_rest(entries, report.skipped_entry_count);
     let heading = if report.skipped_entry_count == 1 {
-        "Left out 1 entry whose name Opalro never writes to disk (such as .git and .opal), with \
+        "Left out 1 entry whose name Opalro never writes to disk (such as .git and .opalro), with \
          everything in it"
             .to_owned()
     } else {
         format!(
-            "Left out {} entries whose names Opalro never writes to disk (such as .git and .opal), \
+            "Left out {} entries whose names Opalro never writes to disk (such as .git and .opalro), \
              with everything in them",
             thousands(report.skipped_entry_count)
         )
@@ -207,13 +207,13 @@ fn lfs_text(text: &mut String, report: &ImportReport) {
     }
 }
 
-/// The `--json` document of `opal import` (docs/json.md).
+/// The `--json` document of `opalro import` (docs/json.md).
 pub fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::Value {
     let position = crate::output::position_json(&report.position);
     let renamed: Vec<serde_json::Value> = report
         .renamed
         .iter()
-        .map(|r| json!({"kind": r.kind, "git": r.git, "opal": r.opal}))
+        .map(|r| json!({"kind": r.kind, "git": r.git, "opalro": r.opalro}))
         .collect();
     let skipped_tags: Vec<serde_json::Value> = report
         .skipped_tags
@@ -226,7 +226,7 @@ pub fn import_json(report: &ImportReport, warnings: &[Warning]) -> serde_json::V
         .map(|(commit, path)| json!({"commit": commit, "path": path}))
         .collect();
     json!({
-        "opal_json": OPAL_JSON,
+        "opalro_json": OPALRO_JSON,
         "commits": report.commits,
         "lines": report.lines,
         "servers": report.servers,
@@ -255,7 +255,7 @@ mod tests {
     use crate::style::Screen;
 
     /// The import's stop past its work allowance can't be reached from a test's repository in
-    /// reasonable time, so its error is made here and laid out as `opal import` lays it out.
+    /// reasonable time, so its error is made here and laid out as `opalro import` lays it out.
     #[test]
     fn the_work_stop_is_laid_out_like_every_other_error() {
         let what = "rebuilding objects from Git's deltas would take more than the 4 GiB of work \
@@ -263,10 +263,10 @@ mod tests {
                     file, or it was built to make importing slow";
         let way_out = "If you trust this repository, have Git store its files over 1 MiB whole \
                        and make its other deltas anew, with `git -c core.bigFileThreshold=1m \
-                       repack -a -d -f`, then run opal import again. Git's packs stay bigger \
+                       repack -a -d -f`, then run opalro import again. Git's packs stay bigger \
                        until its next `git gc`.";
         let stop = || ImportError::Git(GitError::TooMuchWork { what: what.into() });
-        // Before the import began its .opal folder, and after.
+        // Before the import began its .opalro folder, and after.
         let after = ImportError::Unfinished {
             stop: Box::new(stop()),
             committed: false,
@@ -276,8 +276,8 @@ mod tests {
             (
                 after,
                 format!(
-                    "{way_out}\nNothing was committed. Opalro kept the .opal folder it began here: \
-                     opal import stops the same way until the cause is fixed, then finishes from \
+                    "{way_out}\nNothing was committed. Opalro kept the .opalro folder it began here: \
+                     opalro import stops the same way until the cause is fixed, then finishes from \
                      what it stored. Or delete that folder."
                 ),
             ),

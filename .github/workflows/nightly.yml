@@ -59,7 +59,7 @@ jobs:
       - name: Import it and compare with Git
         shell: bash
         env:
-          OPAL_DIFF_REPO: ${{ runner.temp }}/git
+          OPALRO_DIFF_REPO: ${{ runner.temp }}/git
         run: |
           cargo test --release -p opal-vcs --test import_vs_git -- --ignored --nocapture --exact a_real_repository_matches_git 2>&1 | tee differential.txt
           # A name that matches no test passes too, so the test must have run.

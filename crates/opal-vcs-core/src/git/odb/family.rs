@@ -328,7 +328,7 @@ impl Family<'_> {
     }
 }
 
-/// An object kept in a file in `.opal/tmp`, read back whole for each object built on it, and
+/// An object kept in a file in `.opalro/tmp`, read back whole for each object built on it, and
 /// removed once let go. The file is open only while it is written or read, so however deep a
 /// family branches, it holds no more files open.
 struct Spill<'a> {

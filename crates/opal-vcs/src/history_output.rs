@@ -1,11 +1,11 @@
-//! What `opal history` shows people: its heading and its rows, in columns.
+//! What `opalro history` shows people: its heading and its rows, in columns.
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use crate::style::{self, Role, Sym};
 
-/// A save as `opal history` lists it, each piece escaped: its change ID, when it was written, by
+/// A save as `opalro history` lists it, each piece escaped: its change ID, when it was written, by
 /// whom, its message's first line, and the lines whose newest save it is.
 pub struct SaveRow {
     pub short: String,
@@ -23,13 +23,13 @@ impl SaveRow {
     }
 }
 
-/// `opal history` holds rows to set its columns, but never a whole line: it stops at this many
+/// `opalro history` holds rows to set its columns, but never a whole line: it stops at this many
 /// rows, or at [`HELD_BYTES`] of their text, and a wider row after them runs long.
 const HELD_ROWS: usize = 1_000;
-/// How much of the held rows' text `opal history` holds before it sets its columns.
+/// How much of the held rows' text `opalro history` holds before it sets its columns.
 const HELD_BYTES: usize = 1 << 20;
 
-/// `opal history`'s list, written as its rows come.
+/// `opalro history`'s list, written as its rows come.
 pub struct History {
     /// The line the project is on, escaped; `None` at a save.
     line: Option<String>,

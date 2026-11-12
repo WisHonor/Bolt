@@ -32,18 +32,18 @@ impl Env {
         Env(support::Env::empty())
     }
 
-    fn opal(&self, args: &[&str]) -> Command {
+    fn opalro(&self, args: &[&str]) -> Command {
         let mut cmd = self.opal_process_in(self.root());
         cmd.args(args);
         cmd
     }
 
     fn ok(&self, args: &[&str]) -> Output {
-        let out = self.opal(args).output().unwrap();
+        let out = self.opalro(args).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
-            "opal {args:?}: {}",
+            "opalro {args:?}: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         out
@@ -317,15 +317,15 @@ fn commits_sharing_a_big_message(root: &Path, n: usize) -> u64 {
 fn rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_opal() {
     let env = Env::new();
     let git_bytes = commits_sharing_a_big_message(env.root(), 100);
-    let end = run_limited(env.opal(&["import"]), 600);
-    let opal_bytes = if env.root().join(".opal").exists() {
-        dir_size(&env.root().join(".opal"))
+    let end = run_limited(env.opalro(&["import"]), 600);
+    let opal_bytes = if env.root().join(".opalro").exists() {
+        dir_size(&env.root().join(".opalro"))
     } else {
         0
     };
     // Before the bound is checked, so a run records the sizes either way.
     println!(
-        "RT4-1 sizes: .git {git_bytes} bytes, .opal {opal_bytes} bytes; the import took {:.1} s, \
+        "RT4-1 sizes: .git {git_bytes} bytes, .opalro {opal_bytes} bytes; the import took {:.1} s, \
          peaked at {} bytes, and exited with {:?}",
         end.secs, end.peak_bytes, end.code
     );
@@ -335,8 +335,8 @@ fn rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_opal() {
     let stopped_at_a_limit = end.code == Some(1) && !end.stderr.contains("git fsck");
     assert!(
         (end.code == Some(0) || stopped_at_a_limit) && opal_bytes < 40 << 20,
-        "`opal import` of a {git_bytes}-byte Git repository (100 commits, no merges) wrote a \
-         {opal_bytes}-byte .opal: {end:?}"
+        "`opalro import` of a {git_bytes}-byte Git repository (100 commits, no merges) wrote a \
+         {opal_bytes}-byte .opalro: {end:?}"
     );
 }
 
@@ -381,33 +381,33 @@ fn rt4_2_tags_on_a_commit_deep_in_deltas_import_in_reasonable_time() {
     // The same tags on a commit stored whole import at once (0.3 s in a release build).
     let whole = Env::new();
     tags_on_a_deep_commit(whole.root(), 100_000, 0);
-    let end = run_limited(whole.opal(&["import"]), 20);
+    let end = run_limited(whole.opalro(&["import"]), 20);
     assert!(end.code == Some(0), "{end:?}");
     let env = Env::new();
     tags_on_a_deep_commit(env.root(), 100_000, 4096);
     let git_bytes = dir_size(&env.root().join(".git"));
-    let end = run_limited(env.opal(&["import"]), 20);
+    let end = run_limited(env.opalro(&["import"]), 20);
     // A stop at a limit is safe; a stop that calls this valid repository damaged is not.
     assert!(
         !end.timed_out && !end.stderr.contains("git fsck"),
-        "`opal import` of 100,000 tags on one commit 4,096 deltas deep (a {git_bytes}-byte Git \
+        "`opalro import` of 100,000 tags on one commit 4,096 deltas deep (a {git_bytes}-byte Git \
          repository) was still running after 20 s: {end:?}"
     );
 }
 
 // RT4-3: RT3-6's warning covers a saved file "an ignore rule matches". A repository that tracks a
-// placeholder `.env` and lists it in .gitignore can also track a .opalignore that takes it back
+// placeholder `.env` and lists it in .gitignore can also track a .opalroignore that takes it back
 // (`!.env`): for Git the file stays ignored, for Opalro no rule matches it any more. The user's real
 // `.env` is then saved without a word, and so is a new file Git ignores, such as a private key.
 
 #[test]
-fn rt4_3_a_opalignore_from_the_repository_does_not_save_what_git_ignores_silently() {
+fn rt4_3_a_opalroignore_from_the_repository_does_not_save_what_git_ignores_silently() {
     let env = Env::new();
     let git = Craft::new(env.root(), HashKind::Sha1);
     let files: [(&str, &[u8]); 4] = [
         (".env", b"API_KEY=put-yours-here\n"),
         (".gitignore", b".env\n*.pem\n"),
-        (".opalignore", b"!.env\n!*.pem\n"),
+        (".opalroignore", b"!.env\n!*.pem\n"),
         ("app.py", b"print('hi')\n"),
     ];
     let entries: Vec<(&[u8], &[u8], GitId)> = files
@@ -478,7 +478,7 @@ fn rt4_4_rebuilding_a_deltified_file_holds_it_at_most_twice() {
     pack.whole(1, &commit_data, commit.as_bytes());
     pack.finish(env.root());
     git.loose_ref("refs/heads/main", &format!("{}\n", commit.to_hex()));
-    let end = run_limited(env.opal(&["import"]), 600);
+    let end = run_limited(env.opalro(&["import"]), 600);
     assert!(
         end.code == Some(0) && end.peak_mb < 750,
         "importing one 300 MiB deltified file took {} MB: {end:?}",

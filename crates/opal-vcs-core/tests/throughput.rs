@@ -1,7 +1,7 @@
 //! What the parts of a save cost, and what a stronger zstd level would save if merging and `tidy`
 //! compressed stored bytes again. Slow, so ignored; run in a release build, one test at a time:
 //! `cargo test --release -p opal-vcs-core --test throughput -- --ignored --nocapture --test-threads=1`
-//! OPAL_BENCH_CODE names a code project's folder, and OPAL_BENCH_GODOT a folder whose PNG and OGG
+//! OPALRO_BENCH_CODE names a code project's folder, and OPALRO_BENCH_GODOT a folder whose PNG and OGG
 //! files are the compressed assets; a set whose variable isn't set is left out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -58,7 +58,7 @@ fn speeds_of_the_parts() {
 #[ignore = "slow: compresses each set at three levels"]
 fn what_compressing_again_would_save() {
     let mut sets = Vec::new();
-    if let Some(dir) = std::env::var_os("OPAL_BENCH_CODE") {
+    if let Some(dir) = std::env::var_os("OPALRO_BENCH_CODE") {
         sets.push(("code", files_under(Path::new(&dir), |_| true)));
     }
     sets.push((
@@ -68,7 +68,7 @@ fn what_compressing_again_would_save() {
             Source::Made(picture(32 * MIB)),
         ],
     ));
-    if let Some(dir) = std::env::var_os("OPAL_BENCH_GODOT") {
+    if let Some(dir) = std::env::var_os("OPALRO_BENCH_GODOT") {
         let assets = files_under(Path::new(&dir), |path| {
             path.extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("ogg"))
@@ -110,7 +110,7 @@ fn what_compressing_again_would_save() {
     }
     // The rule counts the code set too, so without it there is no verdict to give.
     if !sets.iter().any(|(name, _)| *name == "code") {
-        println!("No verdict: set OPAL_BENCH_CODE to count the code set.");
+        println!("No verdict: set OPALRO_BENCH_CODE to count the code set.");
         return;
     }
     let (base_bytes, base_secs) = ruled[0];
@@ -192,7 +192,7 @@ fn files_under(dir: &Path, keep: impl Fn(&Path) -> bool) -> Vec<Source> {
 fn noise(len: usize) -> Vec<u8> {
     let mut out = vec![0; len];
     blake3::Hasher::new()
-        .update(b"opal throughput")
+        .update(b"opalro throughput")
         .finalize_xof()
         .fill(&mut out);
     out

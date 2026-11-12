@@ -67,7 +67,7 @@ fn without_home_a_save_applies_the_ignore_list_git_for_windows_applies() {
         text(&status.stdout).replace('\n', " ")
     );
 
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -78,7 +78,7 @@ fn without_home_a_save_applies_the_ignore_list_git_for_windows_applies() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let saved = saved_files(&env, main_tip(&env));
     let names: Vec<&String> = saved.keys().collect();
-    eprintln!("opal save: {}saved: {names:?}", text(&out.stdout));
+    eprintln!("opalro save: {}saved: {names:?}", text(&out.stdout));
     assert_eq!(
         saved.contains_key("deploy.key"),
         !git_keeps_out_key,

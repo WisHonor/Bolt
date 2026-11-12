@@ -12,7 +12,7 @@ expression: show
       "path": "b.txt"
     }
   ],
-  "opal_json": 1,
+  "opalro_json": 1,
   "save": {
     "author": {
       "email": "test@example.com",

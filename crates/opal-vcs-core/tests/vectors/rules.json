@@ -23,7 +23,7 @@
   },
   {
     "name": "code-preset",
-    "toml": "# Opalro project rules, written by the Code preset (version 1).\n# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.\npreset = \"code\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"100 MB\"\nask-before-saving-files-over = 10000\n",
+    "toml": "# Opalro project rules, written by the Code preset (version 1).\n# This file is the project's rules: edit it freely. `opalro setup` shows how Opalro reads it.\npreset = \"code\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"100 MB\"\nask-before-saving-files-over = 10000\n",
     "skipped": false,
     "preset": "code",
     "chunk_files_over": 1048576,
@@ -34,7 +34,7 @@
   },
   {
     "name": "game-unity-preset",
-    "toml": "# Opalro project rules, written by the Game preset (version 1).\n# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.\npreset = \"game\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"1 GiB\"\nask-before-saving-files-over = 10000\n\n# Art and audio that can't be merged. Marked lockable; locking arrives with syncing.\n[[rule]]\nfiles = [\"*.psd\", \"*.png\", \"*.tga\", \"*.tif\", \"*.tiff\", \"*.exr\", \"*.jpg\", \"*.jpeg\", \"*.fbx\", \"*.blend\", \"*.max\", \"*.mb\", \"*.wav\", \"*.ogg\", \"*.mp3\", \"*.mp4\", \"*.mov\"]\nlockable = true\n\n# Unity scenes and prefabs.\n[[rule]]\nfiles = [\"*.unity\", \"*.prefab\"]\nlockable = true\nconflict-markers = false\n\n# Unity's .meta files never get conflict markers.\n[[rule]]\nfiles = [\"*.meta\"]\nconflict-markers = false\n",
+    "toml": "# Opalro project rules, written by the Game preset (version 1).\n# This file is the project's rules: edit it freely. `opalro setup` shows how Opalro reads it.\npreset = \"game\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"1 GiB\"\nask-before-saving-files-over = 10000\n\n# Art and audio that can't be merged. Marked lockable; locking arrives with syncing.\n[[rule]]\nfiles = [\"*.psd\", \"*.png\", \"*.tga\", \"*.tif\", \"*.tiff\", \"*.exr\", \"*.jpg\", \"*.jpeg\", \"*.fbx\", \"*.blend\", \"*.max\", \"*.mb\", \"*.wav\", \"*.ogg\", \"*.mp3\", \"*.mp4\", \"*.mov\"]\nlockable = true\n\n# Unity scenes and prefabs.\n[[rule]]\nfiles = [\"*.unity\", \"*.prefab\"]\nlockable = true\nconflict-markers = false\n\n# Unity's .meta files never get conflict markers.\n[[rule]]\nfiles = [\"*.meta\"]\nconflict-markers = false\n",
     "skipped": false,
     "preset": "game",
     "chunk_files_over": 1048576,

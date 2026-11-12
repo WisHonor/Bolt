@@ -4,7 +4,7 @@ expression: "doc(&[\"undo\", \"--to\", &to[..8]])"
 ---
 {
   "finished": false,
-  "opal_json": 1,
+  "opalro_json": 1,
   "position": {
     "line": "main"
   },

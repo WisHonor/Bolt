@@ -6,16 +6,16 @@ param([Parameter(Mandatory = $true)][string]$Opalro)
 $ErrorActionPreference = 'Stop'
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
-$env:OPAL_CONFIG_DIR = Join-Path $work config
-$config = Join-Path $env:OPAL_CONFIG_DIR config.toml
+$env:OPALRO_CONFIG_DIR = Join-Path $work config
+$config = Join-Path $env:OPALRO_CONFIG_DIR config.toml
 $user = @('[user]', 'name = "Ana Lima"', 'email = "ana@example.com"')
-Remove-Item Env:OPAL_USER_NAME, Env:OPAL_USER_EMAIL -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $env:OPAL_CONFIG_DIR | Out-Null
+Remove-Item Env:OPALRO_USER_NAME, Env:OPALRO_USER_EMAIL -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $env:OPALRO_CONFIG_DIR | Out-Null
 
-# Runs opal, prints all it said and its exit code, and hands back what it said.
+# Runs opalro, prints all it said and its exit code, and hands back what it said.
 function Try-Opalro {
   $ErrorActionPreference = 'Continue'
-  Write-Host "> opal $args"
+  Write-Host "> opalro $args"
   $said = @(& $Opalro @args 2>&1 | ForEach-Object { "$_" })
   $said | ForEach-Object { Write-Host "  $_" }
   Write-Host "  (exit $LASTEXITCODE)"

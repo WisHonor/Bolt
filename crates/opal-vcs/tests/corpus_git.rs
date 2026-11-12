@@ -1,5 +1,5 @@
 //! Hostile Git repositories (security.md §7): each case is written byte by byte with `Craft` and
-//! read only by Opalro. `opal import` must refuse it, or skip and list what it must, and commit
+//! read only by Opalro. `opalro import` must refuse it, or skip and list what it must, and commit
 //! nothing when it stops. A case that can only be built below the import names the test that
 //! holds it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -73,27 +73,27 @@ fn main_of(git: &Craft, entries: &[(&[u8], &[u8], GitId)]) -> GitId {
     id
 }
 
-/// Runs `opal import`, which must stop before it makes `.opal`, and returns its error output.
+/// Runs `opalro import`, which must stop before it makes `.opalro`, and returns its error output.
 fn refused(env: &Env) -> String {
     let err = env.refused_import();
-    assert!(!env.root().join(".opal").exists(), "{err}");
+    assert!(!env.root().join(".opalro").exists(), "{err}");
     err
 }
 
-/// Runs `opal import`, which must stop once it has begun `.opal`, committing nothing, and returns
+/// Runs `opalro import`, which must stop once it has begun `.opalro`, committing nothing, and returns
 /// its error output.
 fn stopped(env: &Env) -> String {
     committed_nothing(env, env.refused_import())
 }
 
-/// Checks that an import that stopped after it began `.opal` said so and committed nothing.
+/// Checks that an import that stopped after it began `.opalro` said so and committed nothing.
 fn committed_nothing(env: &Env, err: String) -> String {
     assert!(err.contains("Nothing was committed."), "{err}");
-    assert!(!env.root().join(".opal/format").exists(), "{err}");
+    assert!(!env.root().join(".opalro/format").exists(), "{err}");
     err
 }
 
-/// `opal import`'s work in this process, for sweeps that run it hundreds of times.
+/// `opalro import`'s work in this process, for sweeps that run it hundreds of times.
 fn import_here(dir: &Path) -> Result<ImportReport, ImportError> {
     let who = Person {
         name: "Ada".into(),
@@ -140,7 +140,7 @@ fn content(env: &Env, name: &str) -> Vec<u8> {
     out
 }
 
-/// The line `opal import` lists an entry it left out with, every hidden character shown.
+/// The line `opalro import` lists an entry it left out with, every hidden character shown.
 fn left_out(path: &str, commit: &GitId) -> String {
     let path = escape_all(path);
     format!("\n        `{path}` in commit {}\n", &commit.to_hex()[..12])
@@ -149,7 +149,7 @@ fn left_out(path: &str, commit: &GitId) -> String {
 /// The heading of the list of entries an import left out.
 fn left_out_heading(count: usize) -> String {
     format!(
-        "Left out {count} entries whose names Opalro never writes to disk (such as .git and .opal), \
+        "Left out {count} entries whose names Opalro never writes to disk (such as .git and .opalro), \
          with everything in them:\n"
     )
 }
@@ -257,11 +257,11 @@ fn path_parts_are_skipped() {
     assert_eq!(saved(&env), ["file README"]);
 }
 
-/// Decision 019. The nested ones are the nested `.opal` case too: Git checks them out, and a
+/// Decision 019. The nested ones are the nested `.opalro` case too: Git checks them out, and a
 /// command run inside one would take it for a project.
 #[test]
 fn opal_spellings_are_skipped_and_warned_about() {
-    let spellings = [".opal", ".OPAL", "opal~1"];
+    let spellings = [".opalro", ".OPALRO", "opalro~1"];
     let (env, git) = repo();
     let file = git.object(Blob, b"x\n");
     let project = git.tree(&[(b"100644", b"format", file)]);
@@ -281,7 +281,7 @@ fn opal_spellings_are_skipped_and_warned_about() {
         let path = format!("sub/{name}");
         assert!(out.contains(&left_out(&path, &id)), "{out}");
         let warning = format!(
-            "warning: Git checked out a folder named .opal at `{path}`. Opalro left it out of \
+            "warning: Git checked out a folder named .opalro at `{path}`. Opalro left it out of \
              history, but commands run inside it would use it as an Opalro project; delete it \
              unless you made it.\n"
         );
@@ -297,7 +297,7 @@ fn opal_spellings_are_skipped_and_warned_about() {
         let err = refused(&env);
         let stop = format!(
             "error: Git tracks `{name}` at the top of this project, and Opalro can't use it as its \
-             own .opal folder.\n"
+             own .opalro folder.\n"
         );
         assert!(err.contains(&stop), "{err}");
     }
@@ -443,7 +443,7 @@ fn deep_tree(git: &Craft, levels: usize) -> GitId {
 fn stopped_quickly(env: &Env) -> String {
     let limit = Duration::from_secs(30);
     let started = Instant::now();
-    let out = env.opal().arg("import").timeout(limit).output().unwrap();
+    let out = env.opalro().arg("import").timeout(limit).output().unwrap();
     let took = started.elapsed();
     assert!(took < limit, "{took:?}");
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
@@ -720,7 +720,7 @@ fn a_head_opal_cant_follow_stops_the_import() {
 }
 
 const GIT_FILE: &str = "This .git points to a repository kept elsewhere (a linked worktree or a \
-                        submodule), which Opalro doesn't follow.\n\nhint: Run opal import where the \
+                        submodule), which Opalro doesn't follow.\n\nhint: Run opalro import where the \
                         repository's own .git folder is, or in a fresh clone of it.\n";
 
 // CVE-2022-39253, CVE-2024-32021
@@ -732,26 +732,26 @@ fn repository_shapes_opal_doesnt_follow_are_refused_saying_what_to_do() {
             |git| git.file("objects/info/alternates", b"/elsewhere/objects\n"),
             "This Git repository borrows objects from another one (.git/objects/info/alternates), \
              which Opalro doesn't follow.\n\nhint: Copy those objects in with `git repack -a -d`, \
-             delete .git/objects/info/alternates, then run opal import again.\n",
+             delete .git/objects/info/alternates, then run opalro import again.\n",
         ),
         (|git| git.file("commondir", b"../..\n"), GIT_FILE),
         (
             |git| git.file("shallow", format!("{}\n", "ab".repeat(20)).as_bytes()),
             "This Git repository is a shallow clone: its older history was never downloaded, and \
              Opalro needs all of it.\n\nhint: Fetch the rest with `git fetch --unshallow`, then run \
-             opal import again.\n",
+             opalro import again.\n",
         ),
         (
             |git| git.config("[core]\n\trepositoryformatversion = 0\n\tsparseCheckout = true\n"),
             "Git leaves some files out of this folder on purpose (a sparse checkout), so Opalro \
              would record them as deleted.\n\nhint: Turn it off with `git sparse-checkout disable`, \
-             then run opal import again.\n",
+             then run opalro import again.\n",
         ),
         (
             |git| git.file("reftable/tables.list", b""),
             "This Git repository keeps its refs in the reftable format, which Opalro can't read \
              yet.\n\nhint: Convert it with `git refs migrate --ref-storage-format=files`, then run \
-             opal import again.\n",
+             opalro import again.\n",
         ),
         (
             |git| {
@@ -761,7 +761,7 @@ fn repository_shapes_opal_doesnt_follow_are_refused_saying_what_to_do() {
             },
             "This Git repository is a partial clone: some of its history was never downloaded, \
              and Opalro needs all of it.\n\nhint: Clone the repository again without `--filter`, and \
-             run opal import in the new clone.\n",
+             run opalro import in the new clone.\n",
         ),
         (
             |git| git.config("[core]\n\trepositoryformatversion = 1\n[extensions]\n\tx = y\n"),
@@ -911,7 +911,7 @@ fn every_cut_of_a_pack_or_its_index_is_refused() {
                 matches!(result, Err(ImportError::Git(GitError::Broken { .. }))),
                 "{what}: {result:?}"
             );
-            assert!(!dir.path().join(".opal").exists(), "{what}");
+            assert!(!dir.path().join(".opalro").exists(), "{what}");
         }
         fs::write(path, &good).unwrap();
     }
@@ -1251,18 +1251,18 @@ fn submodules_are_bare_links_and_gitmodules_an_ordinary_file() {
     }
 
     // A later save keeps the link and never looks in its folder, whose `.git` file points at
-    // /etc and whose `.opalignore` would stop the save if it were read.
+    // /etc and whose `.opalroignore` would stop the save if it were read.
     fs::write(env.root().join(".gitmodules"), GITMODULES).unwrap();
     let inside = env.root().join("sub");
     fs::create_dir(&inside).unwrap();
     fs::write(inside.join(".git"), "gitdir: /etc\n").unwrap();
     fs::write(inside.join("a.txt"), "x").unwrap();
     let too_big = "#".repeat(opal_core::safe_fs::MAX_IGNORE_FILE_BYTES as usize + 1);
-    fs::write(inside.join(".opalignore"), too_big).unwrap();
+    fs::write(inside.join(".opalroignore"), too_big).unwrap();
     fs::write(env.root().join("new.txt"), "new\n").unwrap();
     let out = env.save(&["After the import"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    let show = env.opal().args(["--json", "show"]).output().unwrap();
+    let show = env.opalro().args(["--json", "show"]).output().unwrap();
     let json: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
     let changed: Vec<&str> = json["changes"]
         .as_array()
@@ -1347,13 +1347,14 @@ fn text_from_the_repository_is_shown_escaped() {
     git.head(&format!("ref: refs/heads/{HOSTILE_REF}\n"));
     let (out, err) = env.import();
     let shown = format!("{out}{err}");
-    let renamed = format!("Renamed 1 name that Opalro's names don't allow: {HOSTILE_REF_SHOWN} -> ");
+    let renamed =
+        format!("Renamed 1 name that Opalro's names don't allow: {HOSTILE_REF_SHOWN} -> ");
     assert_escaped(&shown, &renamed);
     assert_escaped(&shown, &format!("refs/notes/{HOSTILE_REF_SHOWN}\n"));
     let tag = format!("Didn't import 1 tag: {HOSTILE_REF_SHOWN}, as it tags");
     assert_escaped(&shown, &tag);
     let run = |command: &str| {
-        let out = env.opal().arg(command).output().unwrap();
+        let out = env.opalro().arg(command).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
         text(&out.stdout) + &text(&out.stderr)
     };

@@ -50,7 +50,7 @@ fn deep_tree(pack: &mut PackSet) -> Id {
 /// `main` after it. The folder is still the first save's, so it lacks `deep`.
 fn on_the_tree() -> (Env, Id, Id) {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -63,12 +63,12 @@ fn on_the_tree() -> (Env, Id, Id) {
 /// The same, with the project at its first save rather than on `main`.
 fn beside_the_tree() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     plant_save(env.root(), deep_tree);
     env
 }
@@ -100,12 +100,12 @@ fn plant_entry(
     repo.head().unwrap()
 }
 
-/// Fails unless `opal <args>` refuses the deep tree within 10 seconds, writing nothing.
+/// Fails unless `opalro <args>` refuses the deep tree within 10 seconds, writing nothing.
 fn refused_at_once(env: &Env, args: &[&str]) {
     let (standing, folder) = (env.standing(), files(env.root()));
-    let mut opal = env.opal_process_in(env.root());
-    opal.args(args);
-    let ended = run_limited(opal, 120);
+    let mut opalro = env.opal_process_in(env.root());
+    opalro.args(args);
+    let ended = run_limited(opalro, 120);
     assert_eq!(ended.code, Some(1), "{args:?}: {ended:?}");
     assert!(
         ended
@@ -117,7 +117,10 @@ fn refused_at_once(env: &Env, args: &[&str]) {
     assert!(ended.secs < 10.0, "{args:?} took {:.1} s", ended.secs);
     assert_eq!(env.standing(), standing, "{args:?}");
     assert_eq!(files(env.root()), folder, "{args:?}");
-    assert!(!env.root().join(".opal/state/journal").exists(), "{args:?}");
+    assert!(
+        !env.root().join(".opalro/state/journal").exists(),
+        "{args:?}"
+    );
 }
 
 #[test]
@@ -189,14 +192,14 @@ fn a_save_on_the_tree_without_it_is_made_at_once() {
     ] {
         let (env, _, tree) = on_the_tree();
         std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
-        let mut opal = env.opal_process_in(env.root());
-        opal.args(args);
-        let ended = run_limited(opal, 120);
+        let mut opalro = env.opal_process_in(env.root());
+        opalro.args(args);
+        let ended = run_limited(opalro, 120);
         assert_eq!(ended.code, Some(0), "{args:?}: {ended:?}");
         assert!(ended.secs < 10.0, "{args:?} took {:.1} s", ended.secs);
         assert_ne!(main_tip(&env), tree, "{args:?}");
         let mut names = top_names(&env);
-        names.retain(|n| n != "opal.toml" && n != ".opalignore");
+        names.retain(|n| n != "opalro.toml" && n != ".opalroignore");
         assert_eq!(names, kept, "{args:?}");
         let warned = ended
             .stderr

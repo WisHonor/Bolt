@@ -3,18 +3,18 @@
 #   run.sh sets <folder for the data> <folder for the results>
 #   run.sh gate <folder for the data> <folder for the results>
 #   run.sh summary <folder for the results>
-#   run.sh import <Git repository> <opal> <another opal>
-# Needs opal, git, git-lfs, hyperfine, jq, curl and openssl on the PATH.
+#   run.sh import <Git repository> <opalro> <another opalro>
+# Needs opalro, git, git-lfs, hyperfine, jq, curl and openssl on the PATH.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-export OPAL_USER_NAME=Bench OPAL_USER_EMAIL=bench@example.com
+export OPALRO_USER_NAME=Bench OPALRO_USER_EMAIL=bench@example.com
 export GIT_AUTHOR_NAME=Bench GIT_AUTHOR_EMAIL=bench@example.com
 export GIT_COMMITTER_NAME=Bench GIT_COMMITTER_EMAIL=bench@example.com
-OPAL_CONFIG_DIR=$(mktemp -d)
-export OPAL_CONFIG_DIR
+OPALRO_CONFIG_DIR=$(mktemp -d)
+export OPALRO_CONFIG_DIR
 # Only this folder goes on exit; the data folder is the caller's, and stays after a failure too.
-trap 'rm -rf "$OPAL_CONFIG_DIR"' EXIT
+trap 'rm -rf "$OPALRO_CONFIG_DIR"' EXIT
 
 # hyperfine runs each command with bash -c; on Windows, Git's own bash, named by its path.
 if command -v cygpath >/dev/null; then shell="'$(cygpath -m "$BASH")'"; else shell=bash; fi
@@ -43,14 +43,14 @@ size() {
 	printf '%s\t%s\n' "$1" "$(du -sb "$2" | cut -f1)" | tee -a "$results/sizes.tsv"
 }
 
-# steps <set> <opal, git or lfs>: every step for one tool, on a copy of the set.
+# steps <set> <opalro, git or lfs>: every step for one tool, on a copy of the set.
 steps() {
 	local set=$1 t=$2 dir=$work/$1-$2 n=$work/$1-$2.n start save status big first
 	rm -rf "$dir" "$n" && cp -a "$work/$set" "$dir" && cd "$dir"
-	if [ "$t" = opal ]; then
-		start='rm -rf .opal && opal start --preset custom'
-		save="opal save 'A save' --yes"
-		status='opal status'
+	if [ "$t" = opalro ]; then
+		start='rm -rf .opalro && opalro start --preset custom'
+		save="opalro save 'A save' --yes"
+		status='opalro status'
 	else
 		start='rm -rf .git && git init -q -b main && git config core.autocrlf false'
 		save="git add -A && git commit -q -m 'A commit'"
@@ -76,13 +76,13 @@ steps() {
 	# changed in the second it was written, so the files age first.
 	sleep 3
 	step "$set-$t-status" "" "$status"
-	big=$(find . -name .git -prune -o -name .opal -prune -o -type f -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+	big=$(find . -name .git -prune -o -name .opalro -prune -o -type f -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
 	step "$set-$t-status-after-touching" "touch '$big'" "$status"
-	if [ "$t" = opal ]; then
-		# The save before it is the empty one opal start makes.
-		first=$(opal history --json | jq -j '.saves[-2].id')
-		step "$set-$t-back-to-first" 'opal goto main' "opal goto $first"
-		size "$set-$t" .opal
+	if [ "$t" = opalro ]; then
+		# The save before it is the empty one opalro start makes.
+		first=$(opalro history --json | jq -j '.saves[-2].id')
+		step "$set-$t-back-to-first" 'opalro goto main' "opalro goto $first"
+		size "$set-$t" .opalro
 	else
 		first=$(git rev-list --max-parents=0 HEAD)
 		step "$set-$t-back-to-first" 'git checkout -q main' "git checkout -q $first"
@@ -101,14 +101,14 @@ run_times() {
 # over its own limit: 2 times, or 3.5 for going back, whose goal for v0.2 is 2.
 # A flush that stalls on the runner's disk shows as a mean far above the median.
 gate_check() {
-	local failed=0 step limit opal git
+	local failed=0 step limit opalro git
 	echo "== The gate: Opalro's median, Git's median, times Git's, at most 2 (3.5 for back-to-first, whose v0.2 goal is 2); then each mean, best and worst run"
 	for step in status:2 small-change:2 back-to-first:3.5; do
 		limit=${step#*:} step=${step%:*}
-		opal=$(run_times "$1"/*-code-opal-"$step".json)
+		opalro=$(run_times "$1"/*-code-opalro-"$step".json)
 		git=$(run_times "$1"/*-code-git-"$step".json)
 		# Fields: the step, its limit, then Opalro's four times, then Git's four.
-		echo "$step $limit $opal $git" | awk '{
+		echo "$step $limit $opalro $git" | awk '{
 			r = $3 / $7
 			goal = (r > 2 && r <= $2) ? "; over the v0.2 goal of 2" : ""
 			printf "%-14s %8.1f ms %8.1f ms %6.3f at most %s %-4s  Opalro mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s%s", $1, $3 * 1000, $7 * 1000, r, $2, (r > $2 ? "OVER" : "ok"), $4 * 1000, $5 * 1000, $6 * 1000, $8 * 1000, $9 * 1000, $10 * 1000, goal, ORS
@@ -118,11 +118,11 @@ gate_check() {
 	return "$failed"
 }
 
-# imported <name>: times opal import of the Git repository in the current folder, then sizes both.
+# imported <name>: times opalro import of the Git repository in the current folder, then sizes both.
 imported() {
-	step "$1-import" 'rm -rf .opal' 'opal import'
+	step "$1-import" 'rm -rf .opalro' 'opalro import'
 	size "$1-git" .git
-	size "$1-opal" .opal
+	size "$1-opalro" .opalro
 }
 
 case $1 in
@@ -134,7 +134,7 @@ sets)
 		# An hour old, so no tool takes a file for one that may still be changing.
 		find "$work/$set" -type f -exec touch -d '1 hour ago' {} +
 		size "$set-files" "$work/$set"
-		for t in opal git lfs; do steps "$set" "$t"; done
+		for t in opalro git lfs; do steps "$set" "$t"; done
 		rm -rf "${work:?}/$set"
 	done
 	bash "$here/data.sh" lfs "$work/lfs"
@@ -151,7 +151,7 @@ gate)
 	mkdir -p "$work" "$results"
 	[ -d "$work/code" ] || bash "$here/data.sh" code "$work/code"
 	find "$work/code" -type f -exec touch -d '1 hour ago' {} +
-	for t in opal git; do steps code "$t"; done
+	for t in opalro git; do steps code "$t"; done
 	rm -rf "${work:?}/code"
 	gate_check "$results"
 	;;
@@ -164,25 +164,25 @@ summary)
 	cat "$2/sizes.tsv"
 	;;
 import)
-	# Imports the repository with each opal in turn, three times, and after each import times the
+	# Imports the repository with each opalro in turn, three times, and after each import times the
 	# first save, of a small change. Git wrote some files with CRLF, as .gitattributes asked, so
 	# the save takes them as they are.
 	cd "$2"
 	echo "== $(git log -1 --format='%H %cs') ($(git rev-list --all --count) commits, $(git for-each-ref | wc -l) refs)"
 	for i in 1 2 3; do
-		for opal in "$3" "$4"; do
-			rm -rf .opal
+		for opalro in "$3" "$4"; do
+			rm -rf .opalro
 			git checkout -q -- README.md
-			/usr/bin/time -f "$opal, import $i: %e s, peak %M KiB" "$opal" import >/dev/null
+			/usr/bin/time -f "$opalro, import $i: %e s, peak %M KiB" "$opalro" import >/dev/null
 			echo "A small change." >>README.md
-			/usr/bin/time -f "$opal, first save $i: %e s, peak %M KiB" "$opal" save "A change" --yes --accept-crlf >/dev/null
+			/usr/bin/time -f "$opalro, first save $i: %e s, peak %M KiB" "$opalro" save "A change" --yes --accept-crlf >/dev/null
 		done
 	done
 	;;
 *)
 	echo "usage: run.sh sets <data folder> <results folder>, run.sh gate <data folder> <results folder>," >&2
 	echo "       run.sh summary <results folder>," >&2
-	echo "       or run.sh import <repository> <opal> <another opal>" >&2
+	echo "       or run.sh import <repository> <opalro> <another opalro>" >&2
 	exit 2
 	;;
 esac

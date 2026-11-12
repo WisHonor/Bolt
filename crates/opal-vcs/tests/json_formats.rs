@@ -35,7 +35,7 @@ fn fields_in_json_md() -> BTreeMap<(String, usize), BTreeSet<String>> {
             }
         } else if let Some(key) = &filling {
             let first = line.split('|').nth(1).unwrap_or_default();
-            // `opal_json`, `result` names two fields; `error.message` is a field of `error`; in
+            // `opalro_json`, `result` names two fields; `error.message` is a field of `error`; in
             // `undone` (`undo`) the brackets name a command, not a field.
             let mut outside = String::new();
             let mut depth = 0;
@@ -59,7 +59,7 @@ fn fields_in_json_md() -> BTreeMap<(String, usize), BTreeSet<String>> {
     tables
 }
 
-/// `opal args --json` in `dir`, which must exit with `code`; its document.
+/// `opalro args --json` in `dir`, which must exit with `code`; its document.
 fn document(env: &Env, dir: &Path, args: &[&str], code: i32) -> Value {
     let out = env.opal_in(dir).args(args).arg("--json").output().unwrap();
     assert_eq!(
@@ -81,7 +81,7 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     docs.push(("5. Errors", 0, document(&elsewhere, &empty, &["status"], 1)));
     let start = &["start", "--preset", "custom"];
     docs.push((
-        "`opal start --json`",
+        "`opalro start --json`",
         0,
         document(&elsewhere, &empty, start, 0),
     ));
@@ -90,53 +90,53 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let root = env.root().to_owned();
     let run = |args: &[&str], code| document(&env, &root, args, code);
     env.commit("a.txt", "one\n", "One");
-    docs.push(("`opal import --json`", 0, run(&["import"], 0)));
-    docs.push(("`opal setup --json`", 0, run(&["setup"], 0)));
+    docs.push(("`opalro import --json`", 0, run(&["import"], 0)));
+    docs.push(("`opalro setup --json`", 0, run(&["setup"], 0)));
     docs.push((
-        "`opal setup --json`",
+        "`opalro setup --json`",
         1,
         run(&["setup", "--preset", "code"], 1),
     ));
     env.overwrite("a.txt", "two\n");
-    docs.push(("`opal status --json`", 0, run(&["status"], 0)));
-    docs.push(("`opal changes --json`", 0, run(&["changes"], 0)));
-    docs.push(("`opal save --json`", 0, run(&["save", "Two"], 0)));
-    docs.push(("`opal save --json`", 0, run(&["save", "Two"], 0)));
+    docs.push(("`opalro status --json`", 0, run(&["status"], 0)));
+    docs.push(("`opalro changes --json`", 0, run(&["changes"], 0)));
+    docs.push(("`opalro save --json`", 0, run(&["save", "Two"], 0)));
+    docs.push(("`opalro save --json`", 0, run(&["save", "Two"], 0)));
     let history = run(&["history"], 0);
     let first = history["saves"][1]["id"].as_str().unwrap().to_owned();
-    docs.push(("`opal history --json`", 0, history));
-    docs.push(("`opal show --json`", 0, run(&["show"], 0)));
-    docs.push(("`opal line --json`", 0, run(&["line"], 0)));
-    docs.push(("`opal goto --json`", 0, run(&["goto", &first], 0)));
+    docs.push(("`opalro history --json`", 0, history));
+    docs.push(("`opalro show --json`", 0, run(&["show"], 0)));
+    docs.push(("`opalro line --json`", 0, run(&["line"], 0)));
+    docs.push(("`opalro goto --json`", 0, run(&["goto", &first], 0)));
     run(&["goto", "main"], 0);
     env.overwrite("a.txt", "three\n");
-    docs.push(("`opal discard --json`", 0, run(&["discard"], 0)));
+    docs.push(("`opalro discard --json`", 0, run(&["discard"], 0)));
     env.overwrite("a.txt", "four\n");
-    docs.push(("`opal shelf --json`", 0, run(&["shelf"], 0)));
+    docs.push(("`opalro shelf --json`", 0, run(&["shelf"], 0)));
     docs.push((
-        "`opal shelf --list --json`",
+        "`opalro shelf --list --json`",
         0,
         run(&["shelf", "--list"], 0),
     ));
-    docs.push(("`opal unshelf --json`", 0, run(&["unshelf"], 0)));
-    let undo = "`opal undo --json` and `opal redo --json`";
+    docs.push(("`opalro unshelf --json`", 0, run(&["unshelf"], 0)));
+    let undo = "`opalro undo --json` and `opalro redo --json`";
     docs.push((undo, 0, run(&["undo"], 0)));
     docs.push((undo, 0, run(&["redo"], 0)));
     let listed = run(&["undo", "--list"], 0);
     let back = listed["undo"][2]["entry"].as_str().unwrap()[..8].to_owned();
-    docs.push(("`opal undo --list --json`", 0, listed));
+    docs.push(("`opalro undo --list --json`", 0, listed));
     let all = run(&["undo", "--list", "--all"], 0);
-    docs.push(("`opal undo --list --json`", 1, all));
+    docs.push(("`opalro undo --list --json`", 1, all));
     docs.push((
-        "`opal undo --to <entry> --json`",
+        "`opalro undo --to <entry> --json`",
         0,
         run(&["undo", "--to", &back], 0),
     ));
-    docs.push(("`opal tidy --json`", 0, run(&["tidy"], 0)));
-    docs.push(("`opal verify --json`", 0, run(&["verify"], 0)));
-    std::fs::remove_file(root.join(".opal/state/head")).unwrap();
+    docs.push(("`opalro tidy --json`", 0, run(&["tidy"], 0)));
+    docs.push(("`opalro verify --json`", 0, run(&["verify"], 0)));
+    std::fs::remove_file(root.join(".opalro/state/head")).unwrap();
     let lost = run(&["undo", "--list"], 0);
-    docs.push(("`opal undo --list --json`", 2, lost));
+    docs.push(("`opalro undo --list --json`", 2, lost));
     docs
 }
 
@@ -149,7 +149,7 @@ fn every_document_has_only_the_fields_json_md_lists() {
             .unwrap_or_else(|| panic!("json.md has no table {table} under {section}"));
         for field in doc.as_object().unwrap().keys() {
             assert!(
-                listed.contains(field) || field == "opal_json",
+                listed.contains(field) || field == "opalro_json",
                 "{section}, table {table}: json.md doesn't list `{field}`: {doc}"
             );
         }
@@ -157,9 +157,9 @@ fn every_document_has_only_the_fields_json_md_lists() {
 }
 
 #[test]
-fn every_document_parses_and_holds_opal_json_and_warnings() {
+fn every_document_parses_and_holds_opalro_json_and_warnings() {
     for (section, _, doc) in every_document() {
-        assert_eq!(doc["opal_json"], 1, "{section}: {doc}");
+        assert_eq!(doc["opalro_json"], 1, "{section}: {doc}");
         assert!(doc["warnings"].is_array(), "{section}: {doc}");
     }
 }
@@ -167,11 +167,14 @@ fn every_document_parses_and_holds_opal_json_and_warnings() {
 #[test]
 fn the_fields_of_a_table_are_read_from_its_first_column() {
     let spec = fields_in_json_md();
-    let undo = &spec[&("`opal undo --json` and `opal redo --json`".to_owned(), 0)];
+    let undo = &spec[&(
+        "`opalro undo --json` and `opalro redo --json`".to_owned(),
+        0,
+    )];
     let names: Vec<&str> = undo.iter().map(String::as_str).collect();
     let want = [
         "finished",
-        "opal_json",
+        "opalro_json",
         "position",
         "redone",
         "shelved",

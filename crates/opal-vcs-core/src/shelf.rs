@@ -1,4 +1,4 @@
-//! `opal shelf` and `opal unshelf`: unsaved changes set aside on a numbered shelf, a kept save
+//! `opalro shelf` and `opalro unshelf`: unsaved changes set aside on a numbered shelf, a kept save
 //! the state lists, and brought back onto whatever save the project is on.
 
 use std::collections::{BTreeSet, HashMap, HashSet};

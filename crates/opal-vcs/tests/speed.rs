@@ -25,7 +25,7 @@ const MOST_BYTES: u64 = 500_000_000;
 #[ignore = "slow: builds a 100,000-file project"]
 fn status_on_an_unchanged_100_000_file_project() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -41,7 +41,7 @@ fn status_on_an_unchanged_100_000_file_project() {
         file.set_modified(then).unwrap();
     }
     let started = Instant::now();
-    env.opal()
+    env.opalro()
         .args(["save", "Files", "--yes"])
         .assert()
         .success();
@@ -49,7 +49,7 @@ fn status_on_an_unchanged_100_000_file_project() {
     let mut times = Vec::new();
     for _ in 0..2 {
         let started = Instant::now();
-        let out = env.opal().arg("status").output().unwrap();
+        let out = env.opalro().arg("status").output().unwrap();
         times.push(started.elapsed().as_secs_f64());
         assert!(out.status.success(), "{}", text(&out.stderr));
         assert!(
@@ -76,7 +76,7 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
     }
     // Both folders go when `env` is dropped, after a failed assert too.
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -90,13 +90,13 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
     );
     assert_eq!(ended.code, Some(0), "{ended:?}");
     // A save that left the file out would pass the gate too.
-    let packs = env.root().join(".opal").join("store").join("packs");
+    let packs = env.root().join(".opalro").join("store").join("packs");
     let stored: u64 = fs::read_dir(packs)
         .unwrap()
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     assert!(stored >= BIG, "only {stored} bytes stored");
-    // A running opal holds more than 1 MiB, so less means no peak was read.
+    // A running opalro holds more than 1 MiB, so less means no peak was read.
     assert!(
         ended.peak_bytes >= 1 << 20,
         "read no peak from /proc: {ended:?}"
@@ -116,7 +116,7 @@ fn saving_a_10_gib_file_stays_under_500_mb() {
 #[ignore = "slow: saves the deepest chain of folders, a file in each"]
 fn the_deepest_chain_of_folders_with_a_file_in_each() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -126,13 +126,13 @@ fn the_deepest_chain_of_folders_with_a_file_in_each() {
     };
     let timed = |args: &[&str]| {
         let started = Instant::now();
-        let out = env.opal().args(args).output().unwrap();
+        let out = env.opalro().args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {}", text(&out.stderr));
         started.elapsed().as_secs_f64()
     };
     println!("save: {:.2} s", timed(&["save", "Chain", "--yes"]));
     let second = main_tip(&env).to_hex();
-    fs::remove_file(env.root().join(".opal/cache/files")).unwrap();
+    fs::remove_file(env.root().join(".opalro/cache/files")).unwrap();
     println!("status, nothing vouched for: {:.2} s", timed(&["status"]));
     println!("goto the save before: {:.2} s", timed(&["goto", &first]));
     assert!(!env.root().join("d").exists());
@@ -182,13 +182,13 @@ impl Drop for Chain {
     }
 }
 
-/// Writes the memory gate's file where `OPAL_GATE_FILE` says, to measure a save by hand on a
+/// Writes the memory gate's file where `OPALRO_GATE_FILE` says, to measure a save by hand on a
 /// system without /proc (docs/benchmarks.md).
 #[test]
-#[ignore = "writes 10 GiB where OPAL_GATE_FILE says"]
+#[ignore = "writes 10 GiB where OPALRO_GATE_FILE says"]
 fn write_the_memory_gate_file() {
-    let Some(path) = std::env::var_os("OPAL_GATE_FILE") else {
-        println!("Set OPAL_GATE_FILE to the file to write.");
+    let Some(path) = std::env::var_os("OPALRO_GATE_FILE") else {
+        println!("Set OPALRO_GATE_FILE to the file to write.");
         return;
     };
     write_incompressible(Path::new(&path));
@@ -199,7 +199,7 @@ fn write_the_memory_gate_file() {
 fn write_incompressible(path: &Path) {
     let mut file = fs::File::create(path).unwrap();
     let mut xof = blake3::Hasher::new()
-        .update(b"opal memory gate")
+        .update(b"opalro memory gate")
         .finalize_xof();
     let mut block = vec![0; 1 << 20];
     for _ in 0..BIG >> 20 {

@@ -1,4 +1,4 @@
-//! `opal shelf`, `opal shelf --list` and `opal unshelf`, end to end.
+//! `opalro shelf`, `opalro shelf --list` and `opalro unshelf`, end to end.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
@@ -30,7 +30,7 @@ fn with(files: &Files, changes: &[(&str, Option<&str>)]) -> Files {
 /// A project with `entries` saved on `main`.
 fn project(entries: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -41,9 +41,9 @@ fn project(entries: &[(&str, &str)]) -> Env {
     env
 }
 
-/// `opal <args>`, which must succeed; what it printed.
+/// `opalro <args>`, which must succeed; what it printed.
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -53,9 +53,9 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// `opal <args>`, which must fail; what it said, on stdout then stderr.
+/// `opalro <args>`, which must fail; what it said, on stdout then stderr.
 fn refused(env: &Env, args: &[&str]) -> (String, String) {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),
@@ -66,7 +66,7 @@ fn refused(env: &Env, args: &[&str]) -> (String, String) {
 }
 
 fn json(env: &Env, args: &[&str]) -> serde_json::Value {
-    let out = env.opal().args(args).arg("--json").output().unwrap();
+    let out = env.opalro().args(args).arg("--json").output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
@@ -81,7 +81,7 @@ fn labels(env: &Env) -> Vec<String> {
 
 #[cfg(feature = "fault-injection")]
 fn journal_exists(env: &Env) -> bool {
-    env.root().join(".opal/state/journal").exists()
+    env.root().join(".opalro/state/journal").exists()
 }
 
 const SAVED: &[(&str, &str)] = &[
@@ -145,7 +145,7 @@ fn shelf_sets_every_unsaved_change_aside_and_cleans_the_folder() {
 #[test]
 fn something_in_the_way_of_a_saved_file_stops_shelf() {
     let env = project(SAVED);
-    write(&env, ".opalignore", "dir\n");
+    write(&env, ".opalroignore", "dir\n");
     ok(&env, &["save", "Ignore dir"]);
     // The saved dir/c.txt would go back where a file Opalro ignores now is.
     fs::remove_dir_all(env.root().join("dir")).unwrap();
@@ -157,7 +157,7 @@ fn something_in_the_way_of_a_saved_file_stops_shelf() {
         said.contains("in the way") && said.contains("dir"),
         "{said}"
     );
-    assert!(said.contains("then run opal shelf again"), "{said}");
+    assert!(said.contains("then run opalro shelf again"), "{said}");
     assert_eq!((env.standing(), files(env.root())), before);
     assert!(labels(&env).is_empty());
 }
@@ -194,7 +194,7 @@ fn unshelf_by_number() {
     write(&env, "b.txt", "mine\n");
     ok(&env, &["shelf", "Change b"]);
     let doc = json(&env, &["unshelf", "1"]);
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     assert_eq!(doc["finished"], false);
     assert_eq!(doc["shelf"]["label"], "1", "{doc}");
     assert_eq!(
@@ -209,7 +209,7 @@ fn unshelf_by_number() {
     let standing = env.standing();
     let (_, said) = refused(&env, &["unshelf", "1"]);
     assert!(said.contains("There's no shelf 1."), "{said}");
-    assert!(said.contains("opal shelf --list"), "{said}");
+    assert!(said.contains("opalro shelf --list"), "{said}");
     assert_eq!(env.standing(), standing);
 }
 
@@ -266,9 +266,9 @@ fn unshelf_onto_another_save_applies_where_nothing_collides() {
     assert_eq!(files(env.root()), wanted);
 }
 
-/// The text of `opal goto` to the save `save`, as a hint names it.
+/// The text of `opalro goto` to the save `save`, as a hint names it.
 fn goto_hint(save: Id) -> String {
-    format!("opal goto {}", &save.to_hex()[..12])
+    format!("opalro goto {}", &save.to_hex()[..12])
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn unshelf_onto_a_save_that_changed_a_shelved_file_stops() {
     // Saving, shelving or discarding wouldn't clear the way: going to that save does.
     assert!(!said.contains("Save, shelve or discard"), "{said}");
     let goto = goto_hint(shelved_on);
-    let way = format!("{goto}, then run opal unshelf 1 there");
+    let way = format!("{goto}, then run opalro unshelf 1 there");
     assert!(said.contains(&way), "{said}");
     assert_eq!(
         (env.standing(), files(env.root()), state(&env).shelves),
@@ -313,7 +313,7 @@ fn unsaved_work_in_the_way_stops_unshelf() {
     ok(&env, &["shelf"]);
     write(&env, "a.txt", "again\n");
     let before = (env.standing(), files(env.root()), state(&env).shelves);
-    let out = env.opal().args(["unshelf", "--json"]).output().unwrap();
+    let out = env.opalro().args(["unshelf", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let message = doc["error"]["message"].as_str().unwrap();
@@ -324,8 +324,8 @@ fn unsaved_work_in_the_way_stops_unshelf() {
     assert!(!message.contains("since the shelf was made"), "{doc}");
     let hint = doc["error"]["hint"].as_str().unwrap();
     assert!(hint.contains("Save, shelve or discard"), "{doc}");
-    assert!(hint.contains("opal unshelf 1"), "{doc}");
-    assert!(!hint.contains("opal goto"), "{doc}");
+    assert!(hint.contains("opalro unshelf 1"), "{doc}");
+    assert!(!hint.contains("opalro goto"), "{doc}");
     assert_eq!(
         (env.standing(), files(env.root()), state(&env).shelves),
         before
@@ -357,7 +357,7 @@ fn unshelf_tells_unsaved_work_from_what_the_save_changed() {
     );
     let goto = goto_hint(shelved_on);
     assert!(
-        said.contains(&format!("{goto}, then run opal unshelf 1 there")),
+        said.contains(&format!("{goto}, then run opalro unshelf 1 there")),
         "{said}"
     );
     // As the hint says: the work set aside, then the shelf brought back on its own save.
@@ -392,7 +392,7 @@ fn a_folder_the_save_made_a_file_counts_as_changed_by_the_save() {
     assert!(!said.contains("Your unsaved changes"), "{said}");
     let goto = goto_hint(shelved_on);
     assert!(
-        said.contains(&format!("{goto}, then run opal unshelf 1 there")),
+        said.contains(&format!("{goto}, then run opalro unshelf 1 there")),
         "{said}"
     );
     let words: Vec<&str> = goto.split(' ').collect();
@@ -466,10 +466,10 @@ fn a_save_no_line_reaches_any_more_is_not_offered_to_goto() {
         "{said}"
     );
     assert!(
-        said.contains("opal goto can't reach the save it was made on"),
+        said.contains("opalro goto can't reach the save it was made on"),
         "{said}"
     );
-    assert!(said.contains("opal undo --list"), "{said}");
+    assert!(said.contains("opalro undo --list"), "{said}");
     assert!(!said.contains(&goto), "{said}");
 }
 
@@ -502,7 +502,7 @@ fn a_change_a_finished_switch_met_is_not_told_as_one_the_shelf_met() {
         };
         journal.write(&repo, &lock).unwrap();
     }
-    let out = env.opal().arg("shelf").output().unwrap();
+    let out = env.opalro().arg("shelf").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout),
@@ -603,12 +603,12 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
     write(&env, "b.txt", "mine\n");
     write(&env, "n.txt", "new\n");
     ok(&env, &["shelf", "Second"]);
-    // `opal <args>`, stopped after its first write.
+    // `opalro <args>`, stopped after its first write.
     let stopped = |env: &Env, args: &[&str]| {
         let out = env
-            .opal()
+            .opalro()
             .args(args)
-            .env("OPAL_FAULT_FAIL", "switch:changed")
+            .env("OPALRO_FAULT_FAIL", "switch:changed")
             .output()
             .unwrap();
         assert_eq!(
@@ -619,7 +619,7 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
         );
         assert!(journal_exists(env));
     };
-    // `opal <args>`, which finishes the stop and brings no shelf back.
+    // `opalro <args>`, which finishes the stop and brings no shelf back.
     let finishes = |env: &Env, args: &[&str]| -> String {
         let said = ok(env, args);
         let done = " that was stopped, so no shelf was brought back this time.";
@@ -633,7 +633,7 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
     stopped(&env, &["unshelf"]);
     let said = finishes(&env, &["unshelf"]);
     assert!(said.starts_with("Finished the unshelf"), "{said}");
-    let again = "Running opal unshelf again brings back the newest shelf left.";
+    let again = "Running opalro unshelf again brings back the newest shelf left.";
     assert!(said.contains(again), "{said}");
     // The newest is back whole, and the other is still on the list.
     let second = with(
@@ -665,7 +665,7 @@ fn running_unshelf_again_after_a_stop_finishes_it_and_brings_back_no_other_shelf
     stopped(&env, &["discard"]);
     let said = finishes(&env, &["unshelf", "1"]);
     assert!(
-        said.contains("Running opal unshelf 1 again brings it back."),
+        said.contains("Running opalro unshelf 1 again brings it back."),
         "{said}"
     );
     // And told in JSON.
@@ -711,7 +711,7 @@ fn shelf_list_shows_number_message_line_time_and_files() {
     let env = project(SAVED);
     assert_eq!(
         ok(&env, &["shelf", "--list"]),
-        "No shelves: opal shelf sets your unsaved changes aside on one.\n"
+        "No shelves: opalro shelf sets your unsaved changes aside on one.\n"
     );
     write(&env, "a.txt", "mine\n");
     write(&env, "n.txt", "new\n");
@@ -728,7 +728,7 @@ fn shelf_list_shows_number_message_line_time_and_files() {
          1  \"Work on login\"  2 files  just now  on main\n"
     );
     let doc = json(&env, &["shelf", "--list"]);
-    assert_eq!(doc["opal_json"], 1);
+    assert_eq!(doc["opalro_json"], 1);
     assert_eq!(doc["warnings"], serde_json::json!([]));
     let listed = doc["shelves"].as_array().unwrap();
     assert_eq!(listed.len(), 2, "{doc}");
@@ -743,7 +743,11 @@ fn shelf_list_shows_number_message_line_time_and_files() {
     assert!(first["saver"]["time_ms"].as_i64().unwrap() > 0);
     assert_eq!(listed[0]["line"], serde_json::Value::Null);
     // --list takes no message.
-    let out = env.opal().args(["shelf", "--list", "x"]).output().unwrap();
+    let out = env
+        .opalro()
+        .args(["shelf", "--list", "x"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
 
@@ -755,7 +759,7 @@ fn gotos_hint_names_shelf() {
     ok(&env, &["save", "Two"]);
     write(&env, "a.txt", "mine\n");
     let (_, said) = refused(&env, &["goto", &one.to_hex()]);
-    assert!(said.contains("shelve them (opal shelf)"), "{said}");
+    assert!(said.contains("shelve them (opalro shelf)"), "{said}");
     // Shelving them clears the way.
     ok(&env, &["shelf"]);
     ok(&env, &["goto", &one.to_hex()]);
@@ -776,7 +780,7 @@ fn shelf_leaves_a_link_that_could_come_back_only_as_a_file() {
     let env = project(SAVED);
     let outside = tempfile::tempdir().unwrap();
     folder_link(outside.path(), &env.root().join("out"));
-    let out = env.opal().arg("shelf").output().unwrap();
+    let out = env.opalro().arg("shelf").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "Nothing was shelved.\n");
     let warned = text(&out.stderr);
@@ -846,7 +850,7 @@ fn warned(doc: &serde_json::Value, kind: &str) -> bool {
     warnings.iter().any(|w| w["kind"] == kind)
 }
 
-/// Runs `opal <command>` on copies of `template`, stopped at the first write, then the second,
+/// Runs `opalro <command>` on copies of `template`, stopped at the first write, then the second,
 /// and so on until it runs to the end. Every time, each file is wholly `before` or `after`, and
 /// the next command that changes the project finishes it. `done` checks a copy where the step
 /// was made, and `not_begun` one where it wasn't.
@@ -865,9 +869,9 @@ fn stopped_anywhere(
         let env = Env::empty();
         support::copy_dir(template.root(), env.root());
         let out = env
-            .opal()
+            .opalro()
             .arg(command)
-            .env("OPAL_FAULT_AT", n.to_string())
+            .env("OPALRO_FAULT_AT", n.to_string())
             .output()
             .unwrap();
         let crashed = text(&out.stderr).contains("injected crash");
@@ -940,7 +944,7 @@ fn a_shelf_or_unshelf_stopped_at_every_write_is_finished_by_the_next_command() {
 fn shelf_and_unshelf_json_match_their_snapshots() {
     let (env, _, _) = with_unsaved_work();
     let doc = |args: &[&str]| -> serde_json::Value {
-        let out = env.opal().args(args).arg("--json").output().unwrap();
+        let out = env.opalro().args(args).arg("--json").output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),

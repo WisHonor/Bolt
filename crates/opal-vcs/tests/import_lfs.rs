@@ -62,16 +62,16 @@ fn tracked() -> Env {
     env
 }
 
-/// Runs `opal import --json`, which must work, and returns its document.
+/// Runs `opalro import --json`, which must work, and returns its document.
 fn imported_json(env: &Env) -> serde_json::Value {
-    let out = env.opal().args(["--json", "import"]).output().unwrap();
+    let out = env.opalro().args(["--json", "import"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
 /// How many objects of `kind` the project at `root` stores, in all its packs.
 fn stored(root: &Path, kind: ObjectKind) -> usize {
-    std::fs::read_dir(root.join(".opal/store/packs"))
+    std::fs::read_dir(root.join(".opalro/store/packs"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|path| path.extension().is_some_and(|e| e == "pack"))
@@ -84,12 +84,12 @@ fn stored(root: &Path, kind: ObjectKind) -> usize {
         .sum()
 }
 
-/// Checks that an import that stopped after it began `.opal` committed nothing.
+/// Checks that an import that stopped after it began `.opalro` committed nothing.
 #[track_caller]
 fn committed_nothing(env: &Env, err: &str) {
     assert!(err.contains("Nothing was committed."), "{err}");
-    assert!(env.root().join(".opal").is_dir(), "{err}");
-    assert!(!env.root().join(".opal/format").exists(), "{err}");
+    assert!(env.root().join(".opalro").is_dir(), "{err}");
+    assert!(!env.root().join(".opalro/format").exists(), "{err}");
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn an_import_brings_in_git_lfs_files_as_their_contents() {
     );
 }
 
-/// A repository cloned without `git lfs fetch --all` stops before `.opal` is made, listing the
+/// A repository cloned without `git lfs fetch --all` stops before `.opalro` is made, listing the
 /// first 20 missing, with their count and size, and the command that fetches them.
 #[test]
 fn an_import_stops_before_writing_when_lfs_objects_are_missing() {
@@ -136,7 +136,7 @@ fn an_import_stops_before_writing_when_lfs_objects_are_missing() {
     }
     let second = env.commit("readme.txt", "second\n", "Thirteen more");
     let err = env.refused_import();
-    assert!(!env.root().join(".opal").exists(), "{err}");
+    assert!(!env.root().join(".opalro").exists(), "{err}");
     let total = bytes(25_000);
     assert!(
         err.contains(&format!(
@@ -162,7 +162,7 @@ fn an_import_stops_before_writing_when_lfs_objects_are_missing() {
     assert!(
         err.contains(
             "hint: Nothing was changed. Download every version Git LFS keeps with `git lfs fetch \
-             --all`, then run opal import again."
+             --all`, then run opalro import again."
         ),
         "{err}"
     );
@@ -177,7 +177,7 @@ fn an_import_stops_before_writing_when_lfs_objects_are_missing() {
     );
 }
 
-/// With no `.git/lfs` and no `filter=lfs`, only the converter meets a pointer, once `.opal` is
+/// With no `.git/lfs` and no `filter=lfs`, only the converter meets a pointer, once `.opalro` is
 /// begun; nothing is committed, and the next run finishes from what was stored.
 #[test]
 fn without_a_sign_a_missing_object_stops_the_second_pass() {
@@ -239,7 +239,7 @@ fn an_object_whose_sha256_differs_stops_the_import() {
 
 /// An object counts only as a plain file of its pointer's size, so a folder, a link, or a file
 /// shorter or longer than its pointer says, by a byte or by far, is missing, and stops the import
-/// before `.opal` is made.
+/// before `.opalro` is made.
 #[test]
 fn an_object_of_the_wrong_size_or_kind_is_missing() {
     let real = b"the real picture\n";
@@ -273,7 +273,7 @@ fn an_object_of_the_wrong_size_or_kind_is_missing() {
             "{case}: {err}"
         );
         assert!(err.contains("hint: Nothing was changed."), "{case}: {err}");
-        assert!(!env.root().join(".opal").exists(), "{case}");
+        assert!(!env.root().join(".opalro").exists(), "{case}");
     }
 }
 
@@ -314,7 +314,7 @@ fn a_link_inside_git_lfs_is_never_followed() {
             None => "error: A Git LFS file in this history isn't in .git/lfs/objects:\n".to_owned(),
         };
         assert!(err.contains(&says), "{}: {err}", parts[linked]);
-        assert!(!env.root().join(".opal").exists(), "{}", parts[linked]);
+        assert!(!env.root().join(".opalro").exists(), "{}", parts[linked]);
     }
 }
 
@@ -333,13 +333,13 @@ fn a_pointer_with_extensions_stops_the_import() {
              never does.\n"
         )
     };
-    // With a sign of Git LFS, the first pass stops at it before `.opal` is made.
+    // With a sign of Git LFS, the first pass stops at it before `.opalro` is made.
     let env = tracked();
     let commit = env.commit("art/big.psd", &extended(&keep(&env, real)), "Add a picture");
     let err = env.refused_import();
     assert!(err.contains(&says(&commit)), "{err}");
     assert!(err.contains("git lfs migrate export"), "{err}");
-    assert!(!env.root().join(".opal").exists(), "{err}");
+    assert!(!env.root().join(".opalro").exists(), "{err}");
     // Without one, the second pass does.
     let env = Env::new();
     let commit = env.commit("art/big.psd", &extended(&pointer(real)), "Add a picture");
@@ -480,7 +480,7 @@ fn lfs_storage_elsewhere_never_stops_a_repository_without_lfs_files() {
 }
 
 /// With a sign of Git LFS, `lfs.storage` set elsewhere stops the import at the first Git LFS file,
-/// before `.opal` is made, even with its object at hand, saying where it is set: `.git/config`,
+/// before `.opalro` is made, even with its object at hand, saying where it is set: `.git/config`,
 /// or `config.worktree`, which Git reads after it.
 #[test]
 fn lfs_storage_elsewhere_stops_an_import_of_lfs_files_before_writing() {
@@ -502,12 +502,12 @@ fn lfs_storage_elsewhere_stops_an_import_of_lfs_files_before_writing() {
         assert!(
             err.contains(
                 "hint: Nothing was changed. Remove that setting, or set it to lfs, download the \
-                 files into .git/lfs/objects with `git lfs fetch --all`, then run opal import \
+                 files into .git/lfs/objects with `git lfs fetch --all`, then run opalro import \
                  again."
             ),
             "{file}: {err}"
         );
-        assert!(!env.root().join(".opal").exists(), "{file}: {err}");
+        assert!(!env.root().join(".opalro").exists(), "{file}: {err}");
     }
 }
 
@@ -547,7 +547,7 @@ fn lfs_storage_in_the_users_own_git_settings_stops_unless_the_repository_sets_it
         let err = env.refused_import();
         let says = kept_by_setting(&commit, &set_in.display().to_string());
         assert!(err.contains(&says), "{included}: {err}");
-        assert!(!env.root().join(".opal").exists(), "{included}");
+        assert!(!env.root().join(".opalro").exists(), "{included}");
     }
     let env = tracked();
     std::fs::write(env.config().join(".gitconfig"), storage).unwrap();
@@ -568,7 +568,7 @@ fn lfs_storage_given_through_git_config_count_wins_over_the_repositorys_own() {
             ("GIT_CONFIG_KEY_0", "lfs.storage"),
             ("GIT_CONFIG_VALUE_0", value),
         ];
-        env.opal().arg("import").envs(given).output().unwrap()
+        env.opalro().arg("import").envs(given).output().unwrap()
     };
     // Elsewhere, over the repository's `lfs`.
     let env = tracked();
@@ -577,7 +577,7 @@ fn lfs_storage_given_through_git_config_count_wins_over_the_repositorys_own() {
     let err = text(&import(&env, "/mnt/shared-lfs").stderr);
     let says = kept_by_setting(&commit, "GIT_CONFIG_VALUE_0");
     assert!(err.contains(&says), "{err}");
-    assert!(!env.root().join(".opal").exists(), "{err}");
+    assert!(!env.root().join(".opalro").exists(), "{err}");
     // `lfs`, over the repository's elsewhere.
     let env = tracked();
     env.git(&["config", "lfs.storage", "/mnt/shared-lfs"]);
@@ -764,7 +764,7 @@ fn an_unreadable_git_lfs_folder_stops_only_an_import_with_lfs_files() {
         std::fs::create_dir_all(env.root().join(".git/lfs/objects")).unwrap();
         lock(env, 0o000);
         let readable = std::fs::read_dir(env.root().join(".git/lfs")).is_ok();
-        let out = env.opal().arg("import").output().unwrap();
+        let out = env.opalro().arg("import").output().unwrap();
         lock(env, 0o755);
         (readable, out)
     };
@@ -782,7 +782,7 @@ fn an_unreadable_git_lfs_folder_stops_only_an_import_with_lfs_files() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let err = text(&out.stderr);
     assert!(err.contains("error: Opalro couldn't read "), "{err}");
-    assert!(!env.root().join(".opal").exists(), "{err}");
+    assert!(!env.root().join(".opalro").exists(), "{err}");
 }
 
 /// A later export can give a pointer back only in the form Git LFS writes, so the others are
@@ -845,7 +845,7 @@ fn versions_of_a_big_lfs_file_share_their_chunks() {
 }
 
 const POINTERS_HINT: &str = "Nothing was saved. Run `git lfs checkout` to have Git LFS write the \
-                             files, then save again. If Git LFS can't, `opal discard` with those \
+                             files, then save again. If Git LFS can't, `opalro discard` with those \
                              paths puts back the files the import brought in.";
 
 /// The folder holds the pointers Git checked out, as it does where Git LFS wasn't installed.
@@ -878,7 +878,7 @@ fn the_first_save_after_an_import_stops_at_lfs_pointers_in_the_folder() {
     }
 
     let out = env
-        .opal()
+        .opalro()
         .args(["--json", "save", "Save it"])
         .output()
         .unwrap();
@@ -998,7 +998,11 @@ fn a_save_of_some_paths_stops_at_pointers_anywhere_in_the_folder() {
         assert!(err.contains("\n  art/a.psd\n"), "{err}");
         assert_eq!(env.standing(), before);
     }
-    let out = env.opal().args(["discard", "art/a.psd"]).output().unwrap();
+    let out = env
+        .opalro()
+        .args(["discard", "art/a.psd"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let out = env.save(&["Some", "readme.txt"]);
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -1029,7 +1033,7 @@ fn discarding_the_pointers_puts_back_what_the_import_brought_in() {
     assert!(err.contains(&format!("hint: {POINTERS_HINT}\n")), "{err}");
 
     let out = env
-        .opal()
+        .opalro()
         .args(["discard", "art/a.psd", "art/b.psd"])
         .output()
         .unwrap();

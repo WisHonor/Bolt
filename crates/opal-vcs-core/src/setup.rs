@@ -1,4 +1,4 @@
-//! `opal setup`'s step: a preset's `opal.toml` and `.opalignore` written as one step that undo
+//! `opalro setup`'s step: a preset's `opalro.toml` and `.opalroignore` written as one step that undo
 //! takes back (docs/storage-format.md section 9).
 
 use std::collections::BTreeMap;
@@ -28,12 +28,12 @@ use crate::warning::Warning;
 use crate::writeout;
 
 /// The only paths the step ever writes, at the project's top.
-const RULE_FILES: [&str; 2] = ["opal.toml", ".opalignore"];
+const RULE_FILES: [&str; 2] = ["opalro.toml", ".opalroignore"];
 
 /// What the step would do to one of the two rule files: `None` is no file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuleFileChange {
-    /// `opal.toml` or `.opalignore`.
+    /// `opalro.toml` or `.opalroignore`.
     pub path: &'static str,
     pub before: Option<Vec<u8>>,
     pub after: Option<Vec<u8>>,
@@ -102,17 +102,18 @@ impl SetupError {
         match self {
             SetupError::NotAFile { .. } => Some(
                 "Opalro reads and writes it only as a regular file: move it somewhere else, then \
-                 run opal setup again."
+                 run opalro setup again."
                     .to_owned(),
             ),
             SetupError::TooLarge { .. } => Some(
-                "Make it smaller or move it somewhere else, then run opal setup again.".to_owned(),
+                "Make it smaller or move it somewhere else, then run opalro setup again."
+                    .to_owned(),
             ),
             SetupError::ChangedSincePlan { .. } => {
-                Some("Run opal setup again to see what it would change now.".to_owned())
+                Some("Run opalro setup again to see what it would change now.".to_owned())
             }
             SetupError::InTheWay { .. } => {
-                Some("Rename or move them out of the way, then run opal setup again.".to_owned())
+                Some("Rename or move them out of the way, then run opalro setup again.".to_owned())
             }
             SetupError::Switch(e) => e.hint(),
             SetupError::Save(e) => e.hint_when_reading(),
@@ -121,7 +122,7 @@ impl SetupError {
     }
 }
 
-/// A look at the folder `root` before a start, and whether anything is named `opal.toml` there: a
+/// A look at the folder `root` before a start, and whether anything is named `opalro.toml` there: a
 /// file, a link or a folder, in any letter case the drive takes for that name.
 pub fn look_at(root: &Path) -> io::Result<(Looked, bool)> {
     let top = Dir::open_top(root)?;
@@ -134,9 +135,9 @@ pub fn look_at(root: &Path) -> io::Result<(Looked, bool)> {
     Ok((looked, has_rules_file))
 }
 
-/// How many lines the preset's block of the project's `.opalignore` holds; `None` when there is
+/// How many lines the preset's block of the project's `.opalroignore` holds; `None` when there is
 /// no file or no block.
-pub fn opalignore_block_lines(root: &Path) -> Result<Option<usize>, SetupError> {
+pub fn opalroignore_block_lines(root: &Path) -> Result<Option<usize>, SetupError> {
     let top = Dir::open_top(root).map_err(RepoError::from)?;
     Ok(read_rule_file(&top, RULE_FILES[1])?.and_then(|bytes| presets::block_lines(&bytes)))
 }
@@ -149,8 +150,8 @@ pub fn plan_setup(root: &Path, preset: Preset) -> Result<SetupPlan, SetupError> 
     let toml = read_rule_file(&top, RULE_FILES[0])?;
     let ignore = read_rule_file(&top, RULE_FILES[1])?;
     let new_toml = presets::opal_toml(preset, &found).map(String::into_bytes);
-    let block = presets::opalignore_block(preset, &found);
-    let new_ignore = presets::edit_opalignore(ignore.as_deref(), block.as_deref());
+    let block = presets::opalroignore_block(preset, &found);
+    let new_ignore = presets::edit_opalroignore(ignore.as_deref(), block.as_deref());
     let changes = [
         (RULE_FILES[0], toml, new_toml),
         (RULE_FILES[1], ignore, new_ignore),
@@ -170,7 +171,7 @@ pub fn plan_setup(root: &Path, preset: Preset) -> Result<SetupPlan, SetupError> 
     })
 }
 
-/// Writes the plan as one `setup` step, which `opal undo` takes back. Refuses if either file
+/// Writes the plan as one `setup` step, which `opalro undo` takes back. Refuses if either file
 /// changed since the plan was made. A plan with no changes writes and records nothing.
 pub fn apply_setup(
     repo: &mut Repository,

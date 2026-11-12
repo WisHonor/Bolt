@@ -98,8 +98,8 @@ fn an_interrupted_import_can_be_run_again() {
             }
             Ok(_) => break,
         };
-        assert!(!dir.path().join(".opal/format").exists(), "fault {n}");
-        // Every fault point is met once `.opal` is made, the first while `begin` takes the lock,
+        assert!(!dir.path().join(".opalro/format").exists(), "fault {n}");
+        // Every fault point is met once `.opalro` is made, the first while `begin` takes the lock,
         // so each stop says the folder is kept.
         assert!(
             matches!(stopped, ImportError::Unfinished { .. }),
@@ -108,7 +108,7 @@ fn an_interrupted_import_can_be_run_again() {
         between_packs |= stopped.to_string().ends_with("packs:rolled-over");
         // Deleting the folder is offered only while no head was written, whose entry holds the
         // whole import.
-        let head = dir.path().join(".opal/state/head").exists();
+        let head = dir.path().join(".opalro/state/head").exists();
         after_head |= head;
         let hint = stopped.hint().unwrap();
         assert_eq!(
@@ -119,7 +119,7 @@ fn an_interrupted_import_can_be_run_again() {
         // Running it again finishes the job, with the saves a clean import gives.
         import(dir.path()).unwrap();
         assert_eq!(state(dir.path()), state(clean.path()), "fault {n}");
-        let report = verify_store(&dir.path().join(".opal/store/packs"));
+        let report = verify_store(&dir.path().join(".opalro/store/packs"));
         assert!(report.is_ok(), "fault {n}: {:?}", report.problems);
     }
     set_test_pack_limit(None);

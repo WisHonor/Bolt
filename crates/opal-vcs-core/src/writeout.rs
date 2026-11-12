@@ -23,7 +23,7 @@ use crate::ingest::{self, IngestError, Ready};
 use crate::journal::{self, Action, Change, Content, Expected, Journal};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::names::{MAX_PATH_BYTES, is_opal_alias, is_git_alias, validate_path, writable_here};
+use crate::names::{MAX_PATH_BYTES, is_git_alias, is_opal_alias, validate_path, writable_here};
 use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository, damaged};
 use crate::scope::{Scope, ancestors};
@@ -94,7 +94,7 @@ pub fn plan(
         .map_err(|e| told_whose(repo, e, from, to))
 }
 
-/// `e`, a spelling of `.opal` the plan met past reading the folder against `from`, told as the
+/// `e`, a spelling of `.opalro` the plan met past reading the folder against `from`, told as the
 /// save that holds it: `from` if its whole tree meets one, as every switch from it would, else
 /// `to`.
 fn told_whose(repo: &Repository, e: SaveError, from: Id, to: Id) -> SaveError {
@@ -731,7 +731,7 @@ pub fn carry_out(
             Ok(Done::NotFlushed(e)) => repo.store().note(Warning::new(
                 warning::HEAD_NOT_FLUSHED,
                 format!(
-                    "The switch between saves is done, but Opalro couldn't flush .opal/state to the \
+                    "The switch between saves is done, but Opalro couldn't flush .opalro/state to the \
                      disk after removing its journal ({}): after a power cut the journal may be \
                      back, and the next command that changes the project removes it.",
                     e.to_string().trim_end_matches('.')
@@ -741,7 +741,7 @@ pub fn carry_out(
                 warning::SWITCH_UNFINISHED,
                 format!(
                     "The switch between saves is done, but Opalro couldn't remove its journal, \
-                     .opal/state/journal ({}): the next command that changes the project removes \
+                     .opalro/state/journal ({}): the next command that changes the project removes \
                      it first.",
                     e.to_string().trim_end_matches('.')
                 ),
@@ -835,10 +835,10 @@ pub fn unfinished_warning(repo: &Repository) -> Option<Warning> {
         Ok(None) | Err(RepoError::HeadLost { .. }) => return None,
         Ok(Some(true)) => "A switch between saves was stopped just after it was done: its files \
                            are all written, and the next command that changes the project removes \
-                           its journal, .opal/state/journal, first."
+                           its journal, .opalro/state/journal, first."
             .to_owned(),
         Ok(Some(false)) => "A switch between saves was stopped before it was done, so some files \
-                            may still be as they were. Running `opal goto` or `opal discard` \
+                            may still be as they were. Running `opalro goto` or `opalro discard` \
                             again, or any command that changes the project, finishes it first if \
                             its journal reads whole, or else says how to go on."
             .to_owned(),
@@ -880,7 +880,7 @@ struct Run<'a> {
     target_entry: Id,
     stored: HashMap<Id, Listing>,
     target_root: Option<Id>,
-    /// The short names of `.git` and `.opal` spellings in each folder written in (Windows).
+    /// The short names of `.git` and `.opalro` spellings in each folder written in (Windows).
     short_names: HashMap<String, Vec<(String, String)>>,
     /// Folders changed, flushed at the end.
     dirty: BTreeSet<String>,
@@ -933,7 +933,7 @@ impl Run<'_> {
 
     /// Opens the folder holding `path`, checking every name on the way against what may be
     /// written in its folder, giving the last name, or what to report instead. On Windows each
-    /// name is also checked against the real short names of a `.git` or `.opal` in its folder,
+    /// name is also checked against the real short names of a `.git` or `.opalro` in its folder,
     /// since the drive resolves those names to them.
     fn enter<'p>(&mut self, path: &'p str) -> Result<Result<&'p str, Outcome>, RepoError> {
         let (up, name) = split(path);
@@ -1182,7 +1182,7 @@ impl Run<'_> {
     }
 
     /// Writes the content `c` from the store to `name` in the folder entered, through a file in
-    /// `.opal/tmp`, flushed, then renamed into place. `there`: what the plan's look saw at
+    /// `.opalro/tmp`, flushed, then renamed into place. `there`: what the plan's look saw at
     /// `name`, `None` for nothing; if that changed meanwhile, it is left.
     fn write_file(
         &self,
@@ -1396,7 +1396,7 @@ impl Run<'_> {
 }
 
 /// The first part of `path` (itself or a folder above it) whose name may not be written in its
-/// folder, given each folder's `.git` and `.opal` spellings with their short names (`own`).
+/// folder, given each folder's `.git` and `.opalro` spellings with their short names (`own`).
 fn first_refused(
     path: &str,
     mut own: impl FnMut(&str) -> io::Result<Vec<(String, String)>>,
@@ -1418,7 +1418,7 @@ fn one_entry(dir: &Dir, a: &str, b: &str) -> bool {
     first.is_some() && first == id(b)
 }
 
-/// The `.git` and `.opal` spellings in `dir` that have a short name, with it.
+/// The `.git` and `.opalro` spellings in `dir` that have a short name, with it.
 fn own_short_names(dir: &Dir) -> io::Result<Vec<(String, String)>> {
     let entries = retried(|| dir.entries())?;
     Ok(entries
@@ -1770,7 +1770,7 @@ fn link_shape(tree: &mut Tree, path: &str, target: &[u8]) -> Result<Option<bool>
 /// if it leads out of the project: it is absolute, starts with a drive letter or `\\`, or climbs
 /// past the top with `..`; on Windows also when it holds a `\` or a name Windows reads otherwise.
 /// `None` too when it passes through a name write-out wouldn't write, such as a spelling of
-/// `.git` or `.opal`: a link into the project's own `.git` could run what it finds there.
+/// `.git` or `.opalro`: a link into the project's own `.git` could run what it finds there.
 fn link_parts<'a>(path: &str, target: &'a [u8]) -> Option<Vec<&'a str>> {
     let target = std::str::from_utf8(target).ok()?;
     let bytes = target.as_bytes();
@@ -1812,7 +1812,7 @@ pub(crate) fn writes_as_link(
     Ok(target.len() as u64 <= MAX_LINK_TARGET && link_shape(tree, path, target)?.is_some())
 }
 
-/// Whether this system and account can make links: tried with a throwaway one in `.opal/tmp`.
+/// Whether this system and account can make links: tried with a throwaway one in `.opalro/tmp`.
 pub(crate) fn can_make_links(repo: &Repository) -> Result<bool, SaveError> {
     let tmp = repo.tmp_folder();
     let name = opal_platform::temp_name();
@@ -2062,7 +2062,7 @@ pub fn not_written_warning(paths: &[String]) -> Warning {
         warning::NOT_WRITTEN_HERE,
         format!(
             "Left {} unwritten: this computer can't hold them as they are (a name it can't make, \
-             a spelling of .git or .opal, or two names that are one file on this drive):{}\nThey \
+             a spelling of .git or .opalro, or two names that are one file on this drive):{}\nThey \
              stay in history, and saves keep them as they are.",
             counted(paths.len(), "entry", "entries"),
             first(paths)

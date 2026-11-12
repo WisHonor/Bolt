@@ -12,7 +12,7 @@ pub mod dir;
 
 /// A name for what Opalro makes before it has its place: `tmp-` and 16 random lowercase hexadecimal
 /// digits, with no extension, so nothing runs a file by it. It is the one form of the names Opalro
-/// gives what it makes in `.opal/tmp`. Nobody can guess the digits: `RandomState`'s keys come
+/// gives what it makes in `.opalro/tmp`. Nobody can guess the digits: `RandomState`'s keys come
 /// from the system's random number generator.
 pub fn temp_name() -> OsString {
     let random = RandomState::new().hash_one(());
@@ -121,7 +121,7 @@ pub enum Owner {
     Unknown,
 }
 
-/// Who owns `path`, so a `.opal` that another account planted above the user's work is refused
+/// Who owns `path`, so a `.opalro` that another account planted above the user's work is refused
 /// (decisions 025 and 026, T23). A link or junction at the end of `path` is not followed: its own
 /// owner is the answer. A missing `path` gives `NotFound`.
 pub fn owner_of(path: &Path) -> io::Result<Owner> {
@@ -474,7 +474,7 @@ mod tests {
         }
     }
 
-    /// A link's own owner is the answer, never its target's: following a planted `.opal` link
+    /// A link's own owner is the answer, never its target's: following a planted `.opalro` link
     /// could reach another computer (decision 026).
     #[test]
     fn a_link_is_judged_by_its_own_owner() {

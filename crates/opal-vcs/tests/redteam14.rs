@@ -65,14 +65,14 @@ fn shared_tree(pack: &mut PackSet) -> Id {
 #[ignore = "RT14-1: kept as a record; a planted save within the limits is a known cost until v0.3 (decision 133)"]
 fn a_small_planted_save_within_the_limits_costs_status_little() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     plant_save(env.root(), shared_tree);
-    let mut opal = env.opal_process_in(env.root());
-    opal.arg("status");
-    let ended = run_limited(opal, 120);
+    let mut opalro = env.opal_process_in(env.root());
+    opalro.arg("status");
+    let ended = run_limited(opalro, 120);
     println!("{ended:?}");
     assert!(
         ended.peak_mb < 256,
@@ -99,7 +99,7 @@ fn import_refuses_a_boolean_extension_git_refuses() {
         .output()
         .unwrap();
     assert!(!refused.status.success(), "Git reads it after all");
-    let out = env.opal().arg("import").output().unwrap();
+    let out = env.opalro().arg("import").output().unwrap();
     assert!(
         !out.status.success(),
         "Opalro imported a repository Git refuses: {}",
@@ -109,7 +109,7 @@ fn import_refuses_a_boolean_extension_git_refuses() {
 
 /// RT14-3: an ignore file of glob lines costs Opalro many times Git's time. 47,368 lines like
 /// `[!a-z]17*[xy]?` (under 1 MiB) against 2,000 paths that none matches: in a release build
-/// `opal status` takes 14.3 s where `git status` takes 1.1 s, and for `**/z1/**/q*` lines 26 s
+/// `opalro status` takes 14.3 s where `git status` takes 1.1 s, and for `**/z1/**/q*` lines 26 s
 /// against 3.6 s. Each line tried allocates the matcher's state afresh.
 #[test]
 fn hostile_glob_ignore_lines_cost_opal_no_more_than_twice_git() {
@@ -163,7 +163,7 @@ fn hostile_glob_ignore_lines_cost_opal_no_more_than_twice_git() {
     }
     let opal_secs = started.elapsed().as_secs_f64();
     assert_eq!(kept, paths.len());
-    println!("git {git_secs:.2} s, opal {opal_secs:.2} s");
+    println!("git {git_secs:.2} s, opalro {opal_secs:.2} s");
     assert!(
         opal_secs <= 2.0 * git_secs.max(0.1),
         "Opalro took {opal_secs:.2} s where Git took {git_secs:.2} s"

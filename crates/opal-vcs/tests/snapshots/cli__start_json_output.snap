@@ -7,7 +7,7 @@ expression: json
     "engines": [],
     "languages": []
   },
-  "opal_json": 1,
+  "opalro_json": 1,
   "position": {
     "line": "main"
   },

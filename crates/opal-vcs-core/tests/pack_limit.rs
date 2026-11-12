@@ -8,7 +8,7 @@ use opal_core::repo::Repository;
 use opal_core::save::Person;
 
 fn packs_in(root: &std::path::Path) -> usize {
-    std::fs::read_dir(root.join(".opal/store/packs"))
+    std::fs::read_dir(root.join(".opalro/store/packs"))
         .unwrap()
         .count()
 }

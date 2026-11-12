@@ -1,6 +1,6 @@
 //! The malicious-name corpus, end to end: each name the portability check refuses (decision 004)
-//! must stop `opal save` with exit code 1 and the name in the message, and each spelling of
-//! `.opal` must be left out with a warning naming it (decision 059); history stays as it was.
+//! must stop `opalro save` with exit code 1 and the name in the message, and each spelling of
+//! `.opalro` must be left out with a warning naming it (decision 059); history stays as it was.
 //! Names the operating system cannot create are skipped, so Linux and macOS run the most.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -29,21 +29,21 @@ fn create_all(dir: &Path, names: &[&str]) -> bool {
 }
 
 /// Opalro's own folder, spelled sneakily: never stored (validate_name), so a save leaves them out.
-const OPAL_SPELLINGS: &[&str] = &[
-    ".opal.",
-    ".opal ",
-    "opal~1",
-    "OPAL~4",
-    ".o\u{200C}pal",
-    "\u{FEFF}.opal",
-    ".opal:stream",
-    ".OPAL.\\x",
-    ".OPAL",
-    ".Opal",
-    ".opal. .",
-    ".opal\\x",
-    "opal~1\\x",
-    ".opal::$INDEX_ALLOCATION",
+const OPALRO_SPELLINGS: &[&str] = &[
+    ".opalro.",
+    ".opalro ",
+    "opalro~1",
+    "OPALRO~4",
+    ".o\u{200C}palro",
+    "\u{FEFF}.opalro",
+    ".opalro:stream",
+    ".OPALRO.\\x",
+    ".OPALRO",
+    ".Opalro",
+    ".opalro. .",
+    ".opalro\\x",
+    "opalro~1\\x",
+    ".opalro::$INDEX_ALLOCATION",
 ];
 
 /// Each case is the files to create; the first name is the one the message must show.
@@ -75,31 +75,31 @@ const CASES: &[&[&str]] = &[
 ];
 
 fn history_of(env: &Env) -> Vec<u8> {
-    let out = env.opal().arg("history").output().unwrap();
+    let out = env.opalro().arg("history").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&out.stdout).contains("good save"));
     out.stdout
 }
 
-/// Creates the files of `case` in a project after a good save, then checks that `opal save` exits
+/// Creates the files of `case` in a project after a good save, then checks that `opalro save` exits
 /// with `code`, names the first file on stderr and leaves history as it was. False, having
 /// checked nothing, if this system can't hold the names.
 fn save_ends_with(case: &[&str], code: i32) -> bool {
     let env = Env::empty();
     let root = env.root();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     std::fs::write(root.join("good.txt"), "good").unwrap();
-    env.opal().args(["save", "good save"]).assert().success();
+    env.opalro().args(["save", "good save"]).assert().success();
     if !create_all(root, case) {
         eprintln!("skipped (this system cannot hold these names): {case:?}");
         return false;
     }
     let history_before = history_of(&env);
 
-    let out = env.opal().args(["save", "bad"]).output().unwrap();
+    let out = env.opalro().args(["save", "bad"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert_eq!(out.status.code(), Some(code), "{case:?}: {stderr}{stdout}");
@@ -134,7 +134,7 @@ fn every_malicious_name_stops_the_save() {
 /// Nothing else changed, so there is nothing to save, and the warning names the spelling.
 #[test]
 fn every_opal_spelling_is_left_out_with_a_warning() {
-    let ran = OPAL_SPELLINGS
+    let ran = OPALRO_SPELLINGS
         .iter()
         .filter(|&&name| save_ends_with(&[name], 0))
         .count();

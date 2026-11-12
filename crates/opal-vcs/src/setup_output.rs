@@ -1,4 +1,4 @@
-//! What `opal start` and `opal setup` say about a project's rules, for people and as JSON.
+//! What `opalro start` and `opalro setup` say about a project's rules, for people and as JSON.
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -99,8 +99,8 @@ pub fn look_line(looked: &Looked) -> String {
     }
 }
 
-/// What `opal start` says once the project is made: the outcome, the rules in words, and the first
-/// save. `preset` is `None` where the folder kept an `opal.toml` of its own.
+/// What `opalro start` says once the project is made: the outcome, the rules in words, and the first
+/// save. `preset` is `None` where the folder kept an `opalro.toml` of its own.
 pub fn started(
     root: &str,
     preset: Option<Preset>,
@@ -123,7 +123,7 @@ pub fn started(
         }
     };
     text += &match preset {
-        None => "Using the rules in this folder's opal.toml, which stay as they are:".to_owned(),
+        None => "Using the rules in this folder's opalro.toml, which stay as they are:".to_owned(),
         Some(Preset::Custom) => format!(
             "Using {} settings: Opalro's plain defaults, with no rule files:",
             s.paint(Role::Bold, "Custom")
@@ -146,7 +146,7 @@ pub fn started(
     )];
     match preset {
         Some(Preset::Game) if found.engines.is_empty() => said.push(
-            "No game engine was found, so no engine's files are left out yet: run opal setup \
+            "No game engine was found, so no engine's files are left out yet: run opalro setup \
              --preset game once the engine has made its project"
                 .to_owned(),
         ),
@@ -185,14 +185,16 @@ pub fn started(
         text += &s.detail(Some(bullet), &line);
         text.push('\n');
     }
-    let setup = s.command("opal setup");
+    let setup = s.command("opalro setup");
     let see = match preset {
         None => format!("See them any time with: {setup}"),
         Some(Preset::Custom) => {
             format!("There are no rule files. See the rules any time with: {setup}")
         }
         Some(_) => {
-            format!("The rules are in opal.toml and .opalignore. See them any time with: {setup}")
+            format!(
+                "The rules are in opalro.toml and .opalroignore. See them any time with: {setup}"
+            )
         }
     };
     text += &format!("\n{}\n", s.detail(None, &see));
@@ -206,7 +208,7 @@ pub fn started(
     text
 }
 
-/// What an engine's lines in `.opalignore` leave out, in words.
+/// What an engine's lines in `.opalroignore` leave out, in words.
 fn left_out(engine: Engine) -> &'static str {
     match engine {
         Engine::Unity => "Unity's Library/, Temp/, Logs/ and other generated files are left out",
@@ -217,20 +219,20 @@ fn left_out(engine: Engine) -> &'static str {
     }
 }
 
-/// `opal setup`'s list: the rules as Opalro reads them, each project text escaped.
+/// `opalro setup`'s list: the rules as Opalro reads them, each project text escaped.
 pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
     let s = style::out();
     let rules = &read.rules;
     let mut text = match (&read.rules.preset, read.file) {
         _ if read.skipped.is_some() => {
-            "opal.toml couldn't be used, so Opalro's own values apply:".to_owned()
+            "opalro.toml couldn't be used, so Opalro's own values apply:".to_owned()
         }
-        (_, false) => "No opal.toml here, so Opalro's own values apply:".to_owned(),
+        (_, false) => "No opalro.toml here, so Opalro's own values apply:".to_owned(),
         (Some(label), true) => format!(
-            "Using {} settings, from opal.toml:",
+            "Using {} settings, from opalro.toml:",
             s.paint(Role::Bold, &escape(label, false))
         ),
-        (None, true) => "Using the rules in opal.toml:".to_owned(),
+        (None, true) => "Using the rules in opalro.toml:".to_owned(),
     };
     text += "\n\n";
     let patterns = |pick: &dyn Fn(&opal_core::rules::Rule) -> bool| {
@@ -247,9 +249,9 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
         }
     };
     let ignore = match block_lines {
-        None => "no preset lines in .opalignore".to_owned(),
-        Some(1) => "1 line in .opalignore".to_owned(),
-        Some(n) => format!("{} lines in .opalignore", thousands(n as u64)),
+        None => "no preset lines in .opalroignore".to_owned(),
+        Some(1) => "1 line in .opalroignore".to_owned(),
+        Some(n) => format!("{} lines in .opalroignore", thousands(n as u64)),
     };
     let rows = [
         (
@@ -279,7 +281,7 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
 }
 
 /// A rule's pattern, escaped. One that holds a space of any kind or a double quote is between
-/// double quotes, as `opal.toml` writes it (`\"` and `\\` inside), so the list reads as its
+/// double quotes, as `opalro.toml` writes it (`\"` and `\\` inside), so the list reads as its
 /// patterns.
 fn shown_pattern(pattern: &str) -> String {
     if !pattern.contains(|c: char| c.is_whitespace() || c == '"') {
@@ -314,7 +316,7 @@ pub fn changes_json(changes: &[RuleFileChange]) -> Value {
         .collect()
 }
 
-/// Each change, line by line, as `opal changes` shows a file, one empty line between files.
+/// Each change, line by line, as `opalro changes` shows a file, one empty line between files.
 pub fn write_preview(out: &mut dyn Write, changes: &[RuleFileChange]) -> io::Result<()> {
     for (i, c) in changes.iter().enumerate() {
         if i > 0 {
@@ -351,7 +353,7 @@ pub fn write_preview(out: &mut dyn Write, changes: &[RuleFileChange]) -> io::Res
 pub fn switched(preset: Preset, changes: &[RuleFileChange], written: &[&str]) -> String {
     let s = style::out();
     if written.is_empty() {
-        let again = format!("opal setup --preset {}", preset.name());
+        let again = format!("opalro setup --preset {}", preset.name());
         return format!(
             "\nNothing was written: the rule files changed while Opalro worked. Run {} again.\n",
             s.paint(Role::Command, &again)
@@ -365,7 +367,7 @@ pub fn switched(preset: Preset, changes: &[RuleFileChange], written: &[&str]) ->
     )
 }
 
-/// What a switch did to each file: "made opal.toml, changed .opalignore".
+/// What a switch did to each file: "made opalro.toml, changed .opalroignore".
 fn written_words(changes: &[RuleFileChange], written: &[&str]) -> String {
     let words: Vec<String> = changes
         .iter()
@@ -414,7 +416,7 @@ mod tests {
     #[test]
     fn a_switch_that_wrote_nothing_says_so() {
         let changes = [RuleFileChange {
-            path: "opal.toml",
+            path: "opalro.toml",
             before: None,
             after: Some(b"x".to_vec()),
         }];
@@ -422,10 +424,10 @@ mod tests {
         assert!(!said.contains("Switched"), "{said}");
         assert_eq!(
             said,
-            "\nNothing was written: the rule files changed while Opalro worked. Run opal setup \
+            "\nNothing was written: the rule files changed while Opalro worked. Run opalro setup \
              --preset game again.\n"
         );
-        let said = switched(Preset::Game, &changes, &["opal.toml"]);
-        assert_eq!(said, "\nSwitched to Game settings: made opal.toml.\n");
+        let said = switched(Preset::Game, &changes, &["opalro.toml"]);
+        assert_eq!(said, "\nSwitched to Game settings: made opalro.toml.\n");
     }
 }

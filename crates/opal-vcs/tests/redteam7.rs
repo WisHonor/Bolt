@@ -11,7 +11,7 @@ use support::{Env, text};
 
 fn project() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -19,7 +19,7 @@ fn project() -> Env {
 }
 
 fn ok(env: &Env, args: &[&str]) -> String {
-    let out = env.opal().args(args).output().unwrap();
+    let out = env.opalro().args(args).output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(0),
@@ -167,7 +167,7 @@ fn rt7_2_raising_the_undo_window_after_a_tidy_leaves_tidy_working() {
     // through the binary: it would run before the first tidy's clock.
     let tidy = opal_core::tidy::tidy(&mut repo, 30, later + 60_000, &mut |_| {}, &mut |_| {});
     drop(repo);
-    let list = env.opal().args(["undo", "--list"]).output().unwrap();
+    let list = env.opalro().args(["undo", "--list"]).output().unwrap();
     assert!(
         tidy.is_ok(),
         "tidy: {:?}\nundo --list:\n{}",

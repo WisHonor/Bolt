@@ -1,4 +1,4 @@
-//! What `opal help` prints: one screen naming every command, and each command's own page of
+//! What `opalro help` prints: one screen naming every command, and each command's own page of
 //! examples, usage and options. The options come from the command line's own definitions, so a
 //! page never lists one the command doesn't take.
 
@@ -55,11 +55,11 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
     ),
 ];
 
-/// The screen `opal`, `opal help` and `opal --help` print.
+/// The screen `opalro`, `opalro help` and `opalro --help` print.
 pub fn overview() -> String {
     let s = style::out();
     let mut text = "Opalro keeps every version of your project: code and big files together.\n\n\
-                    Usage: opal <command> [options]\n"
+                    Usage: opalro <command> [options]\n"
         .to_owned();
     for (title, commands) in GROUPS {
         text += &format!("\n{}\n", s.paint(Role::Bold, title));
@@ -68,129 +68,135 @@ pub fn overview() -> String {
             text += &format!("{name:<10}{does}{beside}\n");
         }
     }
-    text + "\nHelp on one command: opal help <command>    Version: opal --version\n"
+    text + "\nHelp on one command: opalro help <command>    Version: opalro --version\n"
 }
 
 /// The examples a command's help leads with: each a command line and what it does.
 pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
     match command {
         "status" => &[
-            ("opal status", "See what changed since your last save"),
-            ("opal status --full", "Read every file to be sure"),
+            ("opalro status", "See what changed since your last save"),
+            ("opalro status --full", "Read every file to be sure"),
         ],
         "save" => &[
             (
-                "opal save \"Double jump\"",
+                "opalro save \"Double jump\"",
                 "Save every change, new files too",
             ),
             (
-                "opal save \"Fix aim\" Assets/Scripts/Enemy.cs",
+                "opalro save \"Fix aim\" Assets/Scripts/Enemy.cs",
                 "Save only these files and folders",
             ),
             (
-                "opal save --amend \"Better message\"",
+                "opalro save --amend \"Better message\"",
                 "Replace your line's newest save, keeping its change ID",
             ),
             (
-                "opal save \"Big import\" --yes",
+                "opalro save \"Big import\" --yes",
                 "Save without asking, however much it adds",
             ),
             (
-                "opal save --line wall-run \"Try wall running\"",
+                "opalro save --line wall-run \"Try wall running\"",
                 "At a save, start the new line wall-run",
             ),
         ],
         "changes" => &[
-            ("opal changes", "Show every unsaved change, line by line"),
+            ("opalro changes", "Show every unsaved change, line by line"),
             (
-                "opal changes Assets/Scripts",
+                "opalro changes Assets/Scripts",
                 "Only in these files and folders",
             ),
             (
-                "opal changes --save main",
+                "opalro changes --save main",
                 "What the newest save on main changed",
             ),
         ],
-        "history" => &[("opal history", "List the saves on your line, newest first")],
+        "history" => &[(
+            "opalro history",
+            "List the saves on your line, newest first",
+        )],
         "goto" => &[
-            ("opal goto main", "Go to the line main"),
-            ("opal goto kxqmz", "Go to a save, by its change ID"),
-            ("opal goto main@origin", "Go to a server's line"),
+            ("opalro goto main", "Go to the line main"),
+            ("opalro goto kxqmz", "Go to a save, by its change ID"),
+            ("opalro goto main@origin", "Go to a server's line"),
         ],
         "undo" => &[
-            ("opal undo", "Take back your last step"),
-            ("opal undo 3", "Take back the last three steps"),
+            ("opalro undo", "Take back your last step"),
+            ("opalro undo 3", "Take back the last three steps"),
             (
-                "opal undo --shelve",
+                "opalro undo --shelve",
                 "Set unsaved changes in the way aside first",
             ),
             (
-                "opal undo --list",
+                "opalro undo --list",
                 "List the steps you can take back or bring back",
             ),
             (
-                "opal undo --to 3f9a2c7e",
+                "opalro undo --to 3f9a2c7e",
                 "Make things as they were after this entry",
             ),
         ],
         "redo" => &[
-            ("opal redo", "Bring back the step undone last"),
-            ("opal redo 2", "Bring back the last two"),
+            ("opalro redo", "Bring back the step undone last"),
+            ("opalro redo 2", "Bring back the last two"),
         ],
-        "line" => &[("opal line", "List the lines, marking the one you're on")],
+        "line" => &[("opalro line", "List the lines, marking the one you're on")],
         "shelf" => &[
-            ("opal shelf", "Set your unsaved changes aside"),
+            ("opalro shelf", "Set your unsaved changes aside"),
             (
-                "opal shelf \"Half-done wall run\"",
+                "opalro shelf \"Half-done wall run\"",
                 "The same, saying what they are",
             ),
             (
-                "opal shelf --list",
+                "opalro shelf --list",
                 "List the shelves by number, newest first",
             ),
         ],
         "unshelf" => &[
-            ("opal unshelf", "Bring back the newest shelf"),
-            ("opal unshelf 2", "Bring back shelf 2"),
+            ("opalro unshelf", "Bring back the newest shelf"),
+            ("opalro unshelf 2", "Bring back shelf 2"),
         ],
         "discard" => &[
-            ("opal discard", "Throw away every unsaved change"),
+            ("opalro discard", "Throw away every unsaved change"),
             (
-                "opal discard Assets/Scripts/Player.cs",
+                "opalro discard Assets/Scripts/Player.cs",
                 "Only in these files and folders",
             ),
         ],
         "show" => &[
-            ("opal show", "Show the save you're at"),
-            ("opal show kxqmz", "Show a save, by its change ID"),
+            ("opalro show", "Show the save you're at"),
+            ("opalro show kxqmz", "Show a save, by its change ID"),
         ],
         "start" => &[
-            ("opal start", "Make this folder a project, asking what kind"),
             (
-                "opal start --preset game",
+                "opalro start",
+                "Make this folder a project, asking what kind",
+            ),
+            (
+                "opalro start --preset game",
                 "Start it with the Game settings",
             ),
         ],
         "setup" => &[
-            ("opal setup", "Show the project's rules"),
+            ("opalro setup", "Show the project's rules"),
             (
-                "opal setup --preset code",
+                "opalro setup --preset code",
                 "Show what the Code preset changes, then ask",
             ),
             (
-                "opal setup --preset code --yes",
+                "opalro setup --preset code --yes",
                 "Make those changes without asking",
             ),
         ],
         "import" => &[(
-            "opal import",
+            "opalro import",
             "Bring in the Git repository in this folder, with all its history",
         )],
-        "tidy" => &[("opal tidy", "Free the space nothing needs any more")],
+        "tidy" => &[("opalro tidy", "Free the space nothing needs any more")],
         "verify" => &[
-            ("opal verify", "Check everything Opalro has stored"),
+            ("opalro verify", "Check everything Opalro has stored"),
             (
-                "opal verify --json",
+                "opalro verify --json",
                 "The same, every problem listed for a script",
             ),
         ],
@@ -217,7 +223,7 @@ pub fn page(root: &mut Command, name: &str) -> Option<String> {
         .next()
         .map(|c| c.to_lowercase().chain(first).collect())
         .unwrap_or_default();
-    let mut text = format!("opal {name}: {about}\n");
+    let mut text = format!("opalro {name}: {about}\n");
     let wide = examples.iter().map(|(line, _)| style::columns(line)).max();
     text += &format!("\n{}\n", s.paint(Role::Bold, "Examples"));
     for (line, does) in examples {

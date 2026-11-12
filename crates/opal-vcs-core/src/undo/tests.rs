@@ -959,7 +959,7 @@ fn a_lost_head_passes_over_a_pack_whose_index_fails_part_way() {
         .collect::<Vec<_>>()
         .try_into()
         .unwrap();
-    fs::remove_file(dir.path().join(".opal/state/head")).unwrap();
+    fs::remove_file(dir.path().join(".opalro/state/head")).unwrap();
     let mut repo = Repository::open(dir.path()).unwrap();
     // Opened now, and kept open; then cut after its first index line: the trailer is 48 bytes,
     // and an index line 25.

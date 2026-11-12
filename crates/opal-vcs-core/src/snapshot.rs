@@ -1,4 +1,4 @@
-//! `opal save`: walks the project folder, stores its files, and commits the save.
+//! `opalro save`: walks the project folder, stores its files, and commits the save.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
@@ -154,7 +154,11 @@ pub enum SaveError {
     Ignore { detail: String },
     #[error("This project is too large to save: {detail}.")]
     TooLarge { detail: String },
-    #[error("Opalro can't save {}: {}.", escape(path, false), kept_in_the_way(kept))]
+    #[error(
+        "Opalro can't save {}: {}.",
+        escape(path, false),
+        kept_in_the_way(kept)
+    )]
     InTheWay { path: String, kept: String },
     #[error("{}", line_endings_changed(*count, first))]
     LineEndingsChanged {
@@ -207,7 +211,7 @@ pub enum SaveError {
     )]
     KeptWhole { path: String },
     #[error(
-        "Opalro never saves {}: Git treats its name as `.git`, or Opalro as `.opal`.",
+        "Opalro never saves {}: Git treats its name as `.git`, or Opalro as `.opalro`.",
         escape(path, false)
     )]
     NeverSaved { path: String },
@@ -346,7 +350,7 @@ impl SaveError {
         self.next_step(false)
     }
 
-    /// This error, met reading the folders of the save `save`: a spelling of `.opal` is told as
+    /// This error, met reading the folders of the save `save`: a spelling of `.opalro` is told as
     /// that save's, `current` when the project is on it.
     #[must_use]
     pub(crate) fn in_save(self, save: Id, current: bool) -> SaveError {
@@ -380,14 +384,14 @@ impl SaveError {
             }
             SaveError::LfsPointersInFolder { .. } => {
                 "Run `git lfs checkout` to have Git LFS write the files, then save again. If Git \
-                 LFS can't, `opal discard` with those paths puts back the files the import \
+                 LFS can't, `opalro discard` with those paths puts back the files the import \
                  brought in."
                     .into()
             }
             SaveError::NeedsMessage => {
-                "Say what you changed: opal save \"describe your change\"".into()
+                "Say what you changed: opalro save \"describe your change\"".into()
             }
-            SaveError::NeedsLineName => "Name it: opal save --line <name> \"message\"".into(),
+            SaveError::NeedsLineName => "Name it: opalro save --line <name> \"message\"".into(),
             SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
                 "Choose another name.".into()
             }
@@ -408,25 +412,28 @@ impl SaveError {
             SaveError::NestedProject { .. } => {
                 "Save it in that repository or project instead.".into()
             }
-            SaveError::Unreadable { .. } => "Let Opalro read it, or list it in .opalignore.".into(),
-            SaveError::ChangedDuringSave { .. } => {
-                "Try again when the file stops changing, or list it in .opalignore.".into()
+            SaveError::Unreadable { .. } => {
+                "Let Opalro read it, or list it in .opalroignore.".into()
             }
-            SaveError::SpecialFile { .. } => "List it in .opalignore for now.".into(),
-            SaveError::InvalidName { .. } => "Rename it, or list it in .opalignore.".into(),
-            SaveError::NotPortable { .. } => "Rename them, or list them in .opalignore.".into(),
+            SaveError::ChangedDuringSave { .. } => {
+                "Try again when the file stops changing, or list it in .opalroignore.".into()
+            }
+            SaveError::SpecialFile { .. } => "List it in .opalroignore for now.".into(),
+            SaveError::InvalidName { .. } => "Rename it, or list it in .opalroignore.".into(),
+            SaveError::NotPortable { .. } => "Rename them, or list them in .opalroignore.".into(),
             // No line is ever refused, so the file itself is at fault: too big, unreadable, or a
-            // `.opalignore` that isn't a regular file.
+            // `.opalroignore` that isn't a regular file.
             SaveError::Ignore { .. } => "Fix that ignore file and try again.".into(),
-            SaveError::TooLarge { .. } => "List the deep or huge folder in .opalignore.".into(),
+            SaveError::TooLarge { .. } => "List the deep or huge folder in .opalroignore.".into(),
             SaveError::LargeSave(_) => "To save them, run the save again with --yes; to leave \
-                                        some out, list them in .opalignore."
+                                        some out, list them in .opalroignore."
                 .into(),
             SaveError::AmendAtSave => {
-                "To amend a line's newest save, go to the line first: opal goto <line>".into()
+                "To amend a line's newest save, go to the line first: opalro goto <line>".into()
             }
             SaveError::AmendShared { .. } => {
-                "Save your changes as a new save instead: opal save \"describe your change\"".into()
+                "Save your changes as a new save instead: opalro save \"describe your change\""
+                    .into()
             }
         };
         Some(if saving {
@@ -1045,7 +1052,7 @@ fn ignored_changes_saved(mut paths: Vec<String>) -> Warning {
 }
 
 /// Says the save took `paths`, new or changed files that `.gitignore` keeps out but a
-/// `.opalignore` line takes back, naming the first few.
+/// `.opalroignore` line takes back, naming the first few.
 fn gitignored_files_saved(mut paths: Vec<String>) -> Warning {
     let count = paths.len() as u64;
     paths.sort_unstable();
@@ -1053,18 +1060,18 @@ fn gitignored_files_saved(mut paths: Vec<String>) -> Warning {
     let (what, undo) = if count == 1 {
         (
             "1 new or changed file".to_owned(),
-            "If it shouldn't be saved, remove the .opalignore line that takes it back and move it \
+            "If it shouldn't be saved, remove the .opalroignore line that takes it back and move it \
              out of the project folder; this save keeps it.",
         )
     } else {
         (
             format!("{count} new or changed files"),
-            "If they shouldn't be saved, remove the .opalignore lines that take them back and \
+            "If they shouldn't be saved, remove the .opalroignore lines that take them back and \
              move them out of the project folder; this save keeps them.",
         )
     };
     let message = format!(
-        "Saved {what} that .gitignore keeps out but .opalignore takes back:{}\n{} {undo}",
+        "Saved {what} that .gitignore keeps out but .opalroignore takes back:{}\n{} {undo}",
         listed(&paths, count),
         as_git_would(count)
     );
@@ -2118,13 +2125,13 @@ mod tests {
         out
     }
 
-    /// The project folder as it is on disk, without `.opal`.
+    /// The project folder as it is on disk, without `.opalro`.
     fn disk_tree(root: &Path) -> Tree {
         fn walk(dir: &Path, prefix: &str, out: &mut Tree) {
             for e in fs::read_dir(dir).unwrap() {
                 let e = e.unwrap();
                 let name = e.file_name().into_string().unwrap();
-                if prefix.is_empty() && name == ".opal" {
+                if prefix.is_empty() && name == ".opalro" {
                     continue;
                 }
                 let path = format!("{prefix}{name}");
@@ -2225,7 +2232,7 @@ mod tests {
     }
 
     /// The files the two warnings would name, from a walk and a build that read the project as
-    /// `opal status` does, or the first problem.
+    /// `opalro status` does, or the first problem.
     fn warned(repo: &Repository) -> Result<(Vec<String>, Vec<String>), String> {
         let shown = |e: SaveError| format!("{e:?}");
         let Scan {
@@ -2284,7 +2291,7 @@ mod tests {
         let name = if *gitignore {
             ".gitignore"
         } else {
-            ".opalignore"
+            ".opalroignore"
         };
         put(
             root,
@@ -2436,7 +2443,7 @@ mod tests {
         // Content anyone can predict, like a licence, in a pack that came with the project.
         let licence = b"Permission is hereby granted, free of charge, to any person\n";
         plant_damaged_copies(
-            &dir.path().join(".opal/store/packs"),
+            &dir.path().join(".opalro/store/packs"),
             &[(ObjectKind::Content, licence)],
         );
         write(dir.path(), "LICENSE", licence);
@@ -2455,10 +2462,10 @@ mod tests {
     fn a_save_stores_again_past_a_damaged_only_copy() {
         let (dir, _repo) = project();
         let licence = b"Permission is hereby granted, free of charge, to any person\n";
-        let opal = dir.path().join(".opal");
-        let mut w = crate::pack::PackWriter::create(&opal.join("tmp")).unwrap();
+        let opalro = dir.path().join(".opalro");
+        let mut w = crate::pack::PackWriter::create(&opalro.join("tmp")).unwrap();
         w.add_content(licence).unwrap();
-        let pack = w.finish(&opal.join("store/packs")).unwrap().unwrap();
+        let pack = w.finish(&opalro.join("store/packs")).unwrap().unwrap();
         let mut bytes = fs::read(&pack).unwrap();
         *bytes.last_mut().unwrap() ^= 1;
         fs::write(&pack, bytes).unwrap();
@@ -2480,7 +2487,7 @@ mod tests {
         let (dir, mut repo) = project();
         write(dir.path(), "a.txt", b"1");
         save_now(&mut repo).unwrap();
-        let cache = dir.path().join(".opal/cache");
+        let cache = dir.path().join(".opalro/cache");
         let read = |name: &str| fs::read(cache.join(name)).unwrap();
         let before = (read("change-ids"), read("files"));
         // No key given, as a program using the engine runs it.
@@ -2505,7 +2512,7 @@ mod tests {
         .unwrap();
         // The empty listing has the same ID in every project.
         plant_damaged_copies(
-            &dir.path().join(".opal/store/packs"),
+            &dir.path().join(".opalro/store/packs"),
             &[
                 (ObjectKind::FolderListing, &Listing::empty().encode()),
                 (ObjectKind::FolderListing, &sub.encode()),
@@ -2608,7 +2615,7 @@ mod tests {
         saved_root(save_now(&mut repo).unwrap());
         damage_the_only_copy_of(&repo, &first);
         // Without the cache, the line must be read.
-        fs::remove_file(dir.path().join(".opal/cache/change-ids")).unwrap();
+        fs::remove_file(dir.path().join(".opalro/cache/change-ids")).unwrap();
 
         let mut repo = Repository::open(dir.path()).unwrap();
         write(dir.path(), "b.txt", b"b");
@@ -2821,7 +2828,7 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    /// RT-11: a folder Opalro may not enter is an unreadable folder, not a `.opalignore` problem.
+    /// RT-11: a folder Opalro may not enter is an unreadable folder, not a `.opalroignore` problem.
     #[cfg(unix)]
     #[test]
     fn save_names_an_unreadable_folder_as_unreadable() {
@@ -2857,12 +2864,12 @@ mod tests {
             (
                 SaveError::ChangedDuringSave { path: path() },
                 "a.txt changed while Opalro was reading it.",
-                "Try again when the file stops changing, or list it in .opalignore.",
+                "Try again when the file stops changing, or list it in .opalroignore.",
             ),
             (
                 SaveError::SpecialFile { path: path() },
                 "a.txt is a special file Opalro can't read yet, such as a cloud placeholder.",
-                "List it in .opalignore for now.",
+                "List it in .opalroignore for now.",
             ),
             (
                 SaveError::Unreadable {
@@ -2870,7 +2877,7 @@ mod tests {
                     source: io::Error::other("denied"),
                 },
                 "Can't read a.txt: denied.",
-                "Let Opalro read it, or list it in .opalignore.",
+                "Let Opalro read it, or list it in .opalroignore.",
             ),
         ];
         for (e, message, step) in cases {
@@ -2959,12 +2966,12 @@ mod tests {
     }
 
     #[test]
-    fn the_files_opalignore_takes_back_from_gitignore_are_named_escaped_and_counted() {
+    fn the_files_opalroignore_takes_back_from_gitignore_are_named_escaped_and_counted() {
         use crate::test_support::{HOSTILE, assert_hostile_text_escaped};
         assert_hostile_text_escaped(&gitignored_files_saved(vec![HOSTILE.to_owned()]).message);
         let paths = (1..=6).rev().map(|i| format!("k{i}.pem")).collect();
         let message = gitignored_files_saved(paths).message;
-        let listed = "Saved 6 new or changed files that .gitignore keeps out but .opalignore takes \
+        let listed = "Saved 6 new or changed files that .gitignore keeps out but .opalroignore takes \
                       back:\n  k1.pem\n  k2.pem\n  k3.pem\n  k4.pem\n  k5.pem\n  and 1 more\nGit \
                       would leave such changes out";
         assert!(message.starts_with(listed), "{message}");
@@ -2978,7 +2985,7 @@ mod tests {
     }
 
     #[test]
-    fn the_opalignore_hint_does_not_blame_a_pattern() {
+    fn the_opalroignore_hint_does_not_blame_a_pattern() {
         // A link, a pipe, a huge file or one Opalro can't read has no pattern to fix.
         let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
         assert!(!hint.contains("pattern"), "{hint}");
@@ -3068,7 +3075,7 @@ mod tests {
         // A line from the first save, which doesn't hold this one: nothing to amend.
         plant_line(&mut repo, "b", first);
         // Gone before each amend, so a list found after it is one the amend kept.
-        let file = dir.path().join(".opal/cache/change-ids");
+        let file = dir.path().join(".opalro/cache/change-ids");
         fs::remove_file(&file).unwrap();
         let same = save_as(&mut repo, None, true);
         assert!(
@@ -3309,8 +3316,8 @@ mod tests {
     #[test]
     fn file_replaced_by_a_pipe_between_scan_and_read_is_refused_without_hanging() {
         let (dir, repo) = project();
-        // `.opalignore` is saved like any other file, so it can be swapped like one.
-        let pipe = dir.path().join(".opalignore");
+        // `.opalroignore` is saved like any other file, so it can be swapped like one.
+        let pipe = dir.path().join(".opalroignore");
         let made = std::process::Command::new("mkfifo")
             .arg(&pipe)
             .status()
@@ -3323,7 +3330,7 @@ mod tests {
         let seen = top.metadata(pipe.file_name().unwrap()).unwrap();
         std::thread::spawn(move || {
             let mut packs = repo.new_packs().unwrap();
-            let name = ".opalignore";
+            let name = ".opalroignore";
             let seen = Some(&seen);
             let stored = store_file(&mut packs, repo.store(), &top, name, name, seen, &mut || {});
             let _ = tx.send((stored, packs.is_empty()));
@@ -3456,7 +3463,7 @@ mod tests {
         let (dir, mut repo) = project();
         write_old(dir.path(), "a.txt", b"a");
         save_now(&mut repo).unwrap();
-        let stored = dir.path().join(".opal/cache/files");
+        let stored = dir.path().join(".opalro/cache/files");
         let before = fs::read(&stored).unwrap();
         // A new file a finished scan would add to the cache, and an ignore list the walk refuses.
         write_old(dir.path(), "b.txt", b"b");
@@ -3478,7 +3485,7 @@ mod tests {
     #[test]
     fn a_save_whose_file_cache_cant_be_written_is_made_with_a_warning() {
         let (dir, mut repo) = project();
-        fs::create_dir(dir.path().join(".opal/cache/files")).unwrap();
+        fs::create_dir(dir.path().join(".opalro/cache/files")).unwrap();
         write(dir.path(), "a.txt", b"a");
         let SaveOutcome::Saved {
             save_id, warnings, ..
@@ -3688,7 +3695,7 @@ mod tests {
     #[test]
     fn an_ignored_new_file_named_outright_is_refused() {
         let (dir, mut repo) = project();
-        write(dir.path(), ".opalignore", b"*.log\nbuild/\n");
+        write(dir.path(), ".opalroignore", b"*.log\nbuild/\n");
         write(dir.path(), "a.txt", b"1");
         save_now(&mut repo).unwrap();
         write(dir.path(), "a.txt", b"2");
@@ -3708,7 +3715,7 @@ mod tests {
         save_only(&mut repo, &[pattern("", "*")]).unwrap();
         assert_eq!(
             newest_files(&repo),
-            files(&[(".opalignore", "*.log\nbuild/\n"), ("a.txt", "2")])
+            files(&[(".opalroignore", "*.log\nbuild/\n"), ("a.txt", "2")])
         );
     }
 
@@ -3805,7 +3812,7 @@ mod tests {
         write(dir.path(), ".git/config", b"[core]");
         write(dir.path(), "nested/.git/HEAD", b"ref: refs/heads/main");
         write(dir.path(), "nested/a.txt", b"x");
-        write(dir.path(), "inner/.opal/format", b"x");
+        write(dir.path(), "inner/.opalro/format", b"x");
         write(dir.path(), "inner/b.txt", b"x");
         let err = refused(&mut repo, &[path(".git/config")]);
         assert!(
@@ -3914,19 +3921,19 @@ mod tests {
         let (dir, mut repo) = project();
         write(dir.path(), "a.txt", b"1");
         save_now(&mut repo).unwrap();
-        // Head, diary, packs, `tmp/` and the file cache: all of `.opal`, byte for byte, but for
+        // Head, diary, packs, `tmp/` and the file cache: all of `.opalro`, byte for byte, but for
         // the lock's note of who last held it.
-        let opal = || {
-            let mut tree = disk_tree(&dir.path().join(".opal"));
+        let opalro = || {
+            let mut tree = disk_tree(&dir.path().join(".opalro"));
             tree.remove("state/lock-info");
             tree
         };
-        let before = opal();
+        let before = opalro();
         sized(dir.path(), "art/huge.bin", 100_000_001);
         let (result, asked) = save_answering(&mut repo, None, false);
         assert!(asked.is_some());
         assert!(matches!(result, Err(SaveError::LargeSave(_))), "{result:?}");
-        assert!(opal() == before, "something was stored");
+        assert!(opalro() == before, "something was stored");
     }
 
     #[test]
@@ -4004,7 +4011,7 @@ mod tests {
             ..
         } = walk_project(&repo, SaveLimits::default()).unwrap();
         after_walk(dir.path());
-        let tmp = dir.path().join(".opal/tmp");
+        let tmp = dir.path().join(".opalro/tmp");
         let mut packs = PackSet::with_limit(&tmp, repo.packs_dir(), 7).unwrap();
         crate::workers::set_test_workers(Some(count));
         let built = build(
@@ -4129,7 +4136,7 @@ mod tests {
         for e in fs::read_dir(dir).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().into_string().unwrap();
-            if name == ".opal" {
+            if name == ".opalro" {
                 continue;
             }
             let is = e.file_type().unwrap();

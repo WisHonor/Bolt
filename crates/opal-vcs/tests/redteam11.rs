@@ -12,12 +12,12 @@ fn wide_listings(listings: usize, per: usize, size: u64) -> support::Env {
     use opal_core::listing::{Entry, EntryKind, Listing};
     use opal_core::pack::ObjectKind;
     let env = support::Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = support::main_tip(&env).to_hex();
-    env.opal().args(["goto", &first]).assert().success();
+    env.opalro().args(["goto", &first]).assert().success();
     support::plant_save(env.root(), |p| {
         let x = p.add_content(b"x").unwrap();
         let mut folders = Vec::new();
@@ -58,7 +58,7 @@ fn rt11_1_verify_reports_many_wrong_sizes_within_bounded_memory() {
         let capped = support::opal_capped_at(env.config(), env.root(), CAP_KB, &[cmd]);
         let ended = support::run_limited(capped, 1_800);
         eprintln!(
-            "opal {cmd}, address space capped at {CAP_KB} KB: code {:?} in {:.0}s, peak {} MiB: {}",
+            "opalro {cmd}, address space capped at {CAP_KB} KB: code {:?} in {:.0}s, peak {} MiB: {}",
             ended.code,
             ended.secs,
             ended.peak_mb,

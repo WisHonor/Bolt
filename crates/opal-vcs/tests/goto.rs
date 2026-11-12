@@ -1,4 +1,4 @@
-//! `opal goto`, end to end, and the helpers its tests share.
+//! `opalro goto`, end to end, and the helpers its tests share.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::journal::Journal;
@@ -37,9 +37,9 @@ fn a_held_file_cant_be_replaced_or_removed_until_let_go() {
     assert_eq!(std::fs::read(&held).unwrap(), b"new");
 }
 
-/// The kinds of the warnings in `opal <args> --json`'s document.
+/// The kinds of the warnings in `opalro <args> --json`'s document.
 fn warning_kinds(env: &Env, args: &[&str]) -> (Vec<String>, serde_json::Value) {
-    let out = env.opal().args(args).arg("--json").output().unwrap();
+    let out = env.opalro().args(args).arg("--json").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let kinds = doc["warnings"]
@@ -55,13 +55,13 @@ fn warning_kinds(env: &Env, args: &[&str]) -> (Vec<String>, serde_json::Value) {
 /// stopped before `head` moved would leave it.
 fn stopped_switch() -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let first = Repository::open(env.root()).unwrap().head().unwrap();
     env.overwrite("a.txt", "a");
-    env.opal().args(["save", "A"]).assert().success();
+    env.opalro().args(["save", "A"]).assert().success();
     let mut repo = Repository::open(env.root()).unwrap();
     let second = repo.head().unwrap();
     let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
@@ -84,7 +84,7 @@ fn read_only_commands_say_a_switch_is_unfinished() {
             kinds.contains(&"switch_unfinished".to_owned()),
             "{command}: {doc}"
         );
-        let out = env.opal().arg(command).output().unwrap();
+        let out = env.opalro().arg(command).output().unwrap();
         let said = text(&out.stderr);
         assert!(
             said.contains("warning: A switch between saves was stopped"),
@@ -101,19 +101,19 @@ fn read_only_commands_say_a_switch_is_unfinished() {
     let (kinds, doc) = warning_kinds(&env, &["status"]);
     assert!(kinds.is_empty(), "{doc}");
     assert_eq!(doc["unfinished_switch"], false, "{doc}");
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
 }
 
 #[test]
 fn a_damaged_journal_stops_a_save_and_is_reported() {
     let env = stopped_switch();
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     std::fs::write(&journal, b"OPALJRNL garbage").unwrap();
     let out = env.save(&["B"]);
     assert_eq!(out.status.code(), Some(1));
     let said = text(&out.stderr);
-    assert!(said.contains(".opal/state/journal"), "{said}");
-    assert!(said.contains("opal status"), "{said}");
+    assert!(said.contains(".opalro/state/journal"), "{said}");
+    assert!(said.contains("opalro status"), "{said}");
     let (kinds, doc) = warning_kinds(&env, &["status"]);
     assert!(kinds.contains(&"switch_unfinished".to_owned()), "{doc}");
     assert!(journal.exists());
@@ -124,9 +124,9 @@ fn a_damaged_journal_stops_a_save_and_is_reported() {
 fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
     for json in [false, true] {
         let env = stopped_switch();
-        let mut cmd = env.opal();
+        let mut cmd = env.opalro();
         cmd.args(["save", "B"])
-            .env("OPAL_FAULT_FAIL", "save:walked");
+            .env("OPALRO_FAULT_FAIL", "save:walked");
         if json {
             cmd.arg("--json");
         }
@@ -140,11 +140,11 @@ fn a_save_that_fails_after_finishing_a_switch_still_says_it_finished() {
             assert!(said.contains("warning: Finished a switch"), "{said}");
             assert!(said.contains("error:"), "{said}");
         }
-        assert!(!env.root().join(".opal/state/journal").exists());
+        assert!(!env.root().join(".opalro/state/journal").exists());
     }
 }
 
-// `opal goto` itself.
+// `opalro goto` itself.
 
 use std::path::Path;
 
@@ -195,14 +195,14 @@ fn two_lines() -> Env {
 }
 
 fn goto(env: &Env, target: &str) -> String {
-    let out = env.opal().args(["goto", target]).output().unwrap();
+    let out = env.opalro().args(["goto", target]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     text(&out.stdout)
 }
 
 fn goto_json(env: &Env, target: &str) -> serde_json::Value {
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", target, "--json"])
         .output()
         .unwrap();
@@ -228,7 +228,7 @@ fn goto_a_line_and_back_restores_every_file_byte_for_byte() {
     assert_eq!(files(env.root()), holding(MAIN));
     assert!(!env.root().join("new").exists());
     assert!(changed(&env).is_empty());
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
 }
 
 #[test]
@@ -255,7 +255,7 @@ fn goto_stops_at_colliding_changes_and_changes_nothing() {
     env.overwrite("b.txt", "mine\n");
     env.overwrite("dir/c.bin", "mine too");
     let before = (env.standing(), files(env.root()));
-    let out = env.opal().args(["goto", "feature"]).output().unwrap();
+    let out = env.opalro().args(["goto", "feature"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let said = text(&out.stderr);
     assert!(
@@ -263,11 +263,11 @@ fn goto_stops_at_colliding_changes_and_changes_nothing() {
         "{said}"
     );
     assert!(
-        said.contains("hint:") && said.contains("opal save"),
+        said.contains("hint:") && said.contains("opalro save"),
         "{said}"
     );
     assert_eq!((env.standing(), files(env.root())), before);
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
     assert_eq!(env.state().1.position, Position::OnLine("main".into()));
 }
 
@@ -282,11 +282,11 @@ fn goto_a_save_at_a_lines_tip_is_at_the_save() {
         "{said}"
     );
     assert!(
-        said.contains("To keep saving on feature: opal goto feature"),
+        said.contains("To keep saving on feature: opalro goto feature"),
         "{said}"
     );
     // Of the lines there, the first by name.
-    assert!(!said.contains("opal goto zz"), "{said}");
+    assert!(!said.contains("opalro goto zz"), "{said}");
     assert_eq!(env.state().1.position, Position::AtSave(feature));
     assert_eq!(files(env.root()), holding(FEATURE));
 }
@@ -333,7 +333,7 @@ fn plant_with_change_id(root: &Path, change_id: ChangeId) {
 #[test]
 fn an_ambiguous_target_lists_the_saves() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
@@ -342,7 +342,7 @@ fn an_ambiguous_target_lists_the_saves() {
     plant_with_change_id(env.root(), ChangeId([0; 16]));
     plant_with_change_id(env.root(), ChangeId(second));
     let before = env.standing();
-    let out = env.opal().args(["goto", "zzzz"]).output().unwrap();
+    let out = env.opalro().args(["goto", "zzzz"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let said = text(&out.stderr);
     assert!(said.contains("matches more than one save"), "{said}");
@@ -398,16 +398,16 @@ fn goto_json_matches_its_snapshot() {
 /// A project whose line `main` holds `second`, on the save before, which holds `first`.
 fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     write_all(&env, first);
-    env.opal().args(["save", "First"]).assert().success();
+    env.opalro().args(["save", "First"]).assert().success();
     let saved = env.state().1.lines["main"];
     for e in std::fs::read_dir(env.root()).unwrap() {
         let e = e.unwrap();
-        if e.file_name() != ".opal" {
+        if e.file_name() != ".opalro" {
             let path = e.path();
             if path.is_dir() {
                 std::fs::remove_dir_all(path).unwrap();
@@ -417,7 +417,7 @@ fn on_first_of_two(first: &[(&str, &str)], second: &[(&str, &str)]) -> Env {
         }
     }
     write_all(&env, second);
-    env.opal().args(["save", "Second"]).assert().success();
+    env.opalro().args(["save", "Second"]).assert().success();
     goto(&env, &saved.to_hex());
     assert_eq!(files(env.root()), holding(first));
     env
@@ -487,7 +487,7 @@ fn a_new_file_in_a_folder_the_target_lacks_still_collides() {
     std::fs::remove_file(env.root().join("d/x")).unwrap();
     env.overwrite("d/y", "mine");
     let before = (env.standing(), files(env.root()));
-    let out = env.opal().args(["goto", "main"]).output().unwrap();
+    let out = env.opalro().args(["goto", "main"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
         text(&out.stderr).contains("in the way"),
@@ -528,13 +528,13 @@ fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
     }
     assert!(changed(&env).is_empty());
     let held = hold_open(&env.root().join("b.txt"));
-    let out = env.opal().args(["goto", "feature"]).output().unwrap();
+    let out = env.opalro().args(["goto", "feature"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     let said = text(&out.stderr);
     assert!(said.contains("error:") && said.contains("b.txt"), "{said}");
     assert!(text(&out.stdout).is_empty());
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", "feature", "--json"])
         .output()
         .unwrap();
@@ -552,7 +552,7 @@ fn a_goto_with_a_file_in_use_fails_and_the_next_one_finishes() {
     assert!(kinds.contains(&"switch_finished".to_owned()), "{doc}");
     assert_eq!(doc["position"]["line"], "feature", "{doc}");
     assert_eq!(files(env.root()), holding(FEATURE));
-    assert!(!env.root().join(".opal/state/journal").exists());
+    assert!(!env.root().join(".opalro/state/journal").exists());
 }
 
 // A link leading out of the project is written as a plain file holding its target, on every
@@ -633,13 +633,13 @@ fn a_stopped_switch_finishes_by_removing_a_placeholder_as_its_link() {
     let to = ids[KEEP_CHANGED].to_hex();
     // Stopped once `keep.txt` is written, before `out` goes.
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &to])
-        .env("OPAL_FAULT_FAIL", "switch:changed")
+        .env("OPALRO_FAULT_FAIL", "switch:changed")
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
-    assert!(env.root().join(".opal/state/journal").exists());
+    assert!(env.root().join(".opalro/state/journal").exists());
     let (kinds, doc) = warning_kinds(&env, &["goto", &to]);
     assert_eq!(kinds, ["switch_finished"], "{doc}");
     assert_eq!(files(env.root()), holding(&[("keep.txt", "K\n")]));
@@ -652,7 +652,7 @@ fn a_placeholder_you_changed_is_unsaved_work() {
     std::fs::write(env.root().join("out"), "mine\n").unwrap();
     assert_eq!(changed(&env), ["out"]);
     let out = env
-        .opal()
+        .opalro()
         .args(["goto", &ids[WITHOUT].to_hex()])
         .output()
         .unwrap();
@@ -670,12 +670,12 @@ fn a_placeholder_you_changed_is_unsaved_work() {
 #[test]
 fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
     let env = Env::empty();
-    env.opal()
+    env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
     let packs = |env: &Env| -> Vec<std::path::PathBuf> {
-        let folder = env.root().join(".opal/store/packs");
+        let folder = env.root().join(".opalro/store/packs");
         std::fs::read_dir(folder)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -684,30 +684,30 @@ fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
     let started = packs(&env);
     support::write(&env, "f.txt", "x\n");
     support::write(&env, "g.txt", "a\n");
-    env.opal().args(["save", "One"]).assert().success();
+    env.opalro().args(["save", "One"]).assert().success();
     let first: Vec<_> = packs(&env)
         .into_iter()
         .filter(|p| !started.contains(p))
         .collect();
     support::write(&env, "g.txt", "b\n");
-    env.opal().args(["save", "Two"]).assert().success();
+    env.opalro().args(["save", "Two"]).assert().success();
     let two = support::main_tip(&env).to_hex();
     support::write(&env, "f.txt", "z\n");
-    env.opal().args(["save", "Three"]).assert().success();
+    env.opalro().args(["save", "Three"]).assert().success();
     for pack in first {
         std::fs::remove_file(pack).unwrap();
     }
-    let out = env.opal().args(["goto", &two]).output().unwrap();
+    let out = env.opalro().args(["goto", &two]).output().unwrap();
     let said = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(said.contains("is not in the store"), "{said}");
     assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
-    let journal = env.root().join(".opal/state/journal");
+    let journal = env.root().join(".opalro/state/journal");
     if journal.exists() {
-        assert!(said.contains("delete .opal/state/journal"), "{said}");
+        assert!(said.contains("delete .opalro/state/journal"), "{said}");
         std::fs::remove_file(&journal).unwrap();
     }
     support::write(&env, "h.txt", "new\n");
-    env.opal().args(["save", "Four"]).assert().success();
+    env.opalro().args(["save", "Four"]).assert().success();
     assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
 }

@@ -67,7 +67,7 @@ fn a_shelf_past_the_most_a_project_keeps_is_refused_before_anything_changes() {
     };
     assert!(matches!(e, SwitchError::TooManyShelves), "{e:?}");
     assert!(e.to_string().contains("more than 10,000 shelves"), "{e}");
-    assert!(e.hint().unwrap().contains("opal unshelf"), "{e:?}");
+    assert!(e.hint().unwrap().contains("opalro unshelf"), "{e:?}");
     assert_eq!(
         (repo.head().unwrap(), repo.store().pack_count()),
         (head, packs)
