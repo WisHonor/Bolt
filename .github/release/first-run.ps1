@@ -1,15 +1,19 @@
-# A new person's first run on Windows: the download page, then the guide inside the archive,
-# word for word. Each line taken from a document is checked to be still in it before it runs.
-# Changes this account's Path and home folder: run it only on a throwaway runner.
+# A new person's first run on Windows, from what they took from the website: the download
+# page, then the guide inside the archive, word for word, then a report written with the report
+# form. Each line taken from a document is checked to be still in it before it runs.
+# Changes this account's Path and home folder: run it only on a throwaway runner or container.
+# -From is the folder holding what the website gave: the archive, SHA256SUMS,
+# USER-AGREEMENT.md, download-page.md and reporting-a-problem.md.
 param(
   [Parameter(Mandatory = $true)][string]$From,
-  [Parameter(Mandatory = $true)][string]$Version,
-  [Parameter(Mandatory = $true)][string]$Page
+  [Parameter(Mandatory = $true)][string]$Version
 )
 if ($env:GITHUB_ACTIONS -ne 'true') { Write-Host 'first-run.ps1 removes Opalro and its settings from this account and edits its Path: it runs only in CI'; exit 2 }
 $ErrorActionPreference = 'Stop'
 $script:current = ''
 $zip = "opalro-$Version-x86_64-pc-windows-msvc.zip"
+$Page = Join-Path $From download-page.md
+$Form = Join-Path $From reporting-a-problem.md
 
 function Step($name) { $script:current = $name; Write-Host ''; Write-Host "== $name" }
 function Check($ok) { if (-not $ok) { throw 'the check failed' } }
@@ -38,6 +42,12 @@ function New-TerminalPath {
 
 try {
   Remove-Item Env:OPALRO_CONFIG_DIR, Env:OPALRO_USER_NAME, Env:OPALRO_USER_EMAIL -ErrorAction SilentlyContinue
+
+  Step "the programs the guide's steps use"
+  # A bare container may lack one: the log says so. Their work is done by this script anyway.
+  foreach ($t in 'explorer', 'notepad') {
+    if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { Write-Host "::warning::This system has no $t, which the guide's steps use" }
+  }
 
   Step 'the download page: the archive for this system, and SHA256SUMS, into the same folder'
   InDoc $Page "| ``$zip`` |"
@@ -71,6 +81,12 @@ try {
   Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
   InDoc $Page 'Read the user agreement, `USER-AGREEMENT.md`.'
   Check (Test-Path -LiteralPath (Join-Path $unpacked USER-AGREEMENT.md))
+  # The agreement offered beside the downloads is the archive's, byte for byte.
+  InDoc $Page 'offered here beside the downloads. It is also inside every archive.'
+  $offered = (Get-FileHash -LiteralPath (Join-Path $From USER-AGREEMENT.md) -Algorithm SHA256).Hash
+  $inside = (Get-FileHash -LiteralPath (Join-Path $unpacked USER-AGREEMENT.md) -Algorithm SHA256).Hash
+  Write-Host "USER-AGREEMENT.md beside the downloads: $offered, in the archive: $inside"
+  Check ($offered -eq $inside)
   InDoc $guide 'Move `opalro.exe` to a folder of your own, such as `C:\Users\<you>\bin` (make the folder first if it isn''t there).'
   $bin = Join-Path $HOME bin
   New-Item -ItemType Directory -Path $bin | Out-Null
@@ -128,6 +144,39 @@ try {
   Run 'opalro history'
   Run 'opalro undo'
   Check (((Get-Content notes.txt) -join "`n") -ceq 'hello again')
+
+  Step 'a report, written with the report form'
+  InDoc $Page '"Reporting a problem", published on this page, says what to send.'
+  $os = Get-CimInstance Win32_OperatingSystem
+  $saidVersion = (opalro --version | Out-String).Trim(); Check ($LASTEXITCODE -eq 0)
+  $saidStatus = (opalro status | Out-String).TrimEnd(); Check ($LASTEXITCODE -eq 0)
+  $saidVerify = (opalro verify | Out-String).TrimEnd(); Check ($LASTEXITCODE -eq 0)
+  $saidJson = (opalro status --json | Out-String).Trim(); Check ($LASTEXITCODE -eq 0)
+  if (-not $saidJson.Contains('"opalro_json":1')) { throw 'opalro status --json lacks "opalro_json":1' }
+  $script:report = @()
+  # A part of the report, under a label of the form's "What to send" list.
+  function Part($label, $text) {
+    InDoc $Form "- **$label**"
+    $script:report += ($label.TrimEnd([char[]]',:') + ':'), $text, ''
+  }
+  Part 'The version:' $saidVersion
+  Part 'Your system and its version:' "$($os.Caption) $($os.Version)"
+  Part 'What you typed:' "opalro status`r`n(in the guide's practice project, just after opalro undo)"
+  Part 'What it printed:' $saidStatus
+  Part 'What `opalro verify` says,' $saidVerify
+  Part 'If it helps, the same command with `--json`,' "> opalro status --json`r`n$saidJson"
+  InDoc $Form '- What you expected to happen instead.'
+  $script:report += 'What you expected to happen instead:',
+    'Nothing else: this report is a rehearsal. opalro status names notes.txt as changed after opalro undo, as the guide''s section 3 says.'
+  # Every bold label of the list is one above; one added there fails here.
+  $inList = $false; $bold = 0
+  foreach ($l in Get-Content -LiteralPath $Form -Encoding UTF8) {
+    if ($l.StartsWith('## ')) { $inList = $l -ceq '## What to send' } elseif ($inList -and $l.StartsWith('- **')) { $bold++ }
+  }
+  if ($bold -ne 6) { throw "the form's ""What to send"" list has $bold bold labels, not the 6 this report fills" }
+  $reportFile = Join-Path $downloads report.txt
+  [IO.File]::WriteAllLines($reportFile, [string[]]$script:report)
+  Get-Content -LiteralPath $reportFile -Encoding UTF8 | Write-Host
 
   Step 'the guide: removing Opalro from a computer'
   Set-Location -LiteralPath $HOME

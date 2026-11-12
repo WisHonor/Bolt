@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# A new person's first run on Linux or macOS: the download page, then the guide inside the
-# archive, word for word. Each line taken from a document is checked to be still in it
-# before it runs. Changes this computer's home folder: run it only on a throwaway runner.
-# Usage: first-run.sh <folder with the archive and SHA256SUMS> <version> <target> <download-page.md>
+# A new person's first run on Linux or macOS, from what they took from the website: the
+# download page, then the guide inside the archive, word for word, then a report written with
+# the report form. Each line taken from a document is checked to be still in it before it
+# runs. Changes this computer's home folder: run it only on a throwaway runner or container.
+# Usage: first-run.sh <folder> <version> <target>, the folder holding what the website gave:
+# the archive, SHA256SUMS, USER-AGREEMENT.md, download-page.md and reporting-a-problem.md.
 set -eEuo pipefail
 [ "${GITHUB_ACTIONS:-}" = true ] || { echo "first-run.sh removes Opalro and its settings from this account and edits ~/.bashrc or ~/.zshrc: it runs only in CI" >&2; exit 2; }
 
-from=$1 version=$2 target=$3 page=$4
+from=$1 version=$2 target=$3
+page="$from/download-page.md" form="$from/reporting-a-problem.md"
 archive="opalro-$version-$target.tar.gz"
 current=""
 trap 'echo "first-run FAILED at: $current" >&2' ERR
@@ -17,12 +20,20 @@ run() { in_doc "$guide" "$1"; echo "\$ $1"; eval "$1"; }
 
 if [ "$(uname)" = Darwin ]; then
   rc=.zshrc shell=zsh config="$HOME/Library/Application Support/opalro"
+  hash=(shasum -a 256) tools=(grep shasum tar open)
 else
   rc=.bashrc shell=bash config="$HOME/.config/opalro"
+  hash=(sha256sum) tools=(grep sha256sum tar gzip nano ldd)
 fi
 unset OPALRO_CONFIG_DIR XDG_CONFIG_HOME OPALRO_USER_NAME OPALRO_USER_EMAIL
 # What a new terminal reads: the system's own folders, then the shell's start-up file.
 new_shell() { env -i HOME="$HOME" TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin "$shell" -i -c "$1" 2> /dev/null; }
+
+step "the programs the guide's steps use"
+# A bare container may lack one: the log says so. An editor's work is done by this script anyway.
+for t in "${tools[@]}"; do
+  command -v "$t" > /dev/null || echo "::warning::This system has no $t, which the guide's steps use"
+done
 
 step "the download page: the archive for this system, and SHA256SUMS, into the same folder"
 in_doc "$page" "| \`$archive\` |"
@@ -57,6 +68,11 @@ echo "\$ tar -xzf $archive"
 tar -xzf "$archive"
 in_doc "$page" "Read the user agreement, \`USER-AGREEMENT.md\`."
 [ -f USER-AGREEMENT.md ]
+# The agreement offered beside the downloads is the archive's, byte for byte.
+in_doc "$page" "offered here beside the downloads. It is also inside every archive."
+offered=$("${hash[@]}" < "$from/USER-AGREEMENT.md") inside=$("${hash[@]}" < USER-AGREEMENT.md)
+echo "USER-AGREEMENT.md beside the downloads: ${offered%% *}, in the archive: ${inside%% *}"
+[ "$offered" = "$inside" ]
 run "mkdir -p ~/.local/bin"
 run "mv opalro ~/.local/bin/"
 
@@ -115,6 +131,40 @@ run 'opalro save "More notes"'
 run 'opalro history'
 run 'opalro undo'
 [ "$(cat notes.txt)" = "hello again" ]
+
+step "a report, written with the report form"
+in_doc "$page" "\"Reporting a problem\", published on this page, says what to send."
+if [ "$(uname)" = Darwin ]; then
+  system="$(sw_vers -productName) $(sw_vers -productVersion)"
+else
+  system="$(. /etc/os-release && echo "$PRETTY_NAME")
+$(ldd --version | sed -n 1p)"
+fi
+# Each its own line, so set -e stops on any that fails.
+said_version=$(opalro --version)
+said_status=$(opalro status)
+said_verify=$(opalro verify)
+said_json=$(opalro status --json)
+grep -qF '"opalro_json":1' <<< "$said_json" || { echo 'opalro status --json lacks "opalro_json":1' >&2; false; }
+report="$downloads/report.txt"
+: > "$report"
+# A part of the report, under a label of the form's "What to send" list.
+part() { in_doc "$form" "- **$1**"; printf '%s\n%s\n\n' "${1%[,:]}:" "$2" >> "$report"; }
+part 'The version:' "$said_version"
+part 'Your system and its version:' "$system"
+part 'What you typed:' "opalro status
+(in the guide's practice project, just after opalro undo)"
+part 'What it printed:' "$said_status"
+part 'What `opalro verify` says,' "$said_verify"
+part 'If it helps, the same command with `--json`,' "\$ opalro status --json
+$said_json"
+in_doc "$form" "- What you expected to happen instead."
+printf '%s\n%s\n' 'What you expected to happen instead:' \
+  "Nothing else: this report is a rehearsal. opalro status names notes.txt as changed after opalro undo, as the guide's section 3 says." >> "$report"
+# Every bold label of the list is one above; one added there fails here.
+count=$(awk '/^## / { s = ($0 == "## What to send") } s && /^- \*\*/' "$form" | wc -l | tr -d ' ')
+[ "$count" = 6 ] || { echo "the form's \"What to send\" list has $count bold labels, not the 6 this report fills" >&2; false; }
+cat "$report"
 
 step "the guide: removing Opalro from a computer"
 cd "$HOME"
