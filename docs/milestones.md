@@ -21,7 +21,7 @@
 - **Status** (decisions [023](decisions/023-v0.1-speed-bar.md) and [129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)): `status` on an unchanged 100,000-file project takes under 2 seconds, both times it is run, on GitHub's Linux runner.
 - **Against Git** (decisions [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md), [108](decisions/108-the-third-gate-compares-medians.md), [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) and [132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)): on Git's own source, `status` with nothing changed and a small change saved each take at most twice Git's time, and going back to the first version at most three and a half times, comparing the medians of ten runs, on GitHub's Linux and Windows runners. Going back within twice Git's time is a goal for v0.2: the job prints its ratio and says when it is over.
 
-Benchmark results against Git and Git LFS are published either way ([benchmarks.md](benchmarks.md)). The first two gates passed when measured on 2026-11-09 and every time since. The third was added on 2026-11-10 and failed five of its six checks before milestone 6's speed work; after it, going back on Linux took 1.79 to 2.65 times Git's time over ten runs, so on 2026-11-11 the owner ruled that v0.1 ships without it, holding `status` and the small save to twice Git's time (decision 128).
+Benchmark results against Git and Git LFS are published either way ([benchmarks.md](benchmarks.md)). The first two gates passed when measured on 2026-11-09 and every time since. The third was added on 2026-11-10 and failed five of its six checks before milestone 6's speed work; after it, going back on Linux took 1.79 to 2.65 times Git's time over ten runs, so on 2026-11-11 the owner ruled that v0.1 ships without it, holding `status` and the small save to twice Git's time (decision 128). On the finished code all three gates passed ten runs in ten on both systems ([benchmarks.md](benchmarks.md) §10).
 
 After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).
 
@@ -397,7 +397,7 @@ Planned on 2026-11-11: [plans/2026-11-11-v0.1-engine.md](plans/2026-11-11-v0.1-e
 **7. Red team** ✅ (Task 17; decision 133)
 - One session from the sandbox, with Windows and macOS on a `redteam/` CI branch ([report](redteam/2026-11-11-v0.1-release.md)): three Low findings, one fixed, two ruled on.
 
-**8. The gate, ten times** (Task 16)
+**8. The gate, ten times** ✅ (Task 16)
 - *Done when:* ten runs on the finished code are published in [benchmarks.md](benchmarks.md) §10, and every miss of an enforced step has its cause written down.
 
 **9. Review, rulings and merge** (Task 18)
