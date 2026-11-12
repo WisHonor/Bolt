@@ -1,18 +1,18 @@
-# Bolt Benchmarks
+# Opalro Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Bolt against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn. Every speed or size claim Bolt makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
-**In plain words.** Bolt promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Bolt must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Bolt beside Git and Git LFS on the same files, step by step, and says where each one wins.
+**In plain words.** Opalro promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Opalro must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Opalro beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
 ## 1. The speed gates
 
 - **Memory:** saving a 10 GiB file of incompressible bytes peaks at no more than 500,000,000 bytes of memory.
-- **Status:** `bolt status` on an unchanged 100,000-file project takes under 2 s. From v0.1 the nightly job fails at 2 s or more ([decision 129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)).
-- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Bolt at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians. **For v0.1** ([decision 128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md)) `status` and the small save keep the limit of twice Git's time, and going back to the first version is held to three and a half times ([decision 132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md), picked from the eleven runs on record, whose worst was 3.01): twice is its goal for v0.2, and the job says when it is over the goal.
+- **Status:** `opal status` on an unchanged 100,000-file project takes under 2 s. From v0.1 the nightly job fails at 2 s or more ([decision 129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)).
+- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Opalro at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians. **For v0.1** ([decision 128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md)) `status` and the small save keep the limit of twice Git's time, and going back to the first version is held to three and a half times ([decision 132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md), picked from the eleven runs on record, whose worst was 3.01): twice is its goal for v0.2, and the job says when it is over the goal.
 
 Before milestone 6's speed work the third gate fails five of its six checks (§2's tables, 2026-11-09):
 
-| Step, on Git's source | Linux: Bolt, Git, times Git's | Windows: Bolt, Git, times Git's |
+| Step, on Git's source | Linux: Opalro, Git, times Git's | Windows: Opalro, Git, times Git's |
 |---|---|---|
 | `status`, nothing changed | 62.0 ms, 13.0 ms, 4.8 | 135 ms, 45.4 ms, 3.0 |
 | A small change, saved | 68.6 ms, 30.2 ms, 2.3 | 149 ms, 127 ms, 1.2 (passes) |
@@ -27,26 +27,26 @@ The first two gates, as measured:
 
 How they are measured:
 
-- **The file:** 10,737,418,240 bytes of BLAKE3's extendable output for the input `bolt memory gate`, written 1 MiB at a time by `crates/bolt-vcs/tests/speed.rs`. Nothing in it compresses and no two chunks match. It is saved with `bolt start`, then `bolt save "A 10 GiB file" --yes`, in a new temporary folder that is deleted afterwards.
-- **Peak memory** is the most memory the `bolt save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
+- **The file:** 10,737,418,240 bytes of BLAKE3's extendable output for the input `opal memory gate`, written 1 MiB at a time by `crates/opal-vcs/tests/speed.rs`. Nothing in it compresses and no two chunks match. It is saved with `opal start`, then `opal save "A 10 GiB file" --yes`, in a new temporary folder that is deleted afterwards.
+- **Peak memory** is the most memory the `opal save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
 - **Time** is wall-clock time from start to exit, with warm caches: the file was just written, and part of it may still be in the system's cache.
-- **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `bolt status` twice ([testing.md](testing.md) §5).
+- **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `opal status` twice ([testing.md](testing.md) §5).
 - Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, both fail their jobs over their limits: the memory gate always, the status gate from v0.1 on (decision 129).
 
 ### GitHub's Linux runner, 2026-11-09
 
 - **Machine:** GitHub's `ubuntu-latest` runner, image ubuntu-24.04 20261101.360.1: AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, SSD.
-- **Bolt:** the code of commit `bca0558`. The commit that added this page changes no Bolt code, only tests, workflows and docs.
-- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. That job is now `.github/workflows/memory-gate.yml`, which the bench and nightly workflows both call. The run is at `0e93681`, on a branch since deleted: this page's commit before the docs were added, with `bca0558`'s Bolt code. The test and its job have since gained one check each that a real measurement was made; neither changes what is measured. The test runs the `bolt` that `cargo test` builds, which has the core's test-support feature on. That feature only adds test overrides, off unless a test sets them, and helpers `bolt` never calls, so it doesn't change the number:
+- **Opalro:** the code of commit `bca0558`. The commit that added this page changes no Opalro code, only tests, workflows and docs.
+- **Memory gate:** [run 42598494181](https://github.com/WisHonor/Bolt/actions/runs/42598494181), job `memory-gate` of `.github/workflows/bench.yml`, which first frees about 22 GiB of the runner's disk. That job is now `.github/workflows/memory-gate.yml`, which the bench and nightly workflows both call. The run is at `0e93681`, on a branch since deleted: this page's commit before the docs were added, with `bca0558`'s Opalro code. The test and its job have since gained one check each that a real measurement was made; neither changes what is measured. The test runs the `opal` that `cargo test` builds, which has the core's test-support feature on. That feature only adds test overrides, off unless a test sets them, and helpers `opal` never calls, so it doesn't change the number:
 
   ```sh
-  cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb
+  cargo test --release -p opal-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb
   ```
 
-- **Status gate:** [run 42592855953](https://github.com/WisHonor/Bolt/actions/runs/42592855953), job `speed` of `.github/workflows/nightly.yml`, at commit `b36e203`, which has the same Bolt code as `bca0558`:
+- **Status gate:** [run 42592855953](https://github.com/WisHonor/Bolt/actions/runs/42592855953), job `speed` of `.github/workflows/nightly.yml`, at commit `b36e203`, which has the same Opalro code as `bca0558`:
 
   ```sh
-  cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project
+  cargo test --release -p opal-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project
   ```
 
   The same log gives the test's first save of the 100,000 files, made before it times `status`: 1.93 s.
@@ -54,18 +54,18 @@ How they are measured:
 ### Windows laptop, 2026-11-09
 
 - **Machine:** AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200.
-- **Bolt:** commit `bca0558`.
-- **Memory gate,** in PowerShell from the repository's root, with `BOLT_CONFIG_DIR` set to an empty folder and `BOLT_USER_NAME` and `BOLT_USER_EMAIL` set:
+- **Opalro:** commit `bca0558`.
+- **Memory gate,** in PowerShell from the repository's root, with `OPAL_CONFIG_DIR` set to an empty folder and `OPAL_USER_NAME` and `OPAL_USER_EMAIL` set:
 
   ```powershell
-  New-Item -ItemType Directory "$env:TEMP\bolt-gate"
-  $env:BOLT_GATE_FILE = "$env:TEMP\bolt-gate\big.bin"
-  cargo test --release -p bolt-vcs --test speed -j 2 -- --ignored --nocapture --exact write_the_memory_gate_file
-  cargo build --release -p bolt-vcs -j 2   # after the test, which builds its own bolt.exe
-  $bolt = (Resolve-Path target\release\bolt.exe).Path
-  cd $env:TEMP\bolt-gate
-  & $bolt start
-  $p = Start-Process $bolt -ArgumentList 'save', '"A 10 GiB file"', '--yes' -NoNewWindow -PassThru
+  New-Item -ItemType Directory "$env:TEMP\opal-gate"
+  $env:OPAL_GATE_FILE = "$env:TEMP\opal-gate\big.bin"
+  cargo test --release -p opal-vcs --test speed -j 2 -- --ignored --nocapture --exact write_the_memory_gate_file
+  cargo build --release -p opal-vcs -j 2   # after the test, which builds its own opal.exe
+  $opal = (Resolve-Path target\release\opal.exe).Path
+  cd $env:TEMP\opal-gate
+  & $opal start
+  $p = Start-Process $opal -ArgumentList 'save', '"A 10 GiB file"', '--yes' -NoNewWindow -PassThru
   $null = $p.Handle   # keeps the exit code and times readable after it ends
   $peak = 0
   while (-not $p.HasExited) {
@@ -73,21 +73,21 @@ How they are measured:
       Start-Sleep -Milliseconds 200
   }
   "$peak bytes, $(($p.ExitTime - $p.StartTime).TotalSeconds) s, exit $($p.ExitCode)"
-  cd ..; Remove-Item -Recurse -Force bolt-gate
+  cd ..; Remove-Item -Recurse -Force opal-gate
   ```
 
   Deleting the folder gave back 20.02 GiB.
 - **Status gate:**
 
   ```sh
-  cargo test --release -p bolt-vcs --test speed -j 2 -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project --test-threads=2
+  cargo test --release -p opal-vcs --test speed -j 2 -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project --test-threads=2
   ```
 
   Its first save of the 100,000 files, made before it times `status`, took 5.10 s.
 
 ## 2. Against Git and Git LFS
 
-**In plain words.** The same files go through the same steps three times: with Bolt, with Git, and with Git using Git LFS for every file of 1 MiB or more. Big files are where Bolt pulls ahead. Ten versions of a 1 GiB file take 1 GiB in Bolt and 10 GiB in Git or Git LFS. Saving one more version takes Bolt 1.4 to 2.9 seconds, where Git takes over half a minute. Git LFS is quickest at the first save of big files full of new bytes, since it neither compresses them nor waits for the disk. On the two small projects, Git, with or without Git LFS, is quickest at `status`, small saves and going back to an old version, on both runners. Of those steps, Bolt wins only `status` after touching Godot's biggest file, on Linux. Git is also quickest at going back to an old version of the repeated 1 GiB file on both runners, and of the 10-version one on Linux. On Linux it is quicker at `status` with nothing changed on the big-file sets too, by a millisecond or two. In space, Git keeps Godot's demos in 3% less (219.3 MiB against Bolt's 226.7 MiB), and its deltas keep scattered edits to a big file in less space than Bolt's chunks (§3).
+**In plain words.** The same files go through the same steps three times: with Opalro, with Git, and with Git using Git LFS for every file of 1 MiB or more. Big files are where Opalro pulls ahead. Ten versions of a 1 GiB file take 1 GiB in Opalro and 10 GiB in Git or Git LFS. Saving one more version takes Opalro 1.4 to 2.9 seconds, where Git takes over half a minute. Git LFS is quickest at the first save of big files full of new bytes, since it neither compresses them nor waits for the disk. On the two small projects, Git, with or without Git LFS, is quickest at `status`, small saves and going back to an old version, on both runners. Of those steps, Opalro wins only `status` after touching Godot's biggest file, on Linux. Git is also quickest at going back to an old version of the repeated 1 GiB file on both runners, and of the 10-version one on Linux. On Linux it is quicker at `status` with nothing changed on the big-file sets too, by a millisecond or two. In space, Git keeps Godot's demos in 3% less (219.3 MiB against Opalro's 226.7 MiB), and its deltas keep scattered edits to a big file in less space than Opalro's chunks (§3).
 
 ### How it was measured
 
@@ -100,31 +100,31 @@ How they are measured:
 
   Noise is the keystream of AES-256-CTR from `openssl`, keyed by a fixed text: nothing in it compresses, and every run builds the same bytes.
 - **The steps,** each timed on its own:
-  1. **First save:** `bolt save` after `bolt start`; `git add -A && git commit` after `git init`.
+  1. **First save:** `opal save` after `opal start`; `git add -A && git commit` after `git init`.
   2. **A small change, saved:** a line added to `README.md` (code, Godot); 4 KiB overwritten in one file (noise, repeated); the next version (versions, whose remaining versions are then saved untimed, to make 10).
   3. **`status` with nothing changed,** started 3 seconds after the last change.
   4. **`status` after `touch` on the biggest file,** whose time changes but not its contents, so each tool must read it again.
-  5. **Back to the first version,** from the newest: `bolt goto` with the first save's fingerprint (not the empty save `bolt start` makes), `git checkout` with the first commit.
+  5. **Back to the first version,** from the newest: `opal goto` with the first save's fingerprint (not the empty save `opal start` makes), `git checkout` with the first commit.
 
-  Then the space each one takes: `.bolt`, or `.git` with Git LFS's objects in it, as `du -sb` gives it (the files' bytes; on Linux each folder's own few KiB too).
+  Then the space each one takes: `.opal`, or `.git` with Git LFS's objects in it, as `du -sb` gives it (the files' bytes; on Linux each folder's own few KiB too).
 - **Timing:** `run.sh` runs each step once to warm up. `hyperfine` then times 5 runs and gives the mean, the fastest and the slowest, with warm caches. A step whose warm-up took over a minute would get 3 runs instead, but none did. `hyperfine` runs each command with bash (Git's own on Windows) and takes the shell's start-up time off. Before every run, untimed, come three things in turn. First a wait for Git's background housekeeping, then the step's setup (a new repository for the first save, or the change for the next one), then a `sync`, so that no run pays for writing what an earlier one left. Every command is in `bench/run.sh`.
 - **To keep it fair:**
   - Git's `core.autocrlf` is off, so all three store the same bytes; every other setting is the tool's default.
-  - **Waiting for the disk.** Bolt writes each pack through to the disk before it says a save is done, so a crash can't lose it. Git does that for packs, which is where it puts files over 512 MiB (`core.bigFileThreshold`). It doesn't for the loose objects it writes smaller files as: Git's documentation for `core.fsync` says "the default on most platforms is equivalent to `core.fsync=committed,-loose-object`". Git LFS syncs none of the objects `git add` stores: its clean filter writes each to a temporary file and renames it into place, with no sync between (`lfs/gitfilter_clean.go` and `commands/command_clean.go` in Git LFS's source). So their saves of big files can end before the disk has the data, and the next run's untimed `sync` writes it.
+  - **Waiting for the disk.** Opalro writes each pack through to the disk before it says a save is done, so a crash can't lose it. Git does that for packs, which is where it puts files over 512 MiB (`core.bigFileThreshold`). It doesn't for the loose objects it writes smaller files as: Git's documentation for `core.fsync` says "the default on most platforms is equivalent to `core.fsync=committed,-loose-object`". Git LFS syncs none of the objects `git add` stores: its clean filter writes each to a temporary file and renames it into place, with no sync between (`lfs/gitfilter_clean.go` and `commands/command_clean.go` in Git LFS's source). So their saves of big files can end before the disk has the data, and the next run's untimed `sync` writes it.
   - **Git's housekeeping.** From Git 2.54, a commit can start a repack (the `geometric` maintenance strategy) when its packs no longer grow geometrically. On Linux it runs in the background, out of the commit's time, and each run waits for it to end. Upstream Git's Windows build has no `daemonize` (`setup.c` and `config.mak.uname`), and `builtin/gc.c` says "failure to daemonize is ok, we'll continue in foreground". Git for Windows' own fork wasn't checked, so there the repack is most likely part of `git commit`'s time.
-  - **A file just changed.** Bolt's cache doesn't vouch for a file changed in the last 2 seconds, so a change made in that time can't slip by; Git reads again a file changed no earlier than its index was written. That is why step 3 waits.
+  - **A file just changed.** Opalro's cache doesn't vouch for a file changed in the last 2 seconds, so a change made in that time can't slip by; Git reads again a file changed no earlier than its index was written. That is why step 3 waits.
 
 ### GitHub's Linux runner, 2026-11-09
 
 - **Machine:** GitHub's `ubuntu-latest`, image ubuntu-24.04 20261101.360.1: AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM.
-- **Versions:** Bolt at `a2ba223` (on a branch since deleted; its Bolt code is `ba513aa`'s), Git 2.56.0, Git LFS 3.8.1, hyperfine 1.20.0.
+- **Versions:** Opalro at `a2ba223` (on a branch since deleted; its Opalro code is `ba513aa`'s), Git 2.56.0, Git LFS 3.8.1, hyperfine 1.20.0.
 - **Run:** [run 42616742873](https://github.com/WisHonor/Bolt/actions/runs/42616742873), job `against-git (ubuntu-latest)` of `.github/workflows/bench.yml`.
 
 Each cell is the mean, then the fastest and slowest of the timed runs.
 
 #### Code
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 236 ms (233–242) | 1.52 s (1.50–1.55) | 1.56 s (1.54–1.59) |
 | A small change | 68.6 ms (67.4–69.6) | 30.2 ms (29.4–31.0) | 70.3 ms (69.5–71.2) |
@@ -134,7 +134,7 @@ Each cell is the mean, then the fastest and slowest of the timed runs.
 
 #### Godot's demo projects
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.10 s (1.07–1.12) | 8.55 s (8.50–8.62) | 3.70 s (3.68–3.75) |
 | A small change | 71.9 ms (71.0–72.4) | 28.7 ms (28.1–29.3) | 69.5 ms (68.4–70.9) |
@@ -144,7 +144,7 @@ Each cell is the mean, then the fastest and slowest of the timed runs.
 
 #### Noise
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.14 s (4.13–4.16) | 28.2 s (28.1–28.3) | 2.31 s (2.28–2.38) |
 | A small change | 81.0 ms (77.3–84.0) | 1.42 s (1.41–1.44) | 316 ms (313–318) |
@@ -154,7 +154,7 @@ Each cell is the mean, then the fastest and slowest of the timed runs.
 
 #### Versions
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.24 s (4.22–4.25) | 32.0 s (31.9–32.3) | 2.33 s (2.30–2.40) |
 | A small change | 1.42 s (1.41–1.43) | 31.9 s (31.8–32.1) | 2.29 s (2.27–2.32) |
@@ -164,7 +164,7 @@ Each cell is the mean, then the fastest and slowest of the timed runs.
 
 #### Repeated
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.38 s (1.38–1.39) | 31.8 s (31.8–31.9) | 2.31 s (2.30–2.33) |
 | A small change | 1.27 s (1.26–1.28) | 31.9 s (31.8–32.0) | 2.32 s (2.26–2.40) |
@@ -172,17 +172,17 @@ Each cell is the mean, then the fastest and slowest of the timed runs.
 | `status` after touching the biggest file | 659 ms (657–663) | 2.78 s (2.78–2.80) | 2.45 s (2.43–2.49) |
 | Back to the first version | 5.26 s (5.20–5.31) | 3.79 s (3.78–3.80) | 4.41 s (4.37–4.51) |
 
-The repeated file stores almost nothing new in Bolt (below), yet its first save takes a third to a half of a noise file's: Bolt still reads, fingerprints and cuts every byte, and only finds the chunks it has already stored once it has done so.
+The repeated file stores almost nothing new in Opalro (below), yet its first save takes a third to a half of a noise file's: Opalro still reads, fingerprints and cuts every byte, and only finds the chunks it has already stored once it has done so.
 
 ### GitHub's Windows runner, 2026-11-09
 
 - **Machine:** GitHub's `windows-latest`, image windows-2025-vs2026 20261103.298.1: Windows Server 2025 Datacenter, AMD EPYC 7763, 4 virtual CPUs, 16 GB of RAM, two 150 GB virtual disks, Windows Defender's real-time protection off. The data is under the runner's temporary folder, on `D:`, the drive with more room.
-- **Versions:** Bolt at `a2ba223`, Git 2.56.0.windows.4, Git LFS 3.8.1, hyperfine 1.20.0.
+- **Versions:** Opalro at `a2ba223`, Git 2.56.0.windows.4, Git LFS 3.8.1, hyperfine 1.20.0.
 - **Run:** [run 42616742873](https://github.com/WisHonor/Bolt/actions/runs/42616742873), job `against-git (windows-latest)`.
 
 #### Code
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 581 ms (558–621) | 5.07 s (5.04–5.12) | 5.35 s (5.31–5.40) |
 | A small change | 149 ms (145–153) | 127 ms (125–129) | 422 ms (418–423) |
@@ -192,7 +192,7 @@ The repeated file stores almost nothing new in Bolt (below), yet its first save 
 
 #### Godot's demo projects
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.51 s (1.39–1.62) | 13.1 s (12.8–13.4) | 8.09 s (7.87–8.54) |
 | A small change | 192 ms (182–201) | 136 ms (124–153) | 440 ms (431–453) |
@@ -202,7 +202,7 @@ The repeated file stores almost nothing new in Bolt (below), yet its first save 
 
 #### Noise
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.48 s (4.31–4.60) | 31.6 s (31.4–32.2) | 3.23 s (3.20–3.27) |
 | A small change | 174 ms (172–175) | 1.66 s (1.65–1.67) | 0.80 s (0.73–1.09) |
@@ -212,7 +212,7 @@ The repeated file stores almost nothing new in Bolt (below), yet its first save 
 
 #### Versions
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.55 s (4.48–4.59) | 32.7 s (32.5–33.0) | 3.28 s (3.27–3.31) |
 | A small change | 2.88 s (2.87–2.89) | 43.6 s (32.6–60.7) | 3.27 s (3.22–3.33) |
@@ -222,7 +222,7 @@ The repeated file stores almost nothing new in Bolt (below), yet its first save 
 
 #### Repeated
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.95 s (1.93–1.95) | 32.7 s (32.6–32.7) | 3.30 s (3.24–3.35) |
 | A small change | 1.59 s (1.56–1.62) | 43.8 s (32.6–60.9) | 3.29 s (3.27–3.35) |
@@ -236,7 +236,7 @@ On Windows, Git's commits of a 1 GiB file range from 33 to 61 s, the slow ones m
 
 After the steps: the first save and six small changes, or the 10 versions of the versions set. Both runners gave the same sizes to the tenth of a MiB; only the code set's files differ, 50.0 MiB on Windows, where its three links are copies.
 
-| Set | The files | Bolt | Git | Git with Git LFS |
+| Set | The files | Opalro | Git | Git with Git LFS |
 |---|---|---|---|---|
 | Code | 47.8 MiB | 15.3 MiB | 16.3 MiB | 16.3 MiB |
 | Godot's demo projects | 298.3 MiB | 226.7 MiB | 219.3 MiB | 263.4 MiB |
@@ -244,31 +244,31 @@ After the steps: the first save and six small changes, or the 10 versions of the
 | Versions | 1,024.0 MiB | 1,041.1 MiB | 10.00 GiB | 10.00 GiB |
 | Repeated | 1,024.0 MiB | 5.2 MiB | 7.00 GiB | 7.00 GiB |
 
-- Git and Git LFS keep every version of a changed file whole; Bolt keeps its changed chunks, about 64 KiB each, and a list of the file's chunks.
-- Godot's demos take 3% more in Bolt than in Git. Most likely that is because Bolt compresses each chunk of a big file on its own, and keeps a piece raw unless zstd gets it under 95% of its size. Git deflates each file whole and keeps whatever that saves.
+- Git and Git LFS keep every version of a changed file whole; Opalro keeps its changed chunks, about 64 KiB each, and a list of the file's chunks.
+- Godot's demos take 3% more in Opalro than in Git. Most likely that is because Opalro compresses each chunk of a big file on its own, and keeps a piece raw unless zstd gets it under 95% of its size. Git deflates each file whole and keeps whatever that saves.
 
 ## 3. Imports
 
-**In plain words.** `bolt import` turns a Git repository, history and all, into a Bolt project. Three repositories show what it costs in space. A Git LFS repository shrinks to a ninth, since Git LFS keeps every version of a file whole. An honest history of one big file comes out 18% bigger than Git keeps it, since Git stores each version as a small delta. And the red team's RT4-1 repository, built to blow up, comes out 98 times bigger: chunking covers files, not the records a save is made of ([decision 087](decisions/087-what-an-import-writes-once-files-are-chunked.md)).
+**In plain words.** `opal import` turns a Git repository, history and all, into an Opalro project. Three repositories show what it costs in space. A Git LFS repository shrinks to a ninth, since Git LFS keeps every version of a file whole. An honest history of one big file comes out 18% bigger than Git keeps it, since Git stores each version as a small delta. And the red team's RT4-1 repository, built to blow up, comes out 98 times bigger: chunking covers files, not the records a save is made of ([decision 087](decisions/087-what-an-import-writes-once-files-are-chunked.md)).
 
-| Repository | Git (`.git`) | Bolt (`.bolt`) | `bolt import`, Linux | `bolt import`, Windows |
+| Repository | Git (`.git`) | Opalro (`.opal`) | `opal import`, Linux | `opal import`, Windows |
 |---|---|---|---|---|
 | Git LFS: five files of 100 MiB in 10 versions, each overwriting 1 MiB of each file | 5,000.0 MiB, all but 42 KB of it in `.git/lfs` | 553.7 MiB | 11.4 s (11.4–11.5) | 12.4 s (12.3–12.4) |
 | One 200 MiB file in 50 versions, each overwriting 1% (eight runs of 256 KiB) | 299.2 MiB | 351.9 MiB | 48.2 s (48.0–48.5) | 47.2 s (46.7–49.0) |
 | RT4-1: 100 commits sharing one 1 MB message | 765,269 bytes | 74,749,439 bytes | 1.0 s | — |
 
 - The first two are built by `bench/data.sh` and timed like the steps above, in the same runs. The Git LFS repository is made with `git lfs track '*.bin'` and a commit per version. The 200 MiB file's history is written by `git fast-import`, which stores each version as a delta on the one before, up to 49 deep.
-- **RT4-1** is attack code, so it runs only on a `redteam/` branch: [run 42611137068](https://github.com/WisHonor/Bolt/actions/runs/42611137068), job `rt4-1-sizes`, at `c519636`, image ubuntu-24.04 20261101.360.1. Its test, `rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt` in `crates/bolt-vcs/tests/redteam4.rs`, builds the repository and imports it; the import succeeded in 1.0 s with a peak of 112,283,648 bytes, and the test's bound (40 MiB) failed, as decision 087 expects:
+- **RT4-1** is attack code, so it runs only on a `redteam/` branch: [run 42611137068](https://github.com/WisHonor/Bolt/actions/runs/42611137068), job `rt4-1-sizes`, at `c519636`, image ubuntu-24.04 20261101.360.1. Its test, `rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_opal` in `crates/opal-vcs/tests/redteam4.rs`, builds the repository and imports it; the import succeeded in 1.0 s with a peak of 112,283,648 bytes, and the test's bound (40 MiB) failed, as decision 087 expects:
 
   ```sh
-  cargo test --release -p bolt-vcs --test redteam4 -- --ignored --nocapture --exact rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt
+  cargo test --release -p opal-vcs --test redteam4 -- --ignored --nocapture --exact rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_opal
   ```
 
 ### git/git: main against milestone 5
 
-The whole history of Git's own repository is imported by `bolt` built from `main` and from this branch, in turn, three times each on the same machine. After each import comes its first save: a line added to `README.md`, saved with `--accept-crlf`. That flag is needed because Git wrote three `.bat` files with CRLF, as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`), and `run.sh import` has the commands. The branch's commits `c519636` and `a2ba223` both have `ba513aa`'s Bolt code.
+The whole history of Git's own repository is imported by `opal` built from `main` and from this branch, in turn, three times each on the same machine. After each import comes its first save: a line added to `README.md`, saved with `--accept-crlf`. That flag is needed because Git wrote three `.bat` files with CRLF, as their `.gitattributes` asks. The repository is a clone of `https://github.com/git/git` made at the run, at `fb25501` (2026-11-06): 86,059 commits and 1,022 refs. Time and peak memory are GNU `time`'s (`%e`, `%M`), and `run.sh import` has the commands. The branch's commits `c519636` and `a2ba223` both have `ba513aa`'s Opalro code.
 
-| Machine and run | `bolt` from | Import: 3 runs | Mean | Peak memory | First save after it |
+| Machine and run | `opal` from | Import: 3 runs | Mean | Peak memory | First save after it |
 |---|---|---|---|---|---|
 | AMD EPYC 7763, [run 42611120400](https://github.com/WisHonor/Bolt/actions/runs/42611120400) | `main` (`400e09e`) | 166.05, 164.36, 164.66 s | 165.0 s | 572.8–575.5 MB | 0.85, 0.84, 0.85 s |
 | | this branch (`c519636`) | 165.05, 165.52, 164.72 s | 165.1 s (+0.04%) | 668.9–674.2 MB | 0.64, 0.64, 0.64 s |
@@ -297,18 +297,18 @@ The whole history of Git's own repository is imported by `bolt` built from `main
 
 - The cutter runs over all of the noise as one stream, as a save cuts a big file. BLAKE3 is fed the same noise 64 KiB at a time, and zstd compresses each 64 KiB piece on its own, about the size of a chunk.
 - A MB is a million bytes. Noise is 256 MiB of BLAKE3's extendable output, and sound is 64 MiB of the WAV-like data of §5. How fast zstd gives up on noise depends on the level and the machine, so its noise figures say little about real data.
-- The tests are `speeds_of_the_parts` and `what_compressing_again_would_save` in `crates/bolt-vcs-core/tests/throughput.rs`, ignored, run in a release build:
+- The tests are `speeds_of_the_parts` and `what_compressing_again_would_save` in `crates/opal-vcs-core/tests/throughput.rs`, ignored, run in a release build:
 
   ```sh
-  cargo test --release -p bolt-vcs-core --test throughput -- --ignored --nocapture --test-threads=1
+  cargo test --release -p opal-vcs-core --test throughput -- --ignored --nocapture --test-threads=1
   ```
 
-  with `BOLT_BENCH_CODE` and `BOLT_BENCH_GODOT` naming the code set and Godot's demos. On the runners these are the sets of §2, in the same runs. On the laptop, the code set is the same tarball, unpacked by Git's bash (its links as copies), and Godot's demos a sparse checkout of their PNG and OGG files: `git clone --depth 1 --branch 4.7-6ad6167 --filter=blob:none --sparse https://github.com/godotengine/godot-demo-projects`, then `git sparse-checkout set --no-cone '*.png' '*.ogg'`. Both were in a temporary folder, deleted afterwards.
-- **The laptop:** the one of §1 (AMD Ryzen 7 7730U, 16 GB, Windows 11 Home 10.0.26200), 2026-11-09, with `-j 2`, the test file as committed, and Bolt's code at `ba513aa`.
+  with `OPAL_BENCH_CODE` and `OPAL_BENCH_GODOT` naming the code set and Godot's demos. On the runners these are the sets of §2, in the same runs. On the laptop, the code set is the same tarball, unpacked by Git's bash (its links as copies), and Godot's demos a sparse checkout of their PNG and OGG files: `git clone --depth 1 --branch 4.7-6ad6167 --filter=blob:none --sparse https://github.com/godotengine/godot-demo-projects`, then `git sparse-checkout set --no-cone '*.png' '*.ogg'`. Both were in a temporary folder, deleted afterwards.
+- **The laptop:** the one of §1 (AMD Ryzen 7 7730U, 16 GB, Windows 11 Home 10.0.26200), 2026-11-09, with `-j 2`, the test file as committed, and Opalro's code at `ba513aa`.
 
 ## 5. Compressing again: the ruling
 
-**In plain words.** Bolt stores what it saves compressed with zstd at level 3, which is fast. When it merges packs or `tidy` rewrites them, it could compress the same bytes again, harder, to save disk. [Decision 088](decisions/088-benchmarks-and-the-speed-gates.md) set the bar: only if level 9 or 19 saves at least 10% of the stored bytes of code and uncompressed assets, in no more than 5 times level 3's time. Neither does, so nothing changes: merging and `tidy` go on copying stored bytes as they are, and [storage-format.md](storage-format.md) stays as it is.
+**In plain words.** Opalro stores what it saves compressed with zstd at level 3, which is fast. When it merges packs or `tidy` rewrites them, it could compress the same bytes again, harder, to save disk. [Decision 088](decisions/088-benchmarks-and-the-speed-gates.md) set the bar: only if level 9 or 19 saves at least 10% of the stored bytes of code and uncompressed assets, in no more than 5 times level 3's time. Neither does, so nothing changes: merging and `tidy` go on copying stored bytes as they are, and [storage-format.md](storage-format.md) stays as it is.
 
 What each level stores, on the laptop:
 
@@ -324,7 +324,7 @@ What each level stores, on the laptop:
 - Set by set it is no closer. Level 9 saves 7.9% of the code set and 1.2% of the uncompressed one. Level 19 saves 12.4% of the code set, but in about 57 times level 3's time.
 - GitHub's runners store exactly the same bytes as the laptop, except the code set on Linux, whose three links aren't followed (4,850 files). On the runners, level 9 saves 2.6% in 4.0 times level 3's time on Linux, and in 3.8 times on Windows. Level 19 saves 8.8%, in 60.4 and 49.5 times.
 
-How it is measured: each set is cut into the pieces a save stores, a file under 1 MiB whole and a bigger one into chunks by Bolt's own cutter. Each piece is compressed on its own at each level with zstd's one-shot compression, as a pack stores it. It is kept compressed only when that is under 95% of its size. The time is the compressing alone, on one thread. The test's own verdict lines add up the times before rounding them. Repeated pieces are counted each time, as they would be compressed again. The sets:
+How it is measured: each set is cut into the pieces a save stores, a file under 1 MiB whole and a bigger one into chunks by Opalro's own cutter. Each piece is compressed on its own at each level with zstd's one-shot compression, as a pack stores it. It is kept compressed only when that is under 95% of its size. The time is the compressing alone, on one thread. The test's own verdict lines add up the times before rounding them. Repeated pieces are counted each time, as they would be compressed again. The sets:
 
 - **Code:** Git's source at `v2.56.0`, as in §2.
 - **Uncompressed assets:** two generated files of 32 MiB each, standing in for WAV and BMP files. The first holds 16-bit stereo samples at 44.1 kHz: three tones under a noise of about 6 bits. The second holds 24-bit pixels in rows 4,096 wide: smooth shading with a noise of about 3 bits, a quarter of it flat colour. Their bytes are the same on every machine the test ran on.
@@ -335,17 +335,17 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 - **Within one run,** for half the steps the slowest timed run is within 3.1% of the fastest on the Linux runner, and within 3.8% on the Windows one. For nine steps in ten it is within 22% and 44%. The widest are steps of a few milliseconds, checkouts, and Git's commits on Windows that repack.
 - **From one machine to another,** much more: from run to run, `ubuntu-latest` was an AMD EPYC 7763, 9V45 or 9V74, and `windows-latest` an AMD EPYC 7763 or 9V74 or an Intel Xeon Platinum 8573C. `main`'s import of git/git took 101.3 s on an EPYC 9V45, 165.0 s on an EPYC 7763 and 168.9 s on an EPYC 9V74; nightly runs on `main` have taken 95 to 168 s. The memory gate's 10 GiB save took 28.6 to 28.7 s in three runs on EPYC 7763s (runs 42598494181, 42609326597 and 42611120400). It took 55.1 s on an EPYC 9V74 (run 42616742873). Its peak memory was 43,372,544 to 43,515,904 bytes in all four.
 - **On the same kind of machine** the numbers agree: the code and Godot sets' first saves, in two Linux runs on EPYC 7763s (runs 42609326597 and 42616742873), came within 1% of each other for each tool.
-- **A run not published:** [run 42611120400](https://github.com/WisHonor/Bolt/actions/runs/42611120400) timed the same steps, at `c519636`, before two fixes to the method. Git's background repack was still running during the later steps, competing with them, and on Linux the versions set's `.git` measured 17.01 GiB for 10 versions. And `status` started within Bolt's 2-second window, so Bolt read the file just changed again: on Linux, 150 ms for the repeated set, where its steady state is about 3 ms. Its against-git tables were replaced by run 42616742873's. Its git/git import is in §3, and its memory gate in this section.
+- **A run not published:** [run 42611120400](https://github.com/WisHonor/Bolt/actions/runs/42611120400) timed the same steps, at `c519636`, before two fixes to the method. Git's background repack was still running during the later steps, competing with them, and on Linux the versions set's `.git` measured 17.01 GiB for 10 versions. And `status` started within Opalro's 2-second window, so Opalro read the file just changed again: on Linux, 150 ms for the repeated set, where its steady state is about 3 ms. Its against-git tables were replaced by run 42616742873's. Its git/git import is in §3, and its memory gate in this section.
 - So compare tools within one table, which is one machine and one run; between tables, differences of up to about 2 times can be the machine.
 
 ## 7. Where the time went, before milestone 6
 
-**In plain words.** Before making anything faster, Bolt was timed from the inside: a throwaway build printed how long each part of `status`, a small save and `goto` took, on GitHub's runners and on the Windows laptop. On a small project nearly all of the time is the walk of the project folder, which one thread does a folder and a name at a time. Most of that walk is work Git doesn't do, or does once. Bolt's own look at each file, which several threads share, is never what a command waits for. On big files the time is the one flush to the disk at the very end. These are the numbers [decisions 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) start from.
+**In plain words.** Before making anything faster, Opalro was timed from the inside: a throwaway build printed how long each part of `status`, a small save and `goto` took, on GitHub's runners and on the Windows laptop. On a small project nearly all of the time is the walk of the project folder, which one thread does a folder and a name at a time. Most of that walk is work Git doesn't do, or does once. Opalro's own look at each file, which several threads share, is never what a command waits for. On big files the time is the one flush to the disk at the very end. These are the numbers [decisions 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md) to [103](decisions/103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) start from.
 
 ### How it was measured
 
 - **The build:** `main`'s code at `a76f635` with timers added, which print to stderr when a variable is set, on the branch `bench/m6b-profile` (since deleted). The timers cost a few percent: `status` on Git's source took 63.3 ms without them printing and about 65 ms with.
-- **Small projects:** [run 42753171139](https://github.com/WisHonor/Bolt/actions/runs/42753171139), 2026-11-10, at `b0e849b`. Git's source and Godot's demos, set up as §2's steps set them up (`bolt start`, the first save, a line added to `README.md`, saved). Each step was then timed with `hyperfine` (30 runs of `status`, 15 of the others, run directly, with no shell) and run three times with the timers printing. The three agreed within about 3%; the tables give one of them. Linux: image ubuntu-24.04 20261101.360.1, AMD EPYC 7763, 4 virtual CPUs, Git 2.56.0. Windows: image windows-2025-vs2026 20261103.298.1, AMD EPYC 9V74, 4 virtual CPUs, Windows Defender's real-time protection off, Git 2.56.0.windows.4. On Linux `strace` also counted the system calls; `perf` wasn't on the runner, so there is no profile by function.
+- **Small projects:** [run 42753171139](https://github.com/WisHonor/Bolt/actions/runs/42753171139), 2026-11-10, at `b0e849b`. Git's source and Godot's demos, set up as §2's steps set them up (`opal start`, the first save, a line added to `README.md`, saved). Each step was then timed with `hyperfine` (30 runs of `status`, 15 of the others, run directly, with no shell) and run three times with the timers printing. The three agreed within about 3%; the tables give one of them. Linux: image ubuntu-24.04 20261101.360.1, AMD EPYC 7763, 4 virtual CPUs, Git 2.56.0. Windows: image windows-2025-vs2026 20261103.298.1, AMD EPYC 9V74, 4 virtual CPUs, Windows Defender's real-time protection off, Git 2.56.0.windows.4. On Linux `strace` also counted the system calls; `perf` wasn't on the runner, so there is no profile by function.
 - **Big files:** [run 42755560911](https://github.com/WisHonor/Bolt/actions/runs/42755560911), 2026-11-10, at `79c03de`, both runners on AMD EPYC 7763s, Git LFS 3.8.1. §2's noise, versions and repeated sets, each step run once (twice for going back), so these are single runs, not means.
 - **The laptop:** §1's (AMD Ryzen 7 7730U, Windows 11, its virus scanner on), Git 2.50.1, each command timed 10 to 20 times by a script.
 
@@ -355,7 +355,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 
 | | Linux runner | Windows runner | Windows laptop |
 |---|---|---|---|
-| The whole command, Bolt | 63.3 | 101.8 | 139 |
+| The whole command, Opalro | 63.3 | 101.8 | 139 |
 | The whole command, Git | 13.0 | 33.4 | 43.5 |
 | Before the walk: opening the project, the drive's clock and name test, loading the file cache | 5.6 | 7.6 | 14.4 |
 | of which loading the file cache | 2.7 | 2.2 | 3.1 |
@@ -363,9 +363,9 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 | matching every name against every ignore line in force (Git's own `.gitignore` has 263) | 17.7 | 16.2 | 25.0 |
 | opening and listing each folder | 5.6 | 11.5 | 33.0 |
 | reading the last save's listing of each folder from the store | 5.8 | 10.4 | 17.5 |
-| opening each folder and asking it for `.git` and `.bolt` by name | 1.2 | 6.7 | 25.0 |
-| trying to open `.gitignore` and `.boltignore` in each folder | 1.4 | 4.5 | 15.4 |
-| checking each name (the name rules, `.git` and `.bolt` spellings) | 2.3 | 3.7 | 3.9 |
+| opening each folder and asking it for `.git` and `.opal` by name | 1.2 | 6.7 | 25.0 |
+| trying to open `.gitignore` and `.opalignore` in each folder | 1.4 | 4.5 | 15.4 |
+| checking each name (the name rules, `.git` and `.opal` spellings) | 2.3 | 3.7 | 3.9 |
 | handing files to the looking threads, and waiting for room | 1.0 | 4.9 | 1.7 |
 | the rest: building paths, keeping the books | 9.5 | 13.9 | 16.9 |
 | The looks at each file, summed over the looking threads (run beside the walk, not after it) | 10.7 | 104.8 | 292 |
@@ -375,8 +375,8 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 | The rest: comparing with the save, printing, freeing memory | 1.5 | 1.9 | 2.9 |
 
 - **A look at one file** takes 2.2 µs on Linux (one call), 21.6 µs on the Windows runner and 60 µs on the laptop (five calls: open, three questions, close; the laptop's virus scanner sees each open). The looking threads finished within a millisecond of the walk on every machine, so the walk is what `status` waits for.
-- **System calls on Linux:** Bolt made 5,311 lookups of an entry's details (453 of them the failed lookups of `.git` and `.bolt`), 937 opens (419 failed, for ignore files that aren't there), 1,583 reads from packs (7 for each folder listing), 511 folder reads and 4 flushes. Git made 5,157 lookups, 334 opens, 457 folder reads and no flush.
-- **What Git doesn't do.** Git matches ignore lines only against names it doesn't track, and keeps one index where Bolt reads and checks a listing for each folder. Git looks at each file as Bolt does, on several threads.
+- **System calls on Linux:** Opalro made 5,311 lookups of an entry's details (453 of them the failed lookups of `.git` and `.opal`), 937 opens (419 failed, for ignore files that aren't there), 1,583 reads from packs (7 for each folder listing), 511 folder reads and 4 flushes. Git made 5,157 lookups, 334 opens, 457 folder reads and no flush.
+- **What Git doesn't do.** Git matches ignore lines only against names it doesn't track, and keeps one index where Opalro reads and checks a listing for each folder. Git looks at each file as Opalro does, on several threads.
 
 ### Godot's demos
 
@@ -384,12 +384,12 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 
 | | Linux runner | Windows runner |
 |---|---|---|
-| The whole command, Bolt | 65.8 | 137.9 |
+| The whole command, Opalro | 65.8 | 137.9 |
 | The whole command, Git | 13.8 | 33.0 |
 | The walk, on one thread | 48.9 | 107.3 |
 | opening and listing each folder | 10.5 | 27.5 |
 | reading the last save's listing of each folder | 12.6 | 26.6 |
-| opening each folder and asking it for `.git` and `.bolt` | 3.2 | 17.0 |
+| opening each folder and asking it for `.git` and `.opal` | 3.2 | 17.0 |
 | trying to open the two ignore files in each folder | 3.1 | 8.5 |
 | matching ignore lines | 3.3 | 3.6 |
 | handing files to the looking threads | 2.6 | 7.3 |
@@ -403,7 +403,7 @@ How it is measured: each set is cut into the pieces a save stores, a file under 
 
 ### What the third gate needs
 
-Git's `status` takes 13 ms on the Linux runner, so the gate allows Bolt 26. Going back to the first version is the hard one: Git takes 13 to 15 ms, so Bolt has 27 to 30, and a switch must also store a diary entry, write a journal, write the file and move `head`, each flushed. That leaves the scan of the folder about 15 to 19 ms, close to what Git's own `status` takes. On Windows the gate allows about 67 to 91 ms for `status` and 110 ms for going back, and the looks alone, at 21.6 µs a file on four threads, need about 26 ms.
+Git's `status` takes 13 ms on the Linux runner, so the gate allows Opalro 26. Going back to the first version is the hard one: Git takes 13 to 15 ms, so Opalro has 27 to 30, and a switch must also store a diary entry, write a journal, write the file and move `head`, each flushed. That leaves the scan of the folder about 15 to 19 ms, close to what Git's own `status` takes. On Windows the gate allows about 67 to 91 ms for `status` and 110 ms for going back, and the looks alone, at 21.6 µs a file on four threads, need about 26 ms.
 
 ### Big files
 
@@ -421,7 +421,7 @@ One run each, in seconds. "Flush" is the one flush of the pack, or of the file w
 | Back to the first version of the repeated 1 GiB file | 4.48: copying 2.11, the flush 2.31 | 4.72: 2.28, and 2.33 |
 | the same, Git, first and second time | 0.97 and 3.78 | 1.66 and 4.90 |
 
-- **The flush is over half of each step,** and it starts only when everything is written: while Bolt reads and hashes, the disk has nothing to do. Git LFS's `git add` never flushes, and neither does Git's checkout (§2, "Waiting for the disk").
+- **The flush is over half of each step,** and it starts only when everything is written: while Opalro reads and hashes, the disk has nothing to do. Git LFS's `git add` never flushes, and neither does Git's checkout (§2, "Waiting for the disk").
 - **Copying a file out** moves each chunk 8 KiB at a time through two fingerprints, one for the chunk and one for the whole file: 151,653 small steps for 13,546 chunks. The repeated file is slower because a chunk already checked once takes a slower path.
 - **Right after a switch,** the next one reads the file the first wrote again, since it is too new for the cache to vouch for (the 2-second rule). Git checks such a file again too.
 - **Trying to compress noise** costs 0.5 s of processor time on Linux and 1.5 to 1.8 s on Windows for 1 GiB, spread over the worker threads.
@@ -433,19 +433,19 @@ Every file was stored each way and added up by kind of file (a throwaway test on
 | | Bytes |
 |---|---|
 | The files | 312,757,968 |
-| Bolt: zstd level 3 on each piece, kept when under 95% | 258,661,764, and 103,440 of chunk lists |
+| Opalro: zstd level 3 on each piece, kept when under 95% | 258,661,764, and 103,440 of chunk lists |
 | the same, kept whenever smaller | 257,606,006 |
 | zstd level 9 on each piece | 252,246,350 |
 | zstd level 3 on each whole file | 250,667,764 |
 | zlib level 6 on each whole file, as Git stores it | 249,580,064 |
 
-- Bolt keeps 9.1 MB more than zlib would. 7.0 MB of that is six `.hdr` images of 1 MiB or more: 108.1 MB that Bolt keeps in 96.2 MB and zlib in 89.2 MB. The next kinds are `.exr` images (0.4 MB), `.glb` models (0.3 MB) and `.res` files (0.3 MB).
-- On these images zlib's level 6 simply compresses better than zstd's level 3, whole or in pieces. zstd's level 9 on each piece would still leave Bolt 1.1% behind zlib.
+- Opalro keeps 9.1 MB more than zlib would. 7.0 MB of that is six `.hdr` images of 1 MiB or more: 108.1 MB that Opalro keeps in 96.2 MB and zlib in 89.2 MB. The next kinds are `.exr` images (0.4 MB), `.glb` models (0.3 MB) and `.res` files (0.3 MB).
+- On these images zlib's level 6 simply compresses better than zstd's level 3, whole or in pieces. zstd's level 9 on each piece would still leave Opalro 1.1% behind zlib.
 - The 95% rule costs 1.1 MB, 0.4%.
 
 ## 8. After milestone 6's speed work
 
-**In plain words.** Milestone 6 set out to stop losing to Git on an everyday code project, and to Git LFS on big files. On Git's own source Bolt now asks "what changed?" in about one and a half times Git's time where it took four times, saves a small change as fast as Git, and goes back to another version in twice Git's time or less where it took four and a half times. On a long history, commands that took from half a second to three seconds take from a few milliseconds to a quarter of a second, and amending the newest save is quicker than Git's own amend. Big files are saved in about 60% of the time wherever the disk keeps up and little faster where it doesn't, and Git LFS still wins their first save on a slow disk, because Bolt waits for the disk and Git LFS doesn't. The new gate (within twice Git's time) is not met yet: `status` and a small save pass in every run but one on Windows, and `goto` on Linux sits at twice Git's time or over, so it passed in only two runs of seven. This section gives every number, the losses included.
+**In plain words.** Milestone 6 set out to stop losing to Git on an everyday code project, and to Git LFS on big files. On Git's own source Opalro now asks "what changed?" in about one and a half times Git's time where it took four times, saves a small change as fast as Git, and goes back to another version in twice Git's time or less where it took four and a half times. On a long history, commands that took from half a second to three seconds take from a few milliseconds to a quarter of a second, and amending the newest save is quicker than Git's own amend. Big files are saved in about 60% of the time wherever the disk keeps up and little faster where it doesn't, and Git LFS still wins their first save on a slow disk, because Opalro waits for the disk and Git LFS doesn't. The new gate (within twice Git's time) is not met yet: `status` and a small save pass in every run but one on Windows, and `goto` on Linux sits at twice Git's time or over, so it passed in only two runs of seven. This section gives every number, the losses included.
 
 Everything here was measured on 2026-11-10. The code is commit `b8fccef` unless a line names another; the commits after it change only how the check before an amend treats a cache that lies (what it does with an honest one is the same code), tests and docs. "Before" is `main` at `73a1a0d`, the code §1 to §7 measured.
 
@@ -480,7 +480,7 @@ The first two gates as measured again on the finished code ([run 42910249822](ht
 
 The third gate, by the `speed-gate` job (`bench/run.sh gate`: medians of 10 runs, timed by `hyperfine` with no shell), in every run of the code from `ecdfb17` on:
 
-| Run, commit | Linux: Bolt, Git, times Git's | Windows: Bolt, Git, times Git's |
+| Run, commit | Linux: Opalro, Git, times Git's | Windows: Opalro, Git, times Git's |
 |---|---|---|
 | [42834201117](https://github.com/WisHonor/Bolt/actions/runs/42834201117), `ecdfb17` | `status` 23.1 ms, 12.8 ms, 1.80; small save 30.2 ms, 29.3 ms, 1.03; `goto` 33.7 ms, 15.9 ms, **2.12 (over)** | `status` 72.9 ms, 43.5 ms, 1.68; small save 82.3 ms, 123.3 ms, 0.67; `goto` 86.9 ms, 53.5 ms, 1.62 |
 | [42839335754](https://github.com/WisHonor/Bolt/actions/runs/42839335754), `ecdfb17` | `status` 21.6 ms, 13.4 ms, 1.62; small save 28.4 ms, 30.6 ms, 0.93; `goto` 30.6 ms, 17.1 ms, 1.79 | `status` 84.2 ms, 47.8 ms, 1.76; small save 94.1 ms, 130.7 ms, 0.72; `goto` 100.5 ms, 58.3 ms, 1.72 |
@@ -493,8 +493,8 @@ The third gate, by the `speed-gate` job (`bench/run.sh gate`: medians of 10 runs
 - **`status` and the small save pass on Linux in all seven runs** (1.60 to 1.81 times Git's time, and 0.93 to 1.05).
 - **Linux's `goto` passes in two runs of the seven** (1.79 and 1.99) and misses in five (2.02 to 2.50). Turn by turn on one runner it is twice Git's time (the table above).
 - **Windows passes all three steps in six runs of the seven,** and misses `status` and `goto` in one (2.24 and 2.19).
-- **Why Linux's `goto` sits on the limit.** Bolt's `goto` flushes ten times (the drive clock's file, the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, and the folder again once the journal is gone); Git's checkout flushes nothing. On the runner where one `goto` was traced, the ten flushes took 2.6 ms of its 25 and its seven renames a millisecond more ("Where the time goes now", below), a seventh of the command between them. On a disk whose flushes take longer, they are more.
-- **Why Windows can miss it.** A look at one file costs Bolt five system calls there, and it spreads the looks over several threads; Git makes fewer calls, on one thread. In the run that missed, Bolt's ten `status` runs spread from 96 to 126 ms while Git's stayed within 44 to 49. The likely reading is a runner busy with something else, which several threads feel more than one does; that reading wasn't tested.
+- **Why Linux's `goto` sits on the limit.** Opalro's `goto` flushes ten times (the drive clock's file, the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, and the folder again once the journal is gone); Git's checkout flushes nothing. On the runner where one `goto` was traced, the ten flushes took 2.6 ms of its 25 and its seven renames a millisecond more ("Where the time goes now", below), a seventh of the command between them. On a disk whose flushes take longer, they are more.
+- **Why Windows can miss it.** A look at one file costs Opalro five system calls there, and it spreads the looks over several threads; Git makes fewer calls, on one thread. In the run that missed, Opalro's ten `status` runs spread from 96 to 126 ms while Git's stayed within 44 to 49. The likely reading is a runner busy with something else, which several threads feel more than one does; that reading wasn't tested.
 - **So the gate isn't met yet as decision 099 states it** (on GitHub's Linux and Windows runners, every run). What would settle each step is in "Where Git or Git LFS still wins" below; none of it was done here, because each touches a flush a crash relies on, the module that decides what is saved, or `unsafe` code the owner reviews.
 
 ### Against Git and Git LFS, again
@@ -503,15 +503,15 @@ The third gate, by the `speed-gate` job (`bench/run.sh gate`: medians of 10 runs
 
 Two things to know when reading them:
 
-- **Going back, on the big-file sets,** reads again whatever the step before wrote less than two seconds earlier: the cache doesn't vouch for a file that young (the 2-second rule), and Bolt won't write over a file it hasn't shown to be saved. So that step is slower the faster the step before it was.
-- **The first save of big files that don't compress** (the noise and versions sets) is as fast as the runner's disk takes a gigabyte, because Bolt flushes the pack before it names it. "Big files on one runner" below shows the same code beside Git LFS on a fast disk and on a slow one. Both runners of this run had slow ones.
-- **A mean of five runs holds any stall.** On this Linux runner a flush stalled in several of Bolt's steps (a small change on the code set ran from 23.6 to 130 ms) and in some of Git's (Godot's small change ran from 23.9 to 243 ms). The range beside each mean shows it; the gate's medians of ten runs, from the same run, are in the table above.
+- **Going back, on the big-file sets,** reads again whatever the step before wrote less than two seconds earlier: the cache doesn't vouch for a file that young (the 2-second rule), and Opalro won't write over a file it hasn't shown to be saved. So that step is slower the faster the step before it was.
+- **The first save of big files that don't compress** (the noise and versions sets) is as fast as the runner's disk takes a gigabyte, because Opalro flushes the pack before it names it. "Big files on one runner" below shows the same code beside Git LFS on a fast disk and on a slow one. Both runners of this run had slow ones.
+- **A mean of five runs holds any stall.** On this Linux runner a flush stalled in several of Opalro's steps (a small change on the code set ran from 23.6 to 130 ms) and in some of Git's (Godot's small change ran from 23.9 to 243 ms). The range beside each mean shows it; the gate's medians of ten runs, from the same run, are in the table above.
 
 #### GitHub's Linux runner
 
 **Code**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 350 ms (212–589) | 1.22 s (1.20–1.24) | 1.26 s (1.24–1.27) |
 | A small change | 63.5 ms (23.6–130) | 26.0 ms (25.4–27.2) | 57.5 ms (56.4–59.1) |
@@ -521,7 +521,7 @@ Two things to know when reading them:
 
 **Godot's demo projects**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.10 s (1.07–1.15) | 7.21 s (7.20–7.23) | 3.05 s (3.02–3.06) |
 | A small change | 30.6 ms (30.0–31.0) | 69.8 ms (23.9–243) | 54.2 ms (53.4–56.0) |
@@ -531,7 +531,7 @@ Two things to know when reading them:
 
 **Noise**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.76 s (3.84–5.11) | 24.4 s (24.4–24.4) | 1.83 s (1.81–1.85) |
 | A small change | 62.2 ms (61.3–62.6) | 1.23 s (1.22–1.24) | 233 ms (152–254) |
@@ -541,7 +541,7 @@ Two things to know when reading them:
 
 **Versions**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 5.20 s (5.13–5.34) | 30.9 s (30.8–31.0) | 1.91 s (1.87–1.97) |
 | A small change | 1.18 s (1.15–1.24) | 31.0 s (30.9–31.2) | 1.87 s (1.82–1.92) |
@@ -551,7 +551,7 @@ Two things to know when reading them:
 
 **Repeated**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.20 s (1.15–1.32) | 30.0 s (29.6–31.0) | 1.89 s (1.86–1.95) |
 | A small change | 1.11 s (1.09–1.14) | 30.0 s (29.8–30.2) | 1.90 s (1.88–1.93) |
@@ -566,16 +566,16 @@ Two things to know when reading them:
 
 **Space**
 
-| Set | The files | Bolt | Git | Git with Git LFS |
+| Set | The files | Opalro | Git | Git with Git LFS |
 |---|---|---|---|---|
 | Code | 50,141,205 | 16,086,209 | 17,122,254 | 17,123,859 |
 | Godot's demo projects | 312,757,968 | 237,701,369 | 229,915,518 | 276,207,113 |
 | Noise | 1,048,576,000 | 1,051,271,584 | 1,363,601,944 | 1,363,192,300 |
 | Versions | 1,073,741,824 | 1,091,689,096 | 10,740,917,054 | 10,737,640,524 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,838 | 7,516,228,782 |
-- history-bolt: 368,998,025 bytes
+- history-opal: 368,998,025 bytes
 - history-git: 313,774,870 bytes
-- lfs-bolt: 580,585,708 bytes
+- lfs-opal: 580,585,708 bytes
 - lfs-git: 5,242,922,183 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -583,7 +583,7 @@ Two things to know when reading them:
 
 **Code**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 424 ms (410–449) | 3.42 s (3.38–3.46) | 3.69 s (3.63–3.76) |
 | A small change | 71.3 ms (68.7–75.5) | 105 ms (100–110) | 382 ms (361–454) |
@@ -593,7 +593,7 @@ Two things to know when reading them:
 
 **Godot's demo projects**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.78 s (1.75–1.82) | 10.5 s (10.4–10.8) | 6.75 s (6.57–7.01) |
 | A small change | 81.6 ms (78.4–90.5) | 103 ms (102–104) | 387 ms (375–398) |
@@ -603,7 +603,7 @@ Two things to know when reading them:
 
 **Noise**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 5.48 s (5.42–5.53) | 28.0 s (27.6–28.5) | 2.48 s (2.45–2.51) |
 | A small change | 103 ms (99.8–108) | 1.52 s (1.46–1.58) | 650 ms (584–881) |
@@ -613,7 +613,7 @@ Two things to know when reading them:
 
 **Versions**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 5.62 s (5.55–5.65) | 28.4 s (28.3–28.6) | 2.50 s (2.48–2.52) |
 | A small change | 1.38 s (1.35–1.41) | 37.8 s (28.2–52.4) | 2.76 s (2.44–3.92) |
@@ -623,7 +623,7 @@ Two things to know when reading them:
 
 **Repeated**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.57 s (1.55–1.59) | 28.2 s (28.1–28.4) | 2.60 s (2.50–2.76) |
 | A small change | 1.36 s (1.34–1.37) | 37.8 s (28.3–51.9) | 2.53 s (2.48–2.68) |
@@ -638,16 +638,16 @@ Two things to know when reading them:
 
 **Space**
 
-| Set | The files | Bolt | Git | Git with Git LFS |
+| Set | The files | Opalro | Git | Git with Git LFS |
 |---|---|---|---|---|
 | Code | 52,458,897 | 16,085,759 | 17,121,515 | 17,123,138 |
 | Godot's demo projects | 312,757,968 | 237,701,360 | 229,915,463 | 276,207,080 |
 | Noise | 1,048,576,000 | 1,051,271,583 | 1,363,601,964 | 1,363,192,324 |
 | Versions | 1,073,741,824 | 1,091,689,095 | 10,740,917,076 | 10,737,640,549 |
 | Repeated | 1,073,741,824 | 5,504,716 | 7,518,523,853 | 7,516,228,810 |
-- history-bolt: 368,998,024 bytes
+- history-opal: 368,998,024 bytes
 - history-git: 313,774,890 bytes
-- lfs-bolt: 580,585,708 bytes
+- lfs-opal: 580,585,708 bytes
 - lfs-git: 5,242,922,196 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -666,13 +666,13 @@ Two things to know when reading them:
 | Windows, [42887296255](https://github.com/WisHonor/Bolt/actions/runs/42887296255) | 4.57–5.28 s, 2.76–3.27 s, 3.40–4.17 s | 4.72–5.49 s, 2.86–3.36 s, 3.31–4.02 s | 4.02–4.52 s, 2.51–2.94 s |
 | Windows, [42910259739](https://github.com/WisHonor/Bolt/actions/runs/42910259739) | 5.63–6.08 s, 5.61–5.79 s, 2.77–2.89 s | 6.15–6.17 s, 5.77–5.82 s, 2.79–2.83 s | 4.06–5.84 s, 4.47–5.25 s |
 
-- **Where the disk keeps up, the first save takes about 60% of the time it took** (2.45 s where it took 4.15 s), and Bolt is within a tenth of Git LFS, or ahead of it. The pack is flushed to the disk while it is still being written, so the disk works while Bolt reads and hashes ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)).
-- **Where the disk is slow, Git LFS wins by a wide margin** (1.8 to 1.9 s against 4.9 to 5.1 s on two Linux runners; about 3 s against 5.6 to 6.1 s on three Windows runners, where flushing while writing changed little or nothing; on those Linux runners the first save takes three quarters of what it took). Git LFS's time doesn't follow the disk, so it isn't waiting for it. Bolt's does: it flushes the pack before it gives it its name, and a save that says it is done is on the disk.
+- **Where the disk keeps up, the first save takes about 60% of the time it took** (2.45 s where it took 4.15 s), and Opalro is within a tenth of Git LFS, or ahead of it. The pack is flushed to the disk while it is still being written, so the disk works while Opalro reads and hashes ([decision 102](decisions/102-big-files-are-flushed-while-they-are-written.md)).
+- **Where the disk is slow, Git LFS wins by a wide margin** (1.8 to 1.9 s against 4.9 to 5.1 s on two Linux runners; about 3 s against 5.6 to 6.1 s on three Windows runners, where flushing while writing changed little or nothing; on those Linux runners the first save takes three quarters of what it took). Git LFS's time doesn't follow the disk, so it isn't waiting for it. Opalro's does: it flushes the pack before it gives it its name, and a save that says it is done is on the disk.
 - **Going back to an old version of a big file** is a fifth to a third faster on every Linux runner and on the one Windows runner whose disk kept up, and unchanged on the other three.
 
 ### Imports
 
-git/git, imported three times by each `bolt` in turn on one runner ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs):
+git/git, imported three times by each `opal` in turn on one runner ([run 42910249822](https://github.com/WisHonor/Bolt/actions/runs/42910249822), job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs):
 
 | | Import | Peak memory | The first save after it |
 |---|---|---|---|
@@ -681,11 +681,11 @@ git/git, imported three times by each `bolt` in turn on one runner ([run 4291024
 
 The import is faster because the store finds and reads records in fewer reads; its memory is lower because it keeps 96 MiB of rebuilt objects where it kept 256 MiB.
 
-And the largest history at hand, once, with `main`'s engine and its 256 MiB of rebuilt objects ([run 42759080455](https://github.com/WisHonor/Bolt/actions/runs/42759080455), GitHub's Linux runner): torvalds/linux at `b3dfbde` (2026-11-09), 1,506,211 commits and 12,024,624 objects. It imports in 2,955 s (49 minutes) with a peak of 3,329,288 KiB (3.4 GB), and the `.bolt` folder takes 64,636,524,309 bytes (64.6 GB) where Git's pack takes 6.6 GB. Bolt stores every version of every file and listing whole or in chunks; Git stores most of them as deltas against another version. That is the biggest loss on this page, and records stored as deltas ([decision 009](decisions/009-storage-engine.md)'s later feature) are what would close it.
+And the largest history at hand, once, with `main`'s engine and its 256 MiB of rebuilt objects ([run 42759080455](https://github.com/WisHonor/Bolt/actions/runs/42759080455), GitHub's Linux runner): torvalds/linux at `b3dfbde` (2026-11-09), 1,506,211 commits and 12,024,624 objects. It imports in 2,955 s (49 minutes) with a peak of 3,329,288 KiB (3.4 GB), and the `.opal` folder takes 64,636,524,309 bytes (64.6 GB) where Git's pack takes 6.6 GB. Opalro stores every version of every file and listing whole or in chunks; Git stores most of them as deltas against another version. That is the biggest loss on this page, and records stored as deltas ([decision 009](decisions/009-storage-engine.md)'s later feature) are what would close it.
 
 ### Long histories
 
-git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first parents, with its four other branches as lines too (`maint`, `next` and `seen`, each about as long, and `todo`, 2,636 saves). It was imported by `main`'s `bolt` and by the branch's on one runner, with Git on a third clone; three turns each, timed from a shell ([run 42910267213](https://github.com/WisHonor/Bolt/actions/runs/42910267213)). A range is the three turns; a command's very first run, which reads files nothing has read yet, is left out where it stood apart.
+git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first parents, with its four other branches as lines too (`maint`, `next` and `seen`, each about as long, and `todo`, 2,636 saves). It was imported by `main`'s `opal` and by the branch's on one runner, with Git on a third clone; three turns each, timed from a shell ([run 42910267213](https://github.com/WisHonor/Bolt/actions/runs/42910267213)). A range is the three turns; a command's very first run, which reads files nothing has read yet, is left out where it stood apart.
 
 | Step | Linux: before, after, Git | Windows: before, after, Git |
 |---|---|---|
@@ -703,7 +703,7 @@ git/git at `1891de4`: 86,222 commits, 24,498 of them on `master` along first par
 Git's column is `git checkout`, `git status`, `git log --first-parent --oneline` and `git commit --amend`. One of the branch's nine turns of `goto` 20 saves back took 338 ms on Linux.
 
 - **Before, each of these commands read the whole line from the store,** to shorten a change ID or to find a save: half a second to three seconds, whatever was asked. Now the line's saves are kept in order in a sealed cache, and a command reads only the saves it shows. A list is never the reason a save is shown or gone to unchecked ([decision 109](decisions/109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md)): going to a save by its ID checks the list link by link down to it, which is why `goto` 2,000 saves back reads 2,000 saves.
-- **The amend.** Before an amend Bolt checks that no other line shows the save. `main` read each of the four other lines whole the first time, 1.4 s on Linux, and kept a list of each. The branch reads only the saves a line doesn't share with `master`, and keeps them ([decisions 111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md) and [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)); a later amend reads none, and takes 8 to 9 ms where `git commit --amend` takes 12 to 15. The second red-team session's own shape, 300 lines of 2,000 saves each, took 19 to 21 s for every amend before that cache, and `main` 34 s once ([report](redteam/2026-11-10-milestone-6-speed-session-2.md)).
+- **The amend.** Before an amend Opalro checks that no other line shows the save. `main` read each of the four other lines whole the first time, 1.4 s on Linux, and kept a list of each. The branch reads only the saves a line doesn't share with `master`, and keeps them ([decisions 111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md) and [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)); a later amend reads none, and takes 8 to 9 ms where `git commit --amend` takes 12 to 15. The second red-team session's own shape, 300 lines of 2,000 saves each, took 19 to 21 s for every amend before that cache, and `main` 34 s once ([report](redteam/2026-11-10-milestone-6-speed-session-2.md)).
 
 ### Deep folders and tiny chunks
 
@@ -723,7 +723,7 @@ One `status` of Git's source on GitHub's Linux runner, counted by `strace` ([run
 | Git | 6,812 | 5,155 | none (it reads one index file) | 334 | 457 | 6 | 9 |
 
 - **All three look at every file once.** That part is level.
-- **What Bolt does and Git doesn't:** it reads the last save's listings from its packs (Git reads one index file); it opens every folder by handle, so that nothing is ever followed through a link; its threads hand work to each other about a thousand times; and it flushes one small file to read the drive's clock, which the 2-second rule rests on.
+- **What Opalro does and Git doesn't:** it reads the last save's listings from its packs (Git reads one index file); it opens every folder by handle, so that nothing is ever followed through a link; its threads hand work to each other about a thousand times; and it flushes one small file to read the drive's clock, which the 2-second rule rests on.
 
 One `goto` that writes one file, traced the same way ([run 42890907947](https://github.com/WisHonor/Bolt/actions/runs/42890907947)): after the scan it makes 9 more flushes (the diary's pack and its folder, the journal and its folder, the file and its folder, `head` and its folder, the folder again once the journal is gone), 0.15 to 0.4 ms each on that runner's quiet disk and 2.6 ms together with the scan's; and 7 renames, which cost 0.16 to 0.35 ms each wherever one replaces a file. Git's checkout flushes nothing.
 
@@ -734,19 +734,19 @@ Each is a row of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) ("
 - **`status` on a code project:** 1.5 times Git's time on Linux turn by turn (17.9 ms against 12.0) and 1.4 times on Windows (84.5 ms against 60.8); 1.6 to 1.8 times in the gate's Linux runs and 1.7 to 2.2 in its Windows runs. What is left is in the table above; the walk on several threads, or fewer system calls for each file on Windows, would change it.
 - **`goto` on a code project, on Linux:** twice Git's time turn by turn (24.6 ms against 12.3), and 1.8 to 2.5 times across the gate's seven runs, so the third gate misses more often than it passes. What would change it: flushing less in a `goto`, which is the owner's call, or the walk on several threads.
 - **Godot's demos:** `status` takes about twice Git's time where it took four to five times (25.9 ms against 11.7 on Linux, 72.5 ms against 37.1 on Windows), and going back to the first version about twice on Windows too (82 ms against 45). A small change is behind Git's on Linux when Git's disk doesn't stall (30.6 ms against 23.9 at Git's best) and ahead of it on Windows (82 ms against 103). Its 4,018 files sit in 569 folders, so what a folder costs shows more (§7).
-- **`status` on a project of a few files:** 2.3 to 2.5 ms against Git's 1.5 to 1.9 on Linux (the 6.2 ms mean of the noise set holds a stall); on Windows Bolt is ahead, 15 to 16 ms against 26. That is Bolt starting up: opening the project, its packs, and reading the drive's clock.
+- **`status` on a project of a few files:** 2.3 to 2.5 ms against Git's 1.5 to 1.9 on Linux (the 6.2 ms mean of the noise set holds a stall); on Windows Opalro is ahead, 15 to 16 ms against 26. That is Opalro starting up: opening the project, its packs, and reading the drive's clock.
 - **The first save of big files that don't compress, wherever the disk is slow** (above).
-- **Going back to an old version of a big file, where the disk is slow:** 4.7 to 4.8 s for a gigabyte against Git's 3.2 s on the Linux runner of the whole benchmark, and 5.1 to 6.1 s against 4.1 s on its Windows runner. Bolt flushes the file it wrote before it renames it into place; Git doesn't.
-- **A switch that rewrites thousands of files:** 1.8 to 3.1 s against Git's 0.46 to 0.75 s on Linux for 3,557 files, and 3.9 to 4.4 s against 1.4 to 1.7 s on Windows. Bolt flushes each file before it renames it into place.
-- **The history listing, all of it:** 0.27 s against 0.18 s on Linux for 24,498 saves, 0.67 s against 0.33 s on Windows. Bolt reads and checks each save; `git log --oneline` reads less of each commit.
-- **Space, on a long history:** Linux's takes 64.6 GB against Git's 6.6 GB, and git/git's 369 MB against Git's 314 MB. On the five data sets of §2 nothing changed: Bolt keeps 3% more than Git on Godot's demos and less on the others.
+- **Going back to an old version of a big file, where the disk is slow:** 4.7 to 4.8 s for a gigabyte against Git's 3.2 s on the Linux runner of the whole benchmark, and 5.1 to 6.1 s against 4.1 s on its Windows runner. Opalro flushes the file it wrote before it renames it into place; Git doesn't.
+- **A switch that rewrites thousands of files:** 1.8 to 3.1 s against Git's 0.46 to 0.75 s on Linux for 3,557 files, and 3.9 to 4.4 s against 1.4 to 1.7 s on Windows. Opalro flushes each file before it renames it into place.
+- **The history listing, all of it:** 0.27 s against 0.18 s on Linux for 24,498 saves, 0.67 s against 0.33 s on Windows. Opalro reads and checks each save; `git log --oneline` reads less of each commit.
+- **Space, on a long history:** Linux's takes 64.6 GB against Git's 6.6 GB, and git/git's 369 MB against Git's 314 MB. On the five data sets of §2 nothing changed: Opalro keeps 3% more than Git on Godot's demos and less on the others.
 - **The import's memory:** 3.4 GB for Linux's history.
 
 ## 9. Both halves of milestone 6 together
 
-**In plain words.** Milestone 6 was built in two halves at once: speed and space (§8), and presets and polish (the project kinds, `bolt setup`, `bolt.toml`, `bolt verify`, the new terminal output, Git's words). §8 measured the speed half alone. This section measures the two together, on the code v0.1 is made from, with the same workflow and the same steps. The short of it: nothing the presets-and-polish half added shows in the numbers. Against Git on the same runner, each step's share of Git's time sits where §8's runs put it; the import takes the same time and memory as the speed half alone, turn by turn on one runner; and what Bolt stores is the same size. The same two gates pass, and the third gate misses in the same place: going back to another version on Linux, at twice Git's time or over it.
+**In plain words.** Milestone 6 was built in two halves at once: speed and space (§8), and presets and polish (the project kinds, `opal setup`, `opal.toml`, `opal verify`, the new terminal output, Git's words). §8 measured the speed half alone. This section measures the two together, on the code v0.1 is made from, with the same workflow and the same steps. The short of it: nothing the presets-and-polish half added shows in the numbers. Against Git on the same runner, each step's share of Git's time sits where §8's runs put it; the import takes the same time and memory as the speed half alone, turn by turn on one runner; and what Opalro stores is the same size. The same two gates pass, and the third gate misses in the same place: going back to another version on Linux, at twice Git's time or over it.
 
-Everything here was measured on 2026-11-10. The whole benchmark, the import and the first run of the gates are of commit `922a31f`, the commit that merged the speed half into the other ([run 42931440244](https://github.com/WisHonor/Bolt/actions/runs/42931440244)). The commits after it change `bolt verify`, `bolt setup`'s output, tests and documents, none of them a step this page times; the three gates were run once more on `fe5b46c`, the code as its final review left it, to confirm (below).
+Everything here was measured on 2026-11-10. The whole benchmark, the import and the first run of the gates are of commit `922a31f`, the commit that merged the speed half into the other ([run 42931440244](https://github.com/WisHonor/Bolt/actions/runs/42931440244)). The commits after it change `opal verify`, `opal setup`'s output, tests and documents, none of them a step this page times; the three gates were run once more on `fe5b46c`, the code as its final review left it, to confirm (below).
 
 ### The three gates
 
@@ -754,7 +754,7 @@ The first two gates: saving 10 GiB peaked at 44,036,096 bytes and took 26.2 s in
 
 The third gate, by the same `speed-gate` job as §8 (medians of 10 runs), in both runs, with the ratios as the job prints them:
 
-| Run, commit | Linux: Bolt, Git, times Git's | Windows: Bolt, Git, times Git's |
+| Run, commit | Linux: Opalro, Git, times Git's | Windows: Opalro, Git, times Git's |
 |---|---|---|
 | [42931440244](https://github.com/WisHonor/Bolt/actions/runs/42931440244), in the whole-benchmark run, `922a31f` | `status` 17.4 ms, 9.8 ms, 1.768; small save 22.5 ms, 23.5 ms, 0.957; `goto` 24.9 ms, 12.3 ms, **2.019 (over)** | `status` 79.7 ms, 46.1 ms, 1.730; small save 93.3 ms, 128.5 ms, 0.726; `goto` 94.4 ms, 55.4 ms, 1.703 |
 | [42941424523](https://github.com/WisHonor/Bolt/actions/runs/42941424523), `fe5b46c` | `status` 21.7 ms, 12.4 ms, 1.754; small save 29.0 ms, 28.1 ms, 1.034; `goto` 32.4 ms, 13.4 ms, **2.425 (over)** | `status` 83.9 ms, 46.7 ms, 1.796; small save 91.1 ms, 133.7 ms, 0.681; `goto` 100.0 ms, 56.7 ms, 1.763 |
@@ -765,19 +765,19 @@ The third gate, by the same `speed-gate` job as §8 (medians of 10 runs), in bot
 
 ### Against Git and Git LFS
 
-§2's whole table once more, as §8 lays it out: means of 5 runs, with the lowest and the highest. The runners are not the ones §8's numbers came from, so compare each tool with the others in the same table, not across pages (§6 says how much GitHub's machines differ). What Bolt stores is the size §8 measured on every set: to the byte on Linux, and within one byte on Windows.
+§2's whole table once more, as §8 lays it out: means of 5 runs, with the lowest and the highest. The runners are not the ones §8's numbers came from, so compare each tool with the others in the same table, not across pages (§6 says how much GitHub's machines differ). What Opalro stores is the size §8 measured on every set: to the byte on Linux, and within one byte on Windows.
 
 What the tables below say, losses included:
 
 - **On Git's source,** the first save takes a fifth of Git's time on Linux (175 ms against 952 ms) and a tenth on Windows (445 ms against 4.69 s). A small change is level with Git on Linux (19.3 ms against 20.8) and takes two thirds of its time on Windows (82.4 ms against 125).
 - **Git is ahead on `status` and on going back:** `status` with nothing changed takes 1.6 times Git's time on both systems (14.5 ms against 9.23; 72.4 ms against 44.5), and going back to the first version 1.8 times on Linux and 1.6 times on Windows in these means of five runs (20.4 ms against 11.2; 86.7 ms against 54.5). The gate's medians of ten runs are in the table above.
-- **Big files follow the disk, as §8 found.** On this Linux runner Git LFS made the first save of a gigabyte of noise in 1.41 s against Bolt's 5.00 s, and going back to an old version of a gigabyte took Bolt 4.02 s against Git's 2.40 s. On this Windows runner Bolt was ahead on both (2.74 s against Git LFS's 3.08 s; 3.43 s against Git's 5.11 s).
+- **Big files follow the disk, as §8 found.** On this Linux runner Git LFS made the first save of a gigabyte of noise in 1.41 s against Opalro's 5.00 s, and going back to an old version of a gigabyte took Opalro 4.02 s against Git's 2.40 s. On this Windows runner Opalro was ahead on both (2.74 s against Git LFS's 3.08 s; 3.43 s against Git's 5.11 s).
 
 #### GitHub's Linux runner
 
 **Code**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 175 ms (167–182) | 952 ms (942–969) | 984 ms (970–997) |
 | A small change | 19.3 ms (18.7–19.7) | 20.8 ms (19.7–24.6) | 46.8 ms (46.3–47.8) |
@@ -787,7 +787,7 @@ What the tables below say, losses included:
 
 **Godot's demo projects**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.06 s (1.05–1.07) | 5.70 s (5.64–5.76) | 2.40 s (2.37–2.42) |
 | A small change | 28.9 ms (23.9–47.5) | 27.0 ms (20.8–44.0) | 46.1 ms (44.0–51.0) |
@@ -797,7 +797,7 @@ What the tables below say, losses included:
 
 **Noise**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 5.00 s (4.96–5.10) | 18.7 s (18.6–18.7) | 1.41 s (1.40–1.44) |
 | A small change | 40.5 ms (39.7–41.1) | 940 ms (926–974) | 209 ms (186–244) |
@@ -807,7 +807,7 @@ What the tables below say, losses included:
 
 **Versions**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 4.95 s (3.80–5.27) | 24.7 s (23.4–25.2) | 1.42 s (1.40–1.43) |
 | A small change | 730 ms (718–742) | 25.5 s (24.9–25.7) | 1.41 s (1.40–1.43) |
@@ -817,7 +817,7 @@ What the tables below say, losses included:
 
 **Repeated**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 742 ms (732–750) | 23.4 s (23.3–23.5) | 1.45 s (1.42–1.49) |
 | A small change | 711 ms (703–719) | 23.4 s (23.3–23.5) | 1.42 s (1.40–1.46) |
@@ -832,16 +832,16 @@ What the tables below say, losses included:
 
 **Space**
 
-| Set | The files | Bolt | Git | Git with Git LFS |
+| Set | The files | Opalro | Git | Git with Git LFS |
 |---|---|---|---|---|
 | Code | 50,141,205 | 16,086,209 | 17,122,254 | 17,123,859 |
 | Godot's demo projects | 312,757,968 | 237,701,369 | 229,915,519 | 276,207,142 |
 | Noise | 1,048,576,000 | 1,051,271,584 | 1,363,601,946 | 1,363,192,296 |
 | Versions | 1,073,741,824 | 1,091,689,096 | 10,740,917,051 | 10,737,640,526 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,836 | 7,516,228,784 |
-- history-bolt: 368,998,025 bytes
+- history-opal: 368,998,025 bytes
 - history-git: 313,774,870 bytes
-- lfs-bolt: 580,585,708 bytes
+- lfs-opal: 580,585,708 bytes
 - lfs-git: 5,242,922,182 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
@@ -849,7 +849,7 @@ What the tables below say, losses included:
 
 **Code**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 445 ms (438–456) | 4.69 s (4.45–5.21) | 4.78 s (4.72–4.84) |
 | A small change | 82.4 ms (79.2–87.6) | 125 ms (120–132) | 418 ms (413–420) |
@@ -859,7 +859,7 @@ What the tables below say, losses included:
 
 **Godot's demo projects**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 1.29 s (1.27–1.32) | 13.1 s (12.9–13.6) | 7.43 s (7.35–7.51) |
 | A small change | 89.0 ms (87.7–90.5) | 134 ms (124–143) | 426 ms (411–458) |
@@ -869,7 +869,7 @@ What the tables below say, losses included:
 
 **Noise**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 2.74 s (2.71–2.78) | 34.1 s (34.0–34.4) | 3.08 s (3.04–3.20) |
 | A small change | 138 ms (134–143) | 1.78 s (1.78–1.79) | 712 ms (705–721) |
@@ -879,7 +879,7 @@ What the tables below say, losses included:
 
 **Versions**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 2.79 s (2.75–2.84) | 35.9 s (35.8–36.0) | 3.08 s (3.07–3.09) |
 | A small change | 1.89 s (1.85–1.91) | 47.6 s (35.8–65.3) | 3.08 s (3.07–3.11) |
@@ -889,7 +889,7 @@ What the tables below say, losses included:
 
 **Repeated**
 
-| Step | Bolt | Git | Git with Git LFS |
+| Step | Opalro | Git | Git with Git LFS |
 |---|---|---|---|
 | First save | 2.08 s (2.07–2.09) | 36.0 s (35.9–36.0) | 3.12 s (3.09–3.15) |
 | A small change | 1.81 s (1.79–1.83) | 47.5 s (36.0–65.0) | 3.10 s (3.06–3.24) |
@@ -904,22 +904,22 @@ What the tables below say, losses included:
 
 **Space**
 
-| Set | The files | Bolt | Git | Git with Git LFS |
+| Set | The files | Opalro | Git | Git with Git LFS |
 |---|---|---|---|---|
 | Code | 52,458,897 | 16,085,759 | 17,121,514 | 17,123,139 |
 | Godot's demo projects | 312,757,968 | 237,701,360 | 229,915,463 | 276,207,083 |
 | Noise | 1,048,576,000 | 1,051,271,583 | 1,363,601,966 | 1,363,192,327 |
 | Versions | 1,073,741,824 | 1,091,689,095 | 10,740,917,074 | 10,737,640,551 |
 | Repeated | 1,073,741,824 | 5,504,717 | 7,518,523,860 | 7,516,228,806 |
-- history-bolt: 368,998,024 bytes
+- history-opal: 368,998,024 bytes
 - history-git: 313,774,890 bytes
-- lfs-bolt: 580,585,707 bytes
+- lfs-opal: 580,585,707 bytes
 - lfs-git: 5,242,922,198 bytes
 - lfs-git-lfs-objects: 5,242,880,000 bytes
 
 ### Imports
 
-git/git, imported three times by each `bolt` in turn on one runner (the same run, job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs). "`main`" is the speed half alone:
+git/git, imported three times by each `opal` in turn on one runner (the same run, job `import-git`; git/git at `1891de4`, 86,222 commits and 1,029 refs). "`main`" is the speed half alone:
 
 | | Import | Peak memory | The first save after it |
 |---|---|---|---|
@@ -951,7 +951,7 @@ Everything here was measured on 2026-11-11. The finished code is `193c017` (the 
 
 ### The gate, ten times
 
-`bench/run.sh gate` by the `Speed gate` workflow, started ten times by hand on `193c017`; each cell is Bolt's median, Git's median and the ratio, as the job prints them. Limits: `status` and the small save 2, `goto` 3.5.
+`bench/run.sh gate` by the `Speed gate` workflow, started ten times by hand on `193c017`; each cell is Opalro's median, Git's median and the ratio, as the job prints them. Limits: `status` and the small save 2, `goto` 3.5.
 
 | Run | Linux | Windows |
 |---|---|---|
@@ -973,4 +973,4 @@ Everything here was measured on 2026-11-11. The finished code is `193c017` (the 
 ### The runs that decided the rule
 
 - **The starting point:** the Nightly workflow on `main` before this work ([run 42966403404](https://github.com/WisHonor/Bolt/actions/runs/42966403404)) passed every job but Linux's gate under decision 099, where `goto` took 2.651 times Git's time (31.3 ms against 11.8), the worst of the ten runs then on record. Decision 129 picked a limit of 3 from those ten.
-- **The first run under the new rule** ([run 42970694870](https://github.com/WisHonor/Bolt/actions/runs/42970694870), on `f888f2a`, whose engine is `main`'s) failed on Linux: `status` 2.207 times Git's time (17.0 ms against 7.7) and `goto` 3.012 (25.8 ms against 8.6). Bolt's times were ordinary for that runner type; Git's were the quickest on record, on a runner quick at what Git spends its time on, while a `goto`'s ten flushes don't get quicker with the processor. Decision 132 raised `goto`'s limit to 3.5 from the eleven runs then on record, before the ten runs above. The `status` limit is the owner's and stays; the follow-ups list records that a runner whose Git is unusually quick can push `status` past it with Bolt's own time unchanged.
+- **The first run under the new rule** ([run 42970694870](https://github.com/WisHonor/Bolt/actions/runs/42970694870), on `f888f2a`, whose engine is `main`'s) failed on Linux: `status` 2.207 times Git's time (17.0 ms against 7.7) and `goto` 3.012 (25.8 ms against 8.6). Opalro's times were ordinary for that runner type; Git's were the quickest on record, on a runner quick at what Git spends its time on, while a `goto`'s ten flushes don't get quicker with the processor. Decision 132 raised `goto`'s limit to 3.5 from the eleven runs then on record, before the ten runs above. The `status` limit is the owner's and stays; the follow-ups list records that a runner whose Git is unusually quick can push `status` past it with Opalro's own time unchanged.

@@ -1,0 +1,77 @@
+---
+source: crates/opal-vcs/tests/undo.rs
+expression: "doc(&[\"undo\", \"--list\"])"
+---
+{
+  "opal_json": 1,
+  "more": false,
+  "redo": [],
+  "undo": [
+    {
+      "action": "command",
+      "command": "goto",
+      "effects": [
+        {
+          "from": {
+            "line": "main"
+          },
+          "kind": "position",
+          "to": {
+            "save": "[redacted]"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "start",
+      "effects": [],
+      "entry": "[redacted]",
+      "first": true,
+      "target": null,
+      "time_ms": "[redacted]"
+    }
+  ],
+  "warnings": []
+}

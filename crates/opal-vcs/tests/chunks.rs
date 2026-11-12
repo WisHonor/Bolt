@@ -1,0 +1,393 @@
+//! Big files, end to end: cut into chunks as they are read, and back byte for byte.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::io::{self, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use opal_core::chunks::set_test_cut_sizes;
+use opal_core::git::{DELTA_BASE_CACHE, set_test_delta_limits};
+use opal_core::history::current_save;
+use opal_core::id::{Flavor, Id, hash_record};
+use opal_core::import::{ImportRequest, import_git};
+use opal_core::listing::EntryKind;
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+
+mod support;
+use support::{
+    Env, ada, copies_of, copy_dir, id_of, main_tip, save_here, text, top_folder, write, write_noise,
+};
+
+const MIB: u64 = 1 << 20;
+
+/// `opal <args>`, which must succeed.
+fn ok(env: &Env, args: &[&str]) {
+    let out = env.opal().args(args).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{args:?}: {}",
+        text(&out.stderr)
+    );
+}
+
+/// A project that has saved `big.bin`, `size` bytes made from `seed`, and the file's ID.
+fn with_a_big_file(seed: u64, size: u64) -> (Env, Id) {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let id = write_noise(&env.root().join("big.bin"), seed, size);
+    write(&env, "small.txt", "small\n");
+    ok(&env, &["save", "Big"]);
+    (env, id)
+}
+
+/// Writes a few bytes over the middle of the file at `path`; its new ID.
+fn edit(path: &Path) -> Id {
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let middle = file.metadata().unwrap().len() / 2;
+    file.seek(SeekFrom::Start(middle)).unwrap();
+    file.write_all(b"edited").unwrap();
+    drop(file);
+    id_of(path)
+}
+
+#[test]
+fn chunking_changes_no_ids() {
+    let off = tempfile::tempdir().unwrap();
+    Repository::init(off.path(), &ada()).unwrap();
+    std::fs::create_dir(off.path().join("sub")).unwrap();
+    let files = [
+        ("one.bin", MIB),
+        ("three.bin", 3 * MIB),
+        ("sub/forty.bin", 40 * MIB),
+    ];
+    let ids: Vec<Id> = (1..)
+        .zip(files)
+        .map(|(seed, (path, size))| write_noise(&off.path().join(path), seed, size))
+        .collect();
+    let on = tempfile::tempdir().unwrap();
+    copy_dir(off.path(), on.path());
+    // The same project in two folders, saved with cutting turned off, then on. Off, every file is
+    // too long to cut, so it is stored whole as it is streamed.
+    set_test_cut_sizes(Some((u64::MAX, 0)));
+    save_here(off.path(), "Big files").unwrap();
+    set_test_cut_sizes(None);
+    save_here(on.path(), "Big files").unwrap();
+
+    let off_repo = Repository::open(off.path()).unwrap();
+    let on_repo = Repository::open(on.path()).unwrap();
+    let off_id = current_save(&off_repo).unwrap();
+    let off_save = off_repo.store().save(&off_id, false).unwrap();
+    let on_id = current_save(&on_repo).unwrap();
+    let mut on_save = on_repo.store().save(&on_id, false).unwrap();
+    // A save draws its change ID at random: given the same one, it is the same save.
+    on_save.change_id = off_save.change_id;
+    assert_eq!(hash_record(Flavor::Save, &on_save.encode()), off_id);
+    // The same listings, held by both stores...
+    let mut folders = vec![off_save.root];
+    while let Some(id) = folders.pop() {
+        let listing = off_repo.store().listing(&id).unwrap();
+        assert_eq!(on_repo.store().listing(&id).unwrap(), listing);
+        let below = listing
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::Folder);
+        folders.extend(below.map(|e| e.id));
+    }
+    // ...name each file by the same ID, stored whole in one and cut in the other.
+    for id in &ids {
+        assert_eq!(copies_of(off.path(), id), [ObjectKind::Content]);
+        assert_eq!(copies_of(on.path(), id), [ObjectKind::ChunkList]);
+        for repo in [&off_repo, &on_repo] {
+            repo.store().copy_content(id, &mut io::sink()).unwrap();
+        }
+    }
+}
+
+/// With no `opal.toml`, files are cut from exactly 1 MiB, as before projects had rules.
+#[test]
+fn a_project_without_a_rules_file_cuts_files_from_exactly_1_mib() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let cut = write_noise(&env.root().join("cut.bin"), 21, MIB);
+    let whole = write_noise(&env.root().join("whole.bin"), 22, MIB - 1);
+    let out = env.opal().args(["save", "--json", "Two"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let warnings = doc["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty(), "{doc}");
+    assert_eq!(copies_of(env.root(), &cut), [ObjectKind::ChunkList]);
+    assert_eq!(ObjectKind::ChunkList as u8, 18);
+    assert_eq!(copies_of(env.root(), &whole), [ObjectKind::Content]);
+}
+
+#[test]
+fn big_files_go_to_and_come_back_byte_for_byte() {
+    let (env, first) = with_a_big_file(1, 3 * MIB);
+    let one = main_tip(&env);
+    let big = env.root().join("big.bin");
+    let second = edit(&big);
+    ok(&env, &["save", "Edited"]);
+    let two = main_tip(&env);
+    for id in [first, second] {
+        assert_eq!(copies_of(env.root(), &id), [ObjectKind::ChunkList]);
+    }
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn discard_and_shelf_keep_a_big_file_as_chunks() {
+    let (env, saved) = with_a_big_file(2, 3 * MIB);
+    let big = env.root().join("big.bin");
+    // A discarded edit is kept as chunks, and undo brings it back.
+    let edited = edit(&big);
+    ok(&env, &["discard", "big.bin"]);
+    assert_eq!(id_of(&big), saved);
+    assert_eq!(copies_of(env.root(), &edited), [ObjectKind::ChunkList]);
+    ok(&env, &["undo"]);
+    assert_eq!(id_of(&big), edited);
+    // Shelved, it needs nothing the store doesn't hold already.
+    ok(&env, &["shelf"]);
+    assert_eq!(id_of(&big), saved);
+    assert_eq!(copies_of(env.root(), &edited), [ObjectKind::ChunkList]);
+    ok(&env, &["unshelf"]);
+    assert_eq!(id_of(&big), edited);
+}
+
+/// A project whose `opal.toml` cuts files from 8 MiB, having saved `big.bin`, 3 MiB made from
+/// `seed`, and the file's ID.
+fn with_a_file_under_a_raised_threshold(seed: u64) -> (Env, Id) {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "opal.toml", "chunk-files-over = \"8 MiB\"\n");
+    let id = write_noise(&env.root().join("big.bin"), seed, 3 * MIB);
+    ok(&env, &["save", "Big"]);
+    (env, id)
+}
+
+#[test]
+fn a_file_between_1_mib_and_a_raised_threshold_is_stored_whole_and_reads_back() {
+    let (env, first) = with_a_file_under_a_raised_threshold(31);
+    let one = main_tip(&env);
+    let big = env.root().join("big.bin");
+    let second = edit(&big);
+    ok(&env, &["save", "Edited"]);
+    let two = main_tip(&env);
+    for id in [first, second] {
+        assert_eq!(copies_of(env.root(), &id), [ObjectKind::Content]);
+    }
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn files_on_either_side_of_both_cuts_come_back_byte_for_byte() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "opal.toml", "chunk-files-over = \"4 MiB\"\n");
+    let sizes = [MIB - 1, MIB, 2 * MIB, 4 * MIB - 1, 4 * MIB];
+    let files: Vec<(String, Id)> = (0u64..)
+        .zip(sizes)
+        .map(|(seed, size)| {
+            let name = format!("f{size}.bin");
+            (
+                name.clone(),
+                write_noise(&env.root().join(&name), 40 + seed, size),
+            )
+        })
+        .collect();
+    ok(&env, &["save", "Sizes"]);
+    let first = main_tip(&env);
+    for ((name, id), size) in files.iter().zip(sizes) {
+        let kind = if size >= 4 * MIB {
+            ObjectKind::ChunkList
+        } else {
+            ObjectKind::Content
+        };
+        assert_eq!(copies_of(env.root(), id), [kind], "{name}");
+    }
+    let edited: Vec<Id> = files
+        .iter()
+        .map(|(name, _)| edit(&env.root().join(name)))
+        .collect();
+    ok(&env, &["save", "Edited"]);
+    ok(&env, &["goto", &first.to_hex()]);
+    for (name, id) in &files {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    ok(&env, &["goto", "main"]);
+    for ((name, _), id) in files.iter().zip(&edited) {
+        assert_eq!(id_of(&env.root().join(name)), *id, "{name}");
+    }
+    let out = env.opal().args(["--json", "verify"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["problems"], serde_json::json!([]), "{doc}");
+}
+
+#[test]
+fn safety_copies_stream_such_a_file_too() {
+    let (env, saved) = with_a_file_under_a_raised_threshold(32);
+    let big = env.root().join("big.bin");
+    let edited = edit(&big);
+    ok(&env, &["discard", "big.bin"]);
+    assert_eq!(id_of(&big), saved);
+    assert_eq!(copies_of(env.root(), &edited), [ObjectKind::Content]);
+    ok(&env, &["undo"]);
+    assert_eq!(id_of(&big), edited);
+    ok(&env, &["shelf"]);
+    assert_eq!(id_of(&big), saved);
+    ok(&env, &["unshelf"]);
+    assert_eq!(id_of(&big), edited);
+}
+
+/// What this thread has read from files so far, in bytes.
+#[cfg(target_os = "linux")]
+fn bytes_read() -> u64 {
+    let io = std::fs::read_to_string("/proc/thread-self/io").unwrap();
+    let line = io.lines().find_map(|l| l.strip_prefix("rchar:")).unwrap();
+    line.trim().parse().unwrap()
+}
+
+#[test]
+fn an_import_reads_each_big_blob_once() {
+    // One blob Git's reader hands over whole, and one too big for that, which streams.
+    const STREAMED: u64 = 66 * MIB;
+    let env = Env::new();
+    let held = write_noise(&env.root().join("held.bin"), 3, 3 * MIB);
+    let streamed = write_noise(&env.root().join("streamed.bin"), 4, STREAMED);
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-q", "-m", "Big files"]);
+    #[cfg(target_os = "linux")]
+    let before = bytes_read();
+    let who = ada();
+    let mut req = ImportRequest {
+        who: &who,
+        command: "import",
+        git_settings: None,
+        progress: &mut |_, _, _| {},
+    };
+    import_git(env.root(), &mut req, &mut None).unwrap();
+    // Git's copy of each once, and a little besides: reading one twice passes 130 MiB.
+    #[cfg(target_os = "linux")]
+    {
+        let read = bytes_read() - before;
+        assert!(
+            read < STREAMED + STREAMED / 2,
+            "the import read {read} bytes"
+        );
+    }
+    let top = top_folder(env.root());
+    let repo = Repository::open(env.root()).unwrap();
+    for (name, id) in [("held.bin", held), ("streamed.bin", streamed)] {
+        assert_eq!(top.get(name).unwrap().id, id);
+        assert_eq!(
+            copies_of(env.root(), &id),
+            [ObjectKind::ChunkList],
+            "{name}"
+        );
+        repo.store().copy_content(&id, &mut io::sink()).unwrap();
+    }
+}
+
+#[test]
+fn a_long_history_of_a_big_file_imports_within_the_allowance() {
+    // 50 versions of an 8 MiB file, each a few bytes on from the last, which Git stores as deltas
+    // built on a few versions stored whole.
+    let env = Env::new();
+    let path = env.root().join("big.bin");
+    write_noise(&path, 5, 8 * MIB);
+    let mut versions = Vec::new();
+    for v in 0..50u64 {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(v * 100_000)).unwrap();
+        file.write_all(format!("version {v:02}").as_bytes())
+            .unwrap();
+        drop(file);
+        versions.push(id_of(&path));
+        env.git(&["add", "big.bin"]);
+        env.git(&["commit", "-q", "-m", &format!("Version {v}")]);
+    }
+    env.git(&["repack", "-a", "-d", "-f", "--depth=50"]);
+    // A cache of 9 MiB holds one version of this 8 MiB file and no more.
+    set_test_delta_limits(Some((640 * MIB, 9 * MIB)));
+    let who = ada();
+    let mut req = ImportRequest {
+        who: &who,
+        command: "import",
+        git_settings: None,
+        progress: &mut |_, _, _| {},
+    };
+    let imported = import_git(env.root(), &mut req, &mut None);
+    set_test_delta_limits(None);
+    imported.unwrap();
+    let repo = Repository::open(env.root()).unwrap();
+    for id in &versions {
+        repo.store().copy_content(id, &mut io::sink()).unwrap();
+    }
+    assert_eq!(
+        top_folder(env.root()).get("big.bin").unwrap().id,
+        versions[49]
+    );
+}
+
+#[test]
+fn a_history_past_the_allowance_imports_once_git_stores_big_files_whole() {
+    // 8 versions of a 2 MiB file in Git's deltas, and an allowance under what rebuilding each
+    // once takes, as a long history of small edits can pass the real one.
+    let env = Env::new();
+    let path = env.root().join("big.bin");
+    write_noise(&path, 6, 2 * MIB);
+    let mut versions = Vec::new();
+    for v in 0..8u64 {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(v * 100_000)).unwrap();
+        file.write_all(format!("version {v}").as_bytes()).unwrap();
+        drop(file);
+        versions.push(id_of(&path));
+        env.git(&["add", "big.bin"]);
+        env.git(&["commit", "-q", "-m", &format!("Version {v}")]);
+    }
+    env.git(&["repack", "-a", "-d", "-f"]);
+    let import = || {
+        let who = ada();
+        let mut req = ImportRequest {
+            who: &who,
+            command: "import",
+            git_settings: None,
+            progress: &mut |_, _, _| {},
+        };
+        set_test_delta_limits(Some((4 * MIB, DELTA_BASE_CACHE)));
+        let imported = import_git(env.root(), &mut req, &mut None);
+        set_test_delta_limits(None);
+        imported
+    };
+    let stop = import().unwrap_err();
+    let why = "the repository holds a long history of small edits to a big file";
+    assert!(stop.to_string().contains(why), "{stop}");
+    let way_out = ["-c", "core.bigFileThreshold=1m", "repack", "-a", "-d", "-f"];
+    let hint = stop.hint().unwrap();
+    assert!(
+        hint.contains(&format!("`git {}`", way_out.join(" "))),
+        "{hint}"
+    );
+    // Run again, it stops the same way; once Git stores each version whole, no version has
+    // anything left to rebuild.
+    let again = import().unwrap_err();
+    assert!(again.to_string().contains(why), "{again}");
+    env.git(&way_out);
+    import().unwrap();
+    let repo = Repository::open(env.root()).unwrap();
+    for id in &versions {
+        repo.store().copy_content(id, &mut io::sink()).unwrap();
+    }
+    assert_eq!(
+        top_folder(env.root()).get("big.bin").unwrap().id,
+        versions[7]
+    );
+}

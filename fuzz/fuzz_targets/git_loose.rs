@@ -1,6 +1,6 @@
 #![no_main]
-use bolt_core::git::craft::{Craft, zlib};
-use bolt_core::git::{GitId, HashKind, Repo};
+use opal_core::git::craft::{Craft, zlib};
+use opal_core::git::{GitId, HashKind, Repo};
 use libfuzzer_sys::fuzz_target;
 
 // The input as a loose object's file, then compressed as one, which gets past zlib to the

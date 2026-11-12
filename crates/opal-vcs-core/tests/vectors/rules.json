@@ -1,0 +1,713 @@
+[
+  {
+    "name": "empty",
+    "toml": "",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "comments-only",
+    "toml": "# nothing here\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "code-preset",
+    "toml": "# Opalro project rules, written by the Code preset (version 1).\n# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.\npreset = \"code\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"100 MB\"\nask-before-saving-files-over = 10000\n",
+    "skipped": false,
+    "preset": "code",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "game-unity-preset",
+    "toml": "# Opalro project rules, written by the Game preset (version 1).\n# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.\npreset = \"game\"\n\n# A file of this size or more is stored in chunks, so a changed part is stored once.\nchunk-files-over = \"1 MiB\"\n\n# A save that adds more than this, in new bytes or in new files, asks first.\nask-before-saving-over = \"1 GiB\"\nask-before-saving-files-over = 10000\n\n# Art and audio that can't be merged. Marked lockable; locking arrives with syncing.\n[[rule]]\nfiles = [\"*.psd\", \"*.png\", \"*.tga\", \"*.tif\", \"*.tiff\", \"*.exr\", \"*.jpg\", \"*.jpeg\", \"*.fbx\", \"*.blend\", \"*.max\", \"*.mb\", \"*.wav\", \"*.ogg\", \"*.mp3\", \"*.mp4\", \"*.mov\"]\nlockable = true\n\n# Unity scenes and prefabs.\n[[rule]]\nfiles = [\"*.unity\", \"*.prefab\"]\nlockable = true\nconflict-markers = false\n\n# Unity's .meta files never get conflict markers.\n[[rule]]\nfiles = [\"*.meta\"]\nconflict-markers = false\n",
+    "skipped": false,
+    "preset": "game",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 1073741824,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.psd",
+          "*.png",
+          "*.tga",
+          "*.tif",
+          "*.tiff",
+          "*.exr",
+          "*.jpg",
+          "*.jpeg",
+          "*.fbx",
+          "*.blend",
+          "*.max",
+          "*.mb",
+          "*.wav",
+          "*.ogg",
+          "*.mp3",
+          "*.mp4",
+          "*.mov"
+        ],
+        "lockable": true,
+        "conflict_markers": null
+      },
+      {
+        "files": [
+          "*.unity",
+          "*.prefab"
+        ],
+        "lockable": true,
+        "conflict_markers": false
+      },
+      {
+        "files": [
+          "*.meta"
+        ],
+        "lockable": null,
+        "conflict_markers": false
+      }
+    ],
+    "ignored": []
+  },
+  {
+    "name": "sizes-in-both-families",
+    "toml": "chunk-files-over = \"2 MiB\"\nask-before-saving-over = \"5 GB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 2097152,
+    "ask_before_saving_over": 5000000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "size-without-a-space",
+    "toml": "chunk-files-over = \"1GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1073741824,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "size-with-several-spaces",
+    "toml": "chunk-files-over = \"4   MiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 4194304,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "size-in-bytes",
+    "toml": "chunk-files-over = \"1048576 B\"\nask-before-saving-over = \"0 B\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 0,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "size-in-kilobytes-and-terabytes",
+    "toml": "ask-before-saving-over = \"2 TiB\"\nchunk-files-over = \"2000000 KB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 2000000000,
+    "ask_before_saving_over": 2199023255552,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "chunk-threshold-at-its-most",
+    "toml": "chunk-files-over = \"128 GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 137438953472,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "chunk-threshold-below-1-mib",
+    "toml": "chunk-files-over = \"512 KiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "chunk-threshold-one-byte-short",
+    "toml": "chunk-files-over = \"1048575 B\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "chunk-threshold-over-128-gib",
+    "toml": "chunk-files-over = \"129 GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "size-with-a-fraction",
+    "toml": "chunk-files-over = \"1.5 MiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "size-with-a-small-letter-unit",
+    "toml": "chunk-files-over = \"2 mib\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "size-with-no-unit",
+    "toml": "ask-before-saving-over = \"100\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "size-as-a-number",
+    "toml": "chunk-files-over = 2097152\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "size-empty",
+    "toml": "ask-before-saving-over = \"\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "size-with-a-space-in-front",
+    "toml": "ask-before-saving-over = \" 1 GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "size-with-a-sign",
+    "toml": "ask-before-saving-over = \"+1 GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "size-too-big-to-count",
+    "toml": "ask-before-saving-over = \"18446744073709551616 B\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "size-too-big-once-multiplied",
+    "toml": "ask-before-saving-over = \"17000000 TiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-over"
+    ]
+  },
+  {
+    "name": "files-zero",
+    "toml": "ask-before-saving-files-over = 0\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 0,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "files-negative",
+    "toml": "ask-before-saving-files-over = -1\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-files-over"
+    ]
+  },
+  {
+    "name": "files-a-fraction",
+    "toml": "ask-before-saving-files-over = 1.5\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-files-over"
+    ]
+  },
+  {
+    "name": "files-as-text",
+    "toml": "ask-before-saving-files-over = \"10000\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "ask-before-saving-files-over"
+    ]
+  },
+  {
+    "name": "preset-any-label",
+    "toml": "preset = \"our studio rules\"\n",
+    "skipped": false,
+    "preset": "our studio rules",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "preset-not-text",
+    "toml": "preset = 3\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "preset"
+    ]
+  },
+  {
+    "name": "preset-64-bytes",
+    "toml": "preset = \"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"\n",
+    "skipped": false,
+    "preset": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "preset-65-bytes",
+    "toml": "preset = \"ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "preset"
+    ]
+  },
+  {
+    "name": "unknown-keys",
+    "toml": "zebra = 1\nmoves-with-asset = true\npreset = \"game\"\n[extra]\nx = 1\n",
+    "skipped": false,
+    "preset": "game",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "extra",
+      "moves-with-asset",
+      "zebra"
+    ]
+  },
+  {
+    "name": "one-bad-key-leaves-the-rest",
+    "toml": "chunk-files-over = \"nope\"\nask-before-saving-over = \"2 GiB\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 2147483648,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "chunk-files-over"
+    ]
+  },
+  {
+    "name": "rule-as-inline-tables",
+    "toml": "rule = [{ files = [\"*.x\"], lockable = true }]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.x"
+        ],
+        "lockable": true,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": []
+  },
+  {
+    "name": "rule-not-a-list-of-tables",
+    "toml": "rule = 5\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule"
+    ]
+  },
+  {
+    "name": "rule-without-files",
+    "toml": "[[rule]]\nlockable = true\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "rule-with-no-patterns",
+    "toml": "[[rule]]\nfiles = []\nlockable = true\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "rule-with-an-empty-pattern",
+    "toml": "[[rule]]\nfiles = [\"*.a\", \"\"]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "rule-with-files-not-a-list",
+    "toml": "[[rule]]\nfiles = \"*.a\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "rule-with-a-bad-setting",
+    "toml": "[[rule]]\nfiles = [\"*.a\"]\nlockable = \"yes\"\nconflict-markers = false\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.a"
+        ],
+        "lockable": null,
+        "conflict_markers": false
+      }
+    ],
+    "ignored": [
+      "rule[1].lockable"
+    ]
+  },
+  {
+    "name": "rule-with-an-unknown-setting",
+    "toml": "[[rule]]\nfiles = [\"*.a\"]\nmoves-with-asset = true\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.a"
+        ],
+        "lockable": null,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": [
+      "rule[1].moves-with-asset"
+    ]
+  },
+  {
+    "name": "second-rule-bad-first-kept",
+    "toml": "[[rule]]\nfiles = [\"*.a\"]\nlockable = true\n\n[[rule]]\nlockable = true\n\n[[rule]]\nfiles = [\"*.c\"]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.a"
+        ],
+        "lockable": true,
+        "conflict_markers": null
+      },
+      {
+        "files": [
+          "*.c"
+        ],
+        "lockable": null,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": [
+      "rule[2]"
+    ]
+  },
+  {
+    "name": "preset-64-bytes-in-32-characters",
+    "toml": "preset = \"éééééééééééééééééééééééééééééééé\"\n",
+    "skipped": false,
+    "preset": "éééééééééééééééééééééééééééééééé",
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "preset-66-bytes-in-33-characters",
+    "toml": "preset = \"ééééééééééééééééééééééééééééééééé\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "preset"
+    ]
+  },
+  {
+    "name": "rule-with-a-pattern-that-is-not-text",
+    "toml": "[[rule]]\nfiles = [\"*.a\", 3]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "several-bad-settings-in-one-rule-in-byte-order",
+    "toml": "[[rule]]\nfiles = [\"*.a\"]\nzzz = 1\nlockable = 3\nconflict-markers = \"x\"\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.a"
+        ],
+        "lockable": null,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": [
+      "rule[1].conflict-markers",
+      "rule[1].lockable",
+      "rule[1].zzz"
+    ]
+  },
+  {
+    "name": "top-level-names-before-rules",
+    "toml": "zebra = 1\n\n[[rule]]\nlockable = true\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": [
+      "zebra",
+      "rule[1]"
+    ]
+  },
+  {
+    "name": "toml-1-1-inline-table-over-several-lines",
+    "toml": "rule = [\n  { files = [\"*.x\"],\n    lockable = true,\n  },\n]\n",
+    "skipped": false,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [
+      {
+        "files": [
+          "*.x"
+        ],
+        "lockable": true,
+        "conflict_markers": null
+      }
+    ],
+    "ignored": []
+  },
+  {
+    "name": "not-toml",
+    "toml": "this is not = = toml\n",
+    "skipped": true,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "a-key-given-twice",
+    "toml": "preset = \"a\"\npreset = \"b\"\n",
+    "skipped": true,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  },
+  {
+    "name": "an-escape-that-is-no-character",
+    "toml": "preset = \"\\uD800\"\n",
+    "skipped": true,
+    "preset": null,
+    "chunk_files_over": 1048576,
+    "ask_before_saving_over": 100000000,
+    "ask_before_saving_files_over": 10000,
+    "rules": [],
+    "ignored": []
+  }
+]

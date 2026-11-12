@@ -1,5 +1,5 @@
 #![no_main]
-use bolt_core::rules::{RulesRead, parse, parse_size, size_text};
+use opal_core::rules::{RulesRead, parse, parse_size, size_text};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

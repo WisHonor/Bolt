@@ -1,0 +1,823 @@
+//! `opal goto`: moving the project folder to another save, carrying unsaved work along unless
+//! it is in the way, and `opal discard`: throwing unsaved work away (decisions 049, 050 and 055).
+
+use std::path::Path;
+
+use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State};
+use crate::drive::{self, Drive};
+use crate::history::{ResolveError, tip_of};
+use crate::id::Id;
+use crate::journal::{Change, Journal};
+use crate::kept::{self, KeptFrom};
+use crate::lines::Target;
+use crate::listing::EntryKind;
+use crate::pack::PackSet;
+use crate::repo::{ChangeLock, RepoError, Repository};
+use crate::save::Person;
+use crate::scope::within;
+use crate::snapshot::{NAMED, SaveError, listed};
+use crate::store::StoreError;
+use crate::text::{escape, thousands};
+use crate::warning::{self, Warning};
+use crate::writeout::{self, Applied, Plan};
+
+/// What `goto` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GotoOutcome {
+    pub position: Position,
+    /// The save the folder is now on.
+    pub save: Id,
+    /// What was written and removed. Its `placeholders` are every link written as a file, its
+    /// `not_written` every entry left unwritten, and its `warnings` all the switch's own.
+    pub applied: Applied,
+    pub safety_copies: usize,
+    /// Unsaved changes that came along to the new save; 0 when there was nothing to switch.
+    pub carried: usize,
+    /// Whether this goto recorded a step of its own; not when the project already was there.
+    pub recorded: bool,
+}
+
+/// What `discard` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardOutcome {
+    /// Files and links put back as the save has them: changed or deleted ones.
+    pub restored: Vec<String>,
+    /// New files and links removed, and those a saved folder went back in place of.
+    pub removed: Vec<String>,
+    /// Folders made or removed that no file above counts for.
+    pub folders: usize,
+    /// What was written and removed, as `goto` gives it.
+    pub applied: Applied,
+    pub safety_copies: usize,
+    /// From the save of what was thrown away to the save the project is on; `None` if nothing was.
+    pub folder_change: Option<FolderChange>,
+    /// Unsaved links left as they are, since they could come back only as files.
+    pub links_left: Vec<String>,
+}
+
+/// Why a switch didn't happen. Paths come from the folder, so messages escape them.
+#[derive(Debug, thiserror::Error)]
+pub enum SwitchError {
+    #[error(
+        "Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:{}",
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )]
+    Collisions { paths: Vec<String> },
+    /// `command` is the one to run again: `discard` or `shelf`.
+    #[error(
+        "Something is in the way where files would go back as your last save has them (ignored, \
+         or new since Opalro looked), so nothing was changed:{}",
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )]
+    InTheWay { paths: Vec<String>, command: String },
+    #[error(
+        "{} could be any of these, so nothing was changed:{}",
+        escape(path, false),
+        listed(spellings.iter().take(NAMED), spellings.len() as u64)
+    )]
+    Ambiguous {
+        path: String,
+        spellings: Vec<String>,
+    },
+    #[error(
+        "Nothing in your last save or your unsaved changes is at {}, so nothing was changed.",
+        escape(path, false)
+    )]
+    NoMatch { path: String },
+    /// What is where an undo or redo would write; `shelve` when `--shelve` set aside what it could,
+    /// and `to` the entry `undo --to` was given.
+    #[error("{}", in_the_way_of_step(paths, *redo, *shelve))]
+    InTheWayOfStep {
+        paths: Vec<String>,
+        redo: bool,
+        shelve: bool,
+        to: Option<String>,
+    },
+    #[error(
+        "\"{}\" can't name a diary entry: that takes at least 8 hex digits of its ID.",
+        escape(text, false)
+    )]
+    NotAnEntry { text: String },
+    /// `anywhere`: every entry the store holds was looked at, since `head` is lost.
+    #[error(
+        "No diary entry {} has an ID starting with {}.",
+        if *anywhere { "in the store" } else { "from the current one back" },
+        escape(text, false)
+    )]
+    NoEntry { text: String, anywhere: bool },
+    #[error(
+        "{} is the start of more than one diary entry's ID, so nothing was changed:{}",
+        escape(text, false),
+        listed(entries.iter().map(Id::to_hex).take(NAMED), entries.len() as u64)
+    )]
+    EntryAmbiguous { text: String, entries: Vec<Id> },
+    /// A lost `head` can't be picked up from `entry`: `what` its state names (one of its saves,
+    /// its tag list or its server lines) can't be read.
+    #[error(
+        "Diary entry {} can't be made current: {what} can't be read ({}), so nothing was changed.",
+        entry.short_hex(),
+        escape(detail, false)
+    )]
+    EntryUnusable {
+        entry: Id,
+        what: &'static str,
+        detail: String,
+    },
+    /// The saves of a step can't be read: `tidy` removed them, or they were lost.
+    #[error(
+        "The step of diary entry {} can't be undone or redone: what it changed can't be read \
+         ({detail}).",
+        step.short_hex()
+    )]
+    StepGone { step: Id, detail: String },
+    /// The saves of the entry `undo --to` would go back to can't be read: `tidy` removed them, or
+    /// they were lost.
+    #[error(
+        "Things can't be made as they were right after diary entry {}: its saves can't be read \
+         ({detail}).",
+        entry.short_hex()
+    )]
+    EntryGone { entry: Id, detail: String },
+    /// `label` is the shelf asked for, if one was.
+    #[error("{}", no_shelf(label.as_deref()))]
+    NoShelf { label: Option<String> },
+    #[error("{}", shelf_in_the_way(.0))]
+    ShelfInTheWay(Box<ShelfCollisions>),
+    #[error(
+        "That would make more than {} shelves, the most a project keeps, so that step changed \
+         nothing.",
+        thousands(MAX_SHELVES)
+    )]
+    TooManyShelves,
+    #[error(transparent)]
+    Resolve(#[from] ResolveError),
+    #[error(transparent)]
+    Save(#[from] SaveError),
+    #[error(transparent)]
+    Repo(#[from] RepoError),
+}
+
+impl From<StoreError> for SwitchError {
+    fn from(e: StoreError) -> Self {
+        SwitchError::Repo(e.into())
+    }
+}
+
+/// What is where an unshelf would write.
+#[derive(Debug)]
+pub struct ShelfCollisions {
+    pub label: String,
+    /// The save the shelf was made on.
+    pub base: Id,
+    /// `opal goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
+    /// save the project is on changed something in the way.
+    pub goto_reaches_base: bool,
+    /// Unsaved work, or files Opalro ignores.
+    pub unsaved: Vec<String>,
+    /// What the save the project is on changed since `base`.
+    pub changed: Vec<String>,
+}
+
+impl SwitchError {
+    /// What the user can do next, if there is something to say.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            SwitchError::Collisions { .. } => Some(
+                "Save them first (opal save \"describe your change\"), shelve them (opal shelf) or \
+                 discard them (opal discard), and move ignored files somewhere else, then run opal \
+                 goto again."
+                    .to_owned(),
+            ),
+            SwitchError::InTheWay { command, .. } => Some(format!(
+                "Move them somewhere else, then run opal {} again.",
+                escape(command, false)
+            )),
+            SwitchError::Ambiguous { .. } => {
+                Some("Name the one you mean, spelled exactly as it is saved.".to_owned())
+            }
+            SwitchError::NoMatch { .. } => {
+                Some("Check the path: opal status lists your unsaved changes.".to_owned())
+            }
+            SwitchError::InTheWayOfStep {
+                redo, shelve, to, ..
+            } => {
+                let command = match to {
+                    Some(to) => format!("undo --to {}", escape(to, false)),
+                    None => (if *redo { "redo" } else { "undo" }).to_owned(),
+                };
+                if *shelve {
+                    return Some(format!(
+                        "Move them somewhere else, then run opal {command} --shelve again."
+                    ));
+                }
+                let mut hint = format!(
+                    "Run opal {command} --shelve to set your changes there aside on a new shelf, \
+                     as part of the same step."
+                );
+                // Whether saving first helps `undo --to` depends on where its entry is.
+                if to.is_none() {
+                    let why = if *redo {
+                        "each is a new step, and a new step clears what redo can bring back"
+                    } else {
+                        "each is a step of its own, which the next undo would take back"
+                    };
+                    hint +=
+                        &format!(" Saving, shelving or discarding them first won't help: {why}.");
+                }
+                hint += " Files Opalro ignores, and unsaved links that could come back only as plain \
+                         files, aren't set aside: move them somewhere else first.";
+                Some(hint)
+            }
+            SwitchError::NoEntry { anywhere: true, .. } => Some(
+                "opal undo --list shows the entries where the diary may have stopped, with the \
+                 start of each one's ID."
+                    .to_owned(),
+            ),
+            SwitchError::NotAnEntry { .. } | SwitchError::NoEntry { .. } => Some(
+                "opal undo --list shows the steps undo and redo can take with the start of each \
+                 entry's ID, and opal undo --list --all shows every entry."
+                    .to_owned(),
+            ),
+            SwitchError::EntryAmbiguous { .. } => {
+                Some("Type more of the ID to pick one.".to_owned())
+            }
+            SwitchError::EntryUnusable { .. } => Some(
+                "Pick another: opal undo --list shows the entries where the diary may have \
+                 stopped."
+                    .to_owned(),
+            ),
+            SwitchError::StepGone { .. } => Some(
+                "opal tidy removes what steps older than the undo window changed, and a damaged \
+                 store can lose it too, so undo and redo can't go past this step. To get back to \
+                 an older save, find it with opal history and go to it with opal goto."
+                    .to_owned(),
+            ),
+            SwitchError::EntryGone { .. } => Some(
+                "opal tidy removes the saves only entries older than the undo window needed, and \
+                 a damaged store can lose them too, so undo --to can't go back to this entry. To \
+                 get back to an older save, find it with opal history and go to it with opal goto."
+                    .to_owned(),
+            ),
+            SwitchError::NoShelf { label: None } => {
+                Some("opal shelf sets your unsaved changes aside on one.".to_owned())
+            }
+            SwitchError::NoShelf { .. } => {
+                Some("opal shelf --list shows the shelves there are.".to_owned())
+            }
+            SwitchError::ShelfInTheWay(c) => {
+                let unshelf = format!("opal unshelf {}", escape(&c.label, false));
+                let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was \
+                               made";
+                let (elsewhere, newest) = if c.goto_reaches_base {
+                    let goto = format!("opal goto {}", c.base.short_hex());
+                    let there = format!(
+                        "go to the save it was made on with {goto}, then run {unshelf} there"
+                    );
+                    (there, " (a new shelf would be the newest)")
+                } else {
+                    let gone = "opal goto can't reach the save it was made on, and opal undo \
+                                --list shows the steps that can bring it back";
+                    (gone.to_owned(), "")
+                };
+                Some(match (c.unsaved.is_empty(), c.changed.is_empty()) {
+                    (false, true) => format!(
+                        "Save, shelve or discard your changes there, and move ignored files \
+                         somewhere else, then run {unshelf} (a new shelf would be the newest)."
+                    ),
+                    (true, _) => format!("{not_yet}: {elsewhere}."),
+                    (false, false) => format!(
+                        "Save, shelve or discard your unsaved changes there, and move ignored files \
+                         somewhere else. {not_yet}: {elsewhere}{newest}."
+                    ),
+                })
+            }
+            SwitchError::TooManyShelves => Some(
+                "Bring some back with opal unshelf (opal discard then drops what you don't want), \
+                 and run the command again."
+                    .to_owned(),
+            ),
+            SwitchError::Resolve(e) => e.hint(),
+            SwitchError::Save(e) => e.hint_when_reading(),
+            SwitchError::Repo(e) => e.hint(),
+        }
+    }
+}
+
+/// The warnings that name entries left unwritten or links written as files: one of each per
+/// command, whichever switch they came from.
+pub(crate) const LISTED: [&str; 2] = [warning::PLACEHOLDERS_WRITTEN, warning::NOT_WRITTEN_HERE];
+
+/// Why `unshelf` found nothing to bring back: no shelf at all, or none with `label`.
+fn no_shelf(label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("There's no shelf {}.", escape(label, false)),
+        None => "There's no shelf to bring back.".to_owned(),
+    }
+}
+
+/// Why a shelf can't come back, naming what is in the way, each kind on its own.
+fn shelf_in_the_way(c: &ShelfCollisions) -> String {
+    let mut message = format!(
+        "Shelf {} can't come back here, so nothing was changed.",
+        escape(&c.label, false)
+    );
+    if !c.unsaved.is_empty() {
+        message += "\nYour unsaved changes, or files Opalro ignores, are where it would write:";
+        message += &listed(c.unsaved.iter().take(NAMED), c.unsaved.len() as u64);
+    }
+    if !c.changed.is_empty() {
+        message += "\nThe save you're on changed what is there since the shelf was made:";
+        message += &listed(c.changed.iter().take(NAMED), c.changed.len() as u64);
+    }
+    message
+}
+
+/// Why write-out could bring unsaved links back only as plain files: for one link, or several.
+pub(crate) fn why_links_stay(one: bool) -> &'static str {
+    if one {
+        "since it may lead out of the project, or through a name Opalro never writes (a spelling of \
+         .git or .opal, or a name this computer can't hold), or this computer can't make links (on \
+         Windows that takes Developer Mode)"
+    } else {
+        "since they may lead out of the project, or through a name Opalro never writes (a spelling \
+         of .git or .opal, or a name this computer can't hold), or this computer can't make links \
+         (on Windows that takes Developer Mode)"
+    }
+}
+
+/// Why an undo or redo step didn't happen, naming what is where it would write.
+fn in_the_way_of_step(paths: &[String], redo: bool, shelve: bool) -> String {
+    let command = if redo { "redo" } else { "undo" };
+    let (what, aside) = if shelve {
+        (
+            "Files Opalro ignores, or unsaved links that could come back only as plain files, are",
+            ", and --shelve can't set them aside",
+        )
+    } else {
+        ("Your unsaved changes, or files Opalro ignores, are", "")
+    };
+    format!(
+        "{what} where the {command} would write{aside}, so that step changed nothing:{}",
+        listed(paths.iter().take(NAMED), paths.len() as u64)
+    )
+}
+
+/// Moves the project to `target`. Unsaved work the switch would overwrite stops it before
+/// anything changes; the rest stays in the folder. `git_excludes` is the user's own Git ignore
+/// list, read as a save reads it. Files another program holds stop it with `SwitchInUse`, the
+/// journal kept for the next command to finish.
+pub fn goto(
+    repo: &mut Repository,
+    target: &Target,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    on_wait: &mut dyn FnMut(&str),
+) -> Result<GotoOutcome, SwitchError> {
+    locked(repo, command, on_wait, |repo, lock, earlier, _| {
+        go(repo, lock, target, who, command, git_excludes, earlier)
+    })
+}
+
+/// Makes `paths` (project paths, a folder standing for everything in it), or the whole folder
+/// without any, match the save the project is on: changed and deleted files put back, new ones
+/// removed, with a safety copy of what each changed or new one held (decision 050). The project
+/// stays on its save; its diary entry records the switch from a save of what was thrown away.
+/// Ignored files, project links, entries kept unwritten and nested projects are never touched,
+/// nor are unsaved links that could come back only as files. Files in use stop it as they stop
+/// `goto`. `git_excludes` is read as `goto` reads it.
+pub fn discard(
+    repo: &mut Repository,
+    paths: Option<&[String]>,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    on_wait: &mut dyn FnMut(&str),
+) -> Result<DiscardOutcome, SwitchError> {
+    locked(repo, command, on_wait, |repo, lock, earlier, _| {
+        throw_away(repo, lock, paths, who, command, git_excludes, earlier)
+    })
+}
+
+/// Runs `f` under the lock for changes, once a switch that was stopped is finished; `f` is told
+/// whether there was one.
+pub(crate) fn locked<T>(
+    repo: &mut Repository,
+    command: &str,
+    on_wait: &mut dyn FnMut(&str),
+    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier, bool) -> Result<T, SwitchError>,
+) -> Result<T, SwitchError> {
+    let lock = repo.lock_for_change(command, on_wait)?;
+    let mut earlier = Earlier::default();
+    let mut finished = false;
+    // Kept with the store's warnings, so it is told even if the command then fails.
+    if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
+        for w in done.warnings {
+            if !LISTED.contains(&w.kind) {
+                repo.store().note(w);
+            }
+        }
+        earlier = Earlier {
+            placeholders: done.placeholders,
+            not_written: done.not_written,
+        };
+        finished = true;
+    }
+    let result = f(repo, &lock, &mut earlier, finished);
+    // What a command that stopped early didn't take into its own warnings.
+    for w in earlier.warnings() {
+        repo.store().note(w);
+    }
+    result
+}
+
+/// What `discard` or `shelf` throws away, planned under the lock.
+pub(crate) struct Away {
+    /// The diary entry `head` names, and its ID.
+    pub head: Id,
+    pub entry: DiaryEntry,
+    /// The save the project is on.
+    pub from: Id,
+    pub drive: Drive,
+    /// A switch to `from` that removes new files too, without the links left.
+    pub plan: Plan,
+    /// Unsaved links left as they are, since they could come back only as files.
+    pub links_left: Vec<String>,
+}
+
+/// Plans throwing away the unsaved work at `paths` (a folder standing for everything in it), or
+/// everywhere without any, as `discard` and `shelf` do. Something in the way of what goes back
+/// stops it, and so does a path that names nothing, or more than one saved entry. Unsaved links
+/// that could come back only as files are left out, told of by `left_warning`.
+pub(crate) fn plan_away(
+    repo: &Repository,
+    paths: Option<&[String]>,
+    command: &str,
+    git_excludes: Option<&Path>,
+    left_warning: fn(&[String]) -> Warning,
+) -> Result<Away, SwitchError> {
+    let (head, entry) = repo.current()?;
+    let from = tip_of(&entry)?;
+    let drive = repo.drive()?;
+    // A switch to the save the folder is on that removes new files too.
+    let mut plan = writeout::plan(repo, from, from, paths, true, drive, git_excludes)?;
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::InTheWay {
+            paths: plan.collisions,
+            command: command.to_owned(),
+        });
+    }
+    for path in paths.unwrap_or_default().iter().filter(|p| !p.is_empty()) {
+        let spellings = writeout::spellings(repo, from, path, drive)?;
+        if spellings.len() > 1 {
+            return Err(SwitchError::Ambiguous {
+                path: path.clone(),
+                spellings,
+            });
+        }
+        let top = drive.compared(path);
+        let reached = plan
+            .actions
+            .iter()
+            .any(|a| within(&drive.compared(&a.path), &top));
+        if !reached && spellings.is_empty() {
+            return Err(SwitchError::NoMatch { path: path.clone() });
+        }
+    }
+    let links_left = kept::links_to_leave(repo, &plan.actions, from, drive)?;
+    if !links_left.is_empty() {
+        let stays = kept::goes_with(links_left.iter().map(String::as_str), drive);
+        plan.actions.retain(|a| !stays(&a.path));
+        plan.placeholders.retain(|p| !stays(p));
+        plan.warnings.push(left_warning(&links_left));
+    }
+    Ok(Away {
+        head,
+        entry,
+        from,
+        drive,
+        plan,
+        links_left,
+    })
+}
+
+fn throw_away(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    paths: Option<&[String]>,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    earlier: &mut Earlier,
+) -> Result<DiscardOutcome, SwitchError> {
+    let away = plan_away(repo, paths, command, git_excludes, links_left_warning)?;
+    let Away {
+        head,
+        entry,
+        from,
+        drive,
+        plan,
+        links_left,
+    } = away;
+    let (mut restored, mut removed, mut folders) = (Vec::new(), Vec::new(), 0);
+    for a in &plan.actions {
+        // A file or link the folder held at this path is thrown away, whatever replaces it.
+        let held_file = a.expected.is_some_and(|e| e.kind != EntryKind::Folder);
+        match a.change {
+            Change::File(_) | Change::Executable(_) | Change::Link(_) => {
+                restored.push(a.path.clone());
+            }
+            Change::RemoveFile => removed.push(a.path.clone()),
+            Change::MakeFolder if held_file => removed.push(a.path.clone()),
+            Change::MakeFolder | Change::RemoveFolder => folders += 1,
+        }
+    }
+    if plan.actions.is_empty() {
+        return Ok(DiscardOutcome {
+            restored,
+            removed,
+            folders,
+            applied: switch_warnings(plan, Applied::default(), earlier),
+            safety_copies: 0,
+            folder_change: None,
+            links_left,
+        });
+    }
+    crate::fsio::act_point("discard:planned");
+    let kept_from = kept_on(&entry.state, from, command, paths.unwrap_or_default(), who);
+    let mut packs = repo.new_packs()?;
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &plan, from, from, &kept_from, drive, &mut packs)?;
+    let to_make = Switch {
+        head,
+        action: Action::Command,
+        state: entry.state.clone(),
+        folder_change,
+        plan,
+        drive,
+        packs,
+    };
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    // What had changed again since the plan stays as it is.
+    let done = |list: Vec<String>| -> Vec<String> {
+        list.into_iter()
+            .filter(|p| {
+                !applied
+                    .changed_since_plan
+                    .iter()
+                    .any(|left| within(p, left))
+            })
+            .collect()
+    };
+    Ok(DiscardOutcome {
+        restored: done(restored),
+        removed: done(removed),
+        folders,
+        applied,
+        safety_copies,
+        folder_change,
+        links_left,
+    })
+}
+
+/// Says unsaved links weren't thrown away.
+fn links_left_warning(paths: &[String]) -> Warning {
+    let list = listed(paths.iter().take(NAMED), paths.len() as u64);
+    let message = match paths.len() {
+        1 => format!(
+            "Didn't throw away 1 unsaved link: an undo could bring it back only as a plain file \
+             holding its target, {}:{list}\nDelete it yourself if you don't want it.",
+            why_links_stay(true)
+        ),
+        n => format!(
+            "Didn't throw away {n} unsaved links: an undo could bring them back only as plain \
+             files holding their targets, {}:{list}\nDelete them yourself if you don't want them.",
+            why_links_stay(false)
+        ),
+    };
+    Warning::new(warning::LINKS_LEFT, message)
+}
+
+fn go(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    target: &Target,
+    who: &Person,
+    command: &str,
+    git_excludes: Option<&Path>,
+    earlier: &mut Earlier,
+) -> Result<GotoOutcome, SwitchError> {
+    let (head, entry) = repo.current()?;
+    let from = tip_of(&entry)?;
+    // Read again under the lock: another command may have moved the line.
+    let (position, to) = match target {
+        Target::Line(line) => match entry.state.lines.get(line) {
+            Some(save) => (Position::OnLine(line.clone()), *save),
+            None => return Err(ResolveError::NotFound(line.clone()).into()),
+        },
+        Target::ServerLine { server, line, .. } => {
+            let servers = repo.server_lines(&entry.state)?;
+            match servers
+                .servers
+                .get(server)
+                .and_then(|lines| lines.get(line))
+            {
+                Some(save) => (Position::AtSave(*save), *save),
+                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
+            }
+        }
+        Target::Save(save) => (Position::AtSave(*save), *save),
+    };
+    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::Collisions {
+            paths: plan.collisions,
+        });
+    }
+    let mut state = entry.state.clone();
+    state.position = position.clone();
+    if state == entry.state && plan.actions.is_empty() {
+        // Already there: nothing to record, and nothing came along.
+        return Ok(GotoOutcome {
+            position,
+            save: to,
+            applied: switch_warnings(plan, Applied::default(), earlier),
+            safety_copies: 0,
+            carried: 0,
+            recorded: false,
+        });
+    }
+    let carried = plan.carried;
+    let mut packs = repo.new_packs()?;
+    let kept_from = kept_on(&entry.state, from, command, &[], who);
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &plan, from, to, &kept_from, drive, &mut packs)?;
+    let to_make = Switch {
+        head,
+        action: Action::Command,
+        state,
+        folder_change,
+        plan,
+        drive,
+        packs,
+    };
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    Ok(GotoOutcome {
+        position,
+        save: to,
+        applied,
+        safety_copies,
+        carried,
+        recorded: true,
+    })
+}
+
+/// What finishing a stopped switch, or a switch a file in use stopped, left unwritten or wrote as
+/// placeholders, told together with what the command itself does.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Earlier {
+    pub(crate) placeholders: Vec<String>,
+    pub(crate) not_written: Vec<String>,
+}
+
+impl Earlier {
+    /// Its warnings, once: what it holds is taken.
+    fn warnings(&mut self) -> Vec<Warning> {
+        let placeholders = std::mem::take(&mut self.placeholders);
+        let not_written = std::mem::take(&mut self.not_written);
+        let mut warnings = Vec::new();
+        if !not_written.is_empty() {
+            warnings.push(writeout::not_written_warning(&not_written));
+        }
+        if !placeholders.is_empty() {
+            warnings.push(writeout::placeholders_warning(&placeholders));
+        }
+        warnings
+    }
+}
+
+/// Who makes the kept saves of a switch from `from`, the save the folder is on in `state`, and
+/// what they say.
+pub(crate) fn kept_on<'a>(
+    state: &'a State,
+    from: Id,
+    command: &str,
+    paths: &[String],
+    who: &'a Person,
+) -> KeptFrom<'a> {
+    KeptFrom {
+        base: from,
+        message: kept::message(command, paths),
+        who,
+        line: match &state.position {
+            Position::OnLine(line) => Some(line.as_str()),
+            Position::AtSave(_) => None,
+        },
+    }
+}
+
+/// A switch planned, ready to be made.
+pub(crate) struct Switch {
+    /// The diary entry `head` names.
+    pub head: Id,
+    /// What the switch's diary entry records: a command, an undo or a redo.
+    pub action: Action,
+    /// The state the switch's diary entry records.
+    pub state: State,
+    pub folder_change: Option<FolderChange>,
+    pub plan: Plan,
+    pub drive: Drive,
+    /// What is stored with its diary entry.
+    pub packs: PackSet,
+}
+
+/// Makes a planned switch in this order: its packs and diary entry are stored, then
+/// the journal written, the folder changed, `head` moved and the journal removed. A crash at any
+/// step leaves what the next changing command finishes, and so do files another program holds,
+/// which stop it with `SwitchInUse` after its warnings are noted, but for what it left unwritten
+/// or wrote as placeholders, which goes back to `earlier`. Gives what was done.
+pub(crate) fn switch(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    s: Switch,
+    who: &Person,
+    command: &str,
+    earlier: &mut Earlier,
+) -> Result<Applied, SwitchError> {
+    let entry = DiaryEntry {
+        parent: Some(s.head),
+        action: s.action,
+        command: command.to_owned(),
+        who: who.clone(),
+        opal_version: env!("CARGO_PKG_VERSION").into(),
+        state: s.state,
+        folder_change: s.folder_change,
+    };
+    let target = repo.store_entry(lock, s.packs, &entry)?;
+    let journal = Journal {
+        target,
+        from: s.head,
+        actions: s.plan.actions.clone(),
+    };
+    journal.write(repo, lock)?;
+    let applied = writeout::carry_out(repo, lock, &journal, s.drive)?;
+    crate::merge::merge_after_commit(repo, lock);
+    let applied = switch_warnings(s.plan, applied, earlier);
+    if !applied.in_use.is_empty() {
+        let detail = applied
+            .warnings
+            .iter()
+            .find(|w| w.kind == warning::FILES_IN_USE)
+            .map(|w| w.message.clone())
+            .unwrap_or_default();
+        // Told once with the rest of the command's, the steps an `undo 2` took before included.
+        earlier.placeholders = applied.placeholders;
+        earlier.not_written = applied.not_written;
+        for w in applied.warnings {
+            if !LISTED.contains(&w.kind) {
+                repo.store().note(w);
+            }
+        }
+        return Err(RepoError::SwitchInUse { detail }.into());
+    }
+    Ok(applied)
+}
+
+/// `applied` with the plan's warnings first, then one warning for every entry left unwritten
+/// and one for every link written as a file, wherever the list came from: `earlier`, the plan,
+/// or carrying it out.
+pub(crate) fn switch_warnings(plan: Plan, mut applied: Applied, earlier: &mut Earlier) -> Applied {
+    let merged = |mut a: Vec<String>, b: &mut Vec<String>, c: &mut Vec<String>| {
+        a.append(b);
+        a.append(c);
+        a.sort_unstable();
+        a.dedup();
+        a
+    };
+    applied.not_written = merged(
+        plan.not_written,
+        &mut earlier.not_written,
+        &mut applied.not_written,
+    );
+    applied.placeholders = merged(
+        plan.placeholders,
+        &mut earlier.placeholders,
+        &mut applied.placeholders,
+    );
+    let mut warnings = plan.warnings;
+    if !applied.not_written.is_empty() {
+        warnings.push(writeout::not_written_warning(&applied.not_written));
+    }
+    if !applied.placeholders.is_empty() {
+        warnings.push(writeout::placeholders_warning(&applied.placeholders));
+    }
+    let own = applied.warnings.drain(..);
+    warnings.extend(own.filter(|w| !LISTED.contains(&w.kind)));
+    applied.warnings = warnings;
+    applied
+}
+
+#[cfg(test)]
+mod tests;

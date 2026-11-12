@@ -55,11 +55,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "bolt-vcs-core"
+name = "opal-vcs-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bolt-vcs-platform",
+ "opal-vcs-platform",
  "directories",
  "encoding_rs",
  "getrandom",
@@ -76,16 +76,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "bolt-vcs-fuzz"
+name = "opal-vcs-fuzz"
 version = "0.0.0"
 dependencies = [
- "bolt-vcs-core",
+ "opal-vcs-core",
  "libfuzzer-sys",
  "tempfile",
 ]
 
 [[package]]
-name = "bolt-vcs-platform"
+name = "opal-vcs-platform"
 version = "0.1.0"
 dependencies = [
  "libc",

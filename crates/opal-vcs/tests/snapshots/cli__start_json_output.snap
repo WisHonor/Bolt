@@ -1,0 +1,37 @@
+---
+source: crates/opal-vcs/tests/cli.rs
+expression: json
+---
+{
+  "opal_json": 1,
+  "found": {
+    "engines": [],
+    "languages": []
+  },
+  "position": {
+    "line": "main"
+  },
+  "preset": "custom",
+  "root": "[redacted]",
+  "rules_written": [],
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Start project",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": []
+}

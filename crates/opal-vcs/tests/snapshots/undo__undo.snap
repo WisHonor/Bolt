@@ -1,0 +1,39 @@
+---
+source: crates/opal-vcs/tests/undo.rs
+expression: "doc(&[\"undo\"])"
+---
+{
+  "opal_json": 1,
+  "finished": false,
+  "position": {
+    "line": "main"
+  },
+  "shelved": [],
+  "undone": [
+    {
+      "action": "undo",
+      "command": "goto",
+      "effects": [
+        {
+          "from": {
+            "save": "[redacted]"
+          },
+          "kind": "position",
+          "to": {
+            "line": "main"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "removed": 0,
+      "time_ms": "[redacted]",
+      "written": 3
+    }
+  ],
+  "warnings": []
+}

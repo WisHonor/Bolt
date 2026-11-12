@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # Tries a release program on a FAT32 and an exFAT drive (a loop file each, mounted for this
-# user), in a folder and at the top. Prints what Bolt says; a refusal is written down, not a
+# user), in a folder and at the top. Prints what Opalro says; a refusal is written down, not a
 # failure. Fails only if a try can't be set up.
-# Usage: ordinary-computers.sh <bolt>
+# Usage: ordinary-computers.sh <opal>
 set -euo pipefail
 
-bolt=$1
+opal=$1
 work=$(mktemp -d)
-export BOLT_CONFIG_DIR="$work/config"
-config="$BOLT_CONFIG_DIR/config.toml"
+export OPAL_CONFIG_DIR="$work/config"
+config="$OPAL_CONFIG_DIR/config.toml"
 user='[user]
 name = "Ana Lima"
 email = "ana@example.com"'
-unset BOLT_USER_NAME BOLT_USER_EMAIL
-mkdir "$BOLT_CONFIG_DIR"
+unset OPAL_USER_NAME OPAL_USER_EMAIL
+mkdir "$OPAL_CONFIG_DIR"
 
-# Runs bolt and prints all it said and its exit code; what it said is also in $work/said.
-try_bolt() {
-  echo "> bolt $*"
+# Runs opal and prints all it said and its exit code; what it said is also in $work/said.
+try_opal() {
+  echo "> opal $*"
   local s=0
-  "$bolt" "$@" > "$work/said" 2>&1 || s=$?
+  "$opal" "$@" > "$work/said" 2>&1 || s=$?
   sed 's/^/  /' "$work/said"
   echo "  (exit $s)"
 }
@@ -28,23 +28,23 @@ try_bolt() {
 # goes to $work/case.
 use_project() {
   cd "$1"
-  try_bolt start --preset custom
+  try_opal start --preset custom
   cat "$work/said" > "$work/case"
   echo one > a.txt
-  try_bolt save First
+  try_opal save First
   cat "$work/said" >> "$work/case"
   echo two > a.txt
-  try_bolt save Second
-  try_bolt history --json
+  try_opal save Second
+  try_opal history --json
   first=$(jq -r '.saves[1].change_id // empty' "$work/said" 2> /dev/null || true)
   if [ -n "$first" ]; then
-    try_bolt goto "$first"
+    try_opal goto "$first"
     echo "  a.txt now holds: $(cat a.txt)"
   fi
-  try_bolt verify
+  try_opal verify
 }
 
-# The case, then, if Bolt offered a safe-folders line, the case again with that line added.
+# The case, then, if Opalro offered a safe-folders line, the case again with that line added.
 try_case() {
   echo
   echo "::group::$1 ($2)"
@@ -57,7 +57,7 @@ try_case() {
     printf '%s\n%s\n' "$line" "$user" > "$config"
     use_project "$2"
   else
-    echo "-- Bolt offered no safe-folders line"
+    echo "-- Opalro offered no safe-folders line"
   fi
   cd "$work"
   echo "::endgroup::"

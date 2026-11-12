@@ -1,14 +1,14 @@
 #![no_main]
 use std::collections::HashSet;
 
-use bolt_core::diary::validate_line_name;
-use bolt_core::git::craft::Craft;
-use bolt_core::git::{HashKind, Repo};
-use bolt_core::import::{Rules, rename};
+use opal_core::diary::validate_line_name;
+use opal_core::git::craft::Craft;
+use opal_core::git::{HashKind, Repo};
+use opal_core::import::{Rules, rename};
 use libfuzzer_sys::fuzz_target;
 
 // The input as `packed-refs` beside a good `HEAD`, then split: its first line as `HEAD`, the rest
-// as `packed-refs`. The branches found are renamed as an import renames them, into names Bolt
+// as `packed-refs`. The branches found are renamed as an import renames them, into names Opalro
 // takes, no two alike but for letter case.
 fuzz_target!(|data: &[u8]| {
     let Ok(dir) = tempfile::tempdir() else { return };

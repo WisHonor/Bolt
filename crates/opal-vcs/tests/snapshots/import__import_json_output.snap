@@ -1,0 +1,60 @@
+---
+source: crates/opal-vcs/tests/import.rs
+expression: json
+---
+{
+  "opal_json": 1,
+  "commits": 2,
+  "inexact_commits": 1,
+  "inexact_lfs_pointers": 0,
+  "lfs_commits": 0,
+  "lfs_files": {
+    "bytes": 0,
+    "count": 0
+  },
+  "lines": 2,
+  "position": {
+    "line": "main"
+  },
+  "renamed": [
+    {
+      "opal": "feature-x",
+      "git": "feature+x",
+      "kind": "line"
+    }
+  ],
+  "server_lines": 1,
+  "servers": 1,
+  "skipped_entries": {
+    "count": 1,
+    "first": [
+      {
+        "commit": "37c94309676b7d12b75fc0032539494aca56a0db",
+        "path": "sub/.opal"
+      }
+    ]
+  },
+  "skipped_refs": {
+    "count": 1,
+    "first": [
+      "refs/notes/commits"
+    ]
+  },
+  "skipped_tags": [
+    {
+      "git": "folder",
+      "reason": "it tags a folder (a Git tree), not a commit"
+    }
+  ],
+  "tags": 1,
+  "warnings": [
+    {
+      "kind": "nested_opal_folder",
+      "message": "Git checked out a folder named .opal at `sub/.opal`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it."
+    },
+    {
+      "kind": "grafts_ignored",
+      "message": "Git's grafts file was ignored; Opalro imported the commits as they are."
+    }
+  ]
+}

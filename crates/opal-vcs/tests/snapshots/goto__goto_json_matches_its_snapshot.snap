@@ -1,0 +1,36 @@
+---
+source: crates/opal-vcs/tests/goto.rs
+expression: doc
+---
+{
+  "opal_json": 1,
+  "not_written": [],
+  "placeholders": [],
+  "position": {
+    "line": "feature"
+  },
+  "recorded": true,
+  "removed": 2,
+  "safety_copies": 0,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": null,
+    "message": "Feature\n",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": [],
+  "written": 2
+}

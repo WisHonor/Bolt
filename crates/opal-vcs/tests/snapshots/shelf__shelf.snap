@@ -1,0 +1,18 @@
+---
+source: crates/opal-vcs/tests/shelf.rs
+expression: "doc(&[\"shelf\", \"Mine\"])"
+---
+{
+  "opal_json": 1,
+  "changed_again": false,
+  "not_written": [],
+  "placeholders": [],
+  "removed": 3,
+  "shelf": {
+    "files": 5,
+    "label": "1",
+    "save": "[redacted]"
+  },
+  "warnings": [],
+  "written": 3
+}

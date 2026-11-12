@@ -1,0 +1,10 @@
+# Opalro project rules, written by the Code preset (version 1).
+# This file is the project's rules: edit it freely. `opal setup` shows how Opalro reads it.
+preset = "code"
+
+# A file of this size or more is stored in chunks, so a changed part is stored once.
+chunk-files-over = "1 MiB"
+
+# A save that adds more than this, in new bytes or in new files, asks first.
+ask-before-saving-over = "100 MB"
+ask-before-saving-files-over = 10000

@@ -1,9 +1,9 @@
 #![no_main]
-use bolt_core::git::craft::Craft;
-use bolt_core::git::{HashKind, Repo};
+use opal_core::git::craft::Craft;
+use opal_core::git::{HashKind, Repo};
 use libfuzzer_sys::fuzz_target;
 
-// The input as `.git/config`, and as `config.worktree`, which Bolt reads too when the config
+// The input as `.git/config`, and as `config.worktree`, which Opalro reads too when the config
 // turns on `extensions.worktreeConfig`.
 fuzz_target!(|data: &[u8]| {
     let Ok(dir) = tempfile::tempdir() else { return };

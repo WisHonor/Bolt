@@ -1,0 +1,18 @@
+---
+source: crates/opal-vcs/tests/discard.rs
+expression: "discard_json(&env, &[])"
+---
+{
+  "opal_json": 1,
+  "folders": 0,
+  "not_written": [],
+  "placeholders": [],
+  "removed_paths": [
+    "n.txt"
+  ],
+  "restored_paths": [
+    "a.txt"
+  ],
+  "safety_copies": 2,
+  "warnings": []
+}

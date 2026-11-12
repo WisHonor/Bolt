@@ -1,4 +1,4 @@
-# Red-team sandbox (decision 024): Bolt and attack code run here, never on the host.
+# Red-team sandbox (decision 024): Opalro and attack code run here, never on the host.
 FROM rust:1.99.1-slim-bookworm
 RUN rustup component add rustfmt clippy \
     && apt-get update && apt-get install -y --no-install-recommends git git-lfs python3 \

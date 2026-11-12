@@ -1,12 +1,12 @@
-Bolt
+Opalro
 
 Copyright (c) 2026 [BLANK: name or company]. All rights reserved.
 
-Bolt is closed source. The user agreement that comes with each build of
-Bolt, USER-AGREEMENT.md, is what lets a person use it. Nobody may copy,
-change, pass on or take apart Bolt, or any part of it, except as that
+Opalro is closed source. The user agreement that comes with each build of
+Opalro, USER-AGREEMENT.md, is what lets a person use it. Nobody may copy,
+change, pass on or take apart Opalro, or any part of it, except as that
 agreement allows.
 
-Bolt is built with code that other people wrote. That code stays under
+Opalro is built with code that other people wrote. That code stays under
 its own licenses, listed in the notices that come with each build:
 THIRD-PARTY-LICENSES.html and THIRD-PARTY-LICENSES-RUST.html.

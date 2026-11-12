@@ -1,21 +1,21 @@
-# Bolt Milestones
+# Opalro Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). **Milestone 6 was planned on 2026-11-09 and 2026-11-10**: two sessions build it at once, one for presets and polish (decided on 2026-11-09, decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md), plan [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md)) and one for speed and space; each lists its steps below. **Milestone 6 is done** (2026-11-10): both halves were built on 2026-11-10, with decisions [104](decisions/104-an-import-keeps-96-mib-of-rebuilt-objects.md) to [110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md), [124](decisions/124-restore-is-explained-and-a-shortcut-takes-nothing-for-what-it-isnt.md) and [125](decisions/125-a-safe-folders-entry-is-judged-by-one-look.md) made while building them; each half's two red-team sessions are done and their findings fixed (decisions [111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md), [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md), [126](decisions/126-verify-also-finds-a-save-that-cant-be-written-out.md) and [127](decisions/127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md)), each half's whole-branch review is done, and both were merged into `main`, speed and space first (pull request #27) and presets and polish second (#28), once the two had been measured together ([benchmarks.md](benchmarks.md) §9); rulings: [plans/2026-11-10-milestone-6-rulings.md](plans/2026-11-10-milestone-6-rulings.md) and [plans/2026-11-10-milestone-6-speed-rulings.md](plans/2026-11-10-milestone-6-speed-rulings.md). **v0.1 itself has not shipped:** two sessions prepared it on 2026-11-11 ("Release: v0.1" below): the third speed gate passes under its new rule (decisions [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) and [132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)), Bolt is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)), and publishing the release is the owner's. Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). **Milestone 6 was planned on 2026-11-09 and 2026-11-10**: two sessions build it at once, one for presets and polish (decided on 2026-11-09, decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md), plan [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md)) and one for speed and space; each lists its steps below. **Milestone 6 is done** (2026-11-10): both halves were built on 2026-11-10, with decisions [104](decisions/104-an-import-keeps-96-mib-of-rebuilt-objects.md) to [110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md), [124](decisions/124-restore-is-explained-and-a-shortcut-takes-nothing-for-what-it-isnt.md) and [125](decisions/125-a-safe-folders-entry-is-judged-by-one-look.md) made while building them; each half's two red-team sessions are done and their findings fixed (decisions [111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md), [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md), [126](decisions/126-verify-also-finds-a-save-that-cant-be-written-out.md) and [127](decisions/127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md)), each half's whole-branch review is done, and both were merged into `main`, speed and space first (pull request #27) and presets and polish second (#28), once the two had been measured together ([benchmarks.md](benchmarks.md) §9); rulings: [plans/2026-11-10-milestone-6-rulings.md](plans/2026-11-10-milestone-6-rulings.md) and [plans/2026-11-10-milestone-6-speed-rulings.md](plans/2026-11-10-milestone-6-speed-rulings.md). **v0.1 itself has not shipped:** two sessions prepared it on 2026-11-11 ("Release: v0.1" below): the third speed gate passes under its new rule (decisions [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) and [132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)), Opalro is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)), and publishing the release is the owner's. Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
 
 ## v0.1: solo, local, games first
 
 | # | Milestone | Done when |
 |---|---|---|
-| 1 | **First save** ✅ | `bolt start`, `bolt save`, `bolt history` and `bolt show` work end to end on real projects, on the real formats, on all three systems |
-| 2 | **Coming from Git** ✅ | `bolt import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
+| 1 | **First save** ✅ | `opal start`, `opal save`, `opal history` and `opal show` work end to end on real projects, on the real formats, on all three systems |
+| 2 | **Coming from Git** ✅ | `opal import` brings in a Git repository's history (every branch and tag, in place next to `.git/`), and differential tests compare every commit with Git; the owner has imported one of their own repositories and tried a project inside a OneDrive folder ([decision 026](decisions/026-ownership-check-details.md) #4) |
 | 3 | **Working folder** ✅ | `status` (with the file-state cache), `changes`, `goto`, `discard`, partial saves, safety copies, and basic lines: saving after `goto` creates one, `line` lists them, `goto <line>` switches; merge small packs and open packs lazily before real use (each save adds a pack, and every pack stays open) |
 | 4 | **Undo everything** ✅ | The diary drives `undo`, `redo`, `undo --list` and `undo --to`; crash recovery; `tidy`; `shelf`/`unshelf` and `save --amend` ([decision 021](decisions/021-v0.1-command-scope.md)) |
 | 5 | **Big files** ✅ | Chunking, streaming, parallel hashing, Git LFS import (contents must be on disk, [decision 020](decisions/020-lfs-import.md)), and benchmarks against Git LFS |
-| 6 | **Presets and polish → v0.1** | The `bolt start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `bolt setup`; Git-word shortcuts; `--json`; `verify`; packaging |
+| 6 | **Presets and polish → v0.1** | The `opal start` screen with the Code, Game (Unity, Unreal, Godot) and Custom presets; `opal setup`; Git-word shortcuts; `--json`; `verify`; packaging |
 
 **Every milestone also ends with a red-team session** ([decision 024](decisions/024-red-team-gate.md)): a fresh agent attacks the milestone's code from an isolated sandbox, and every proven finding is fixed (or ruled on in writing) before the milestone is merged. Milestone 1 had two sessions, on 2026-11-01 and (on the fixes) 2026-11-02; every finding is fixed. Milestone 2 had two as well, both on 2026-11-03, the second on the fixes; every proven finding is fixed or ruled on in writing (decisions 043 and 044). Milestone 3 had two, both on 2026-11-06 (decisions 067 to 069), milestone 4 two, both on 2026-11-08 (decisions 079 and 080), and milestone 5 two, both on 2026-11-09 (decisions 094 to 098). Milestone 6 had two for each of its halves, all on 2026-11-10 (decisions 111, 112, 126 and 127).
 
-**v0.1 ships when** every test passes on the three systems, the speed gates below pass, no code that follows another project's code is left in Bolt ([the code audit](releases/v0.1.0-code-audit.md)) apart from the platform crate's part that follows Rust's standard library under its license, on which, by the owner's rule, the release build waits for the owner's word ([decision 131](decisions/131-code-that-follows-another-projects-is-rewritten-clean.md)), and the owner publishes it. The speed gates, which the nightly jobs check exactly as written here:
+**v0.1 ships when** every test passes on the three systems, the speed gates below pass, no code that follows another project's code is left in Opalro ([the code audit](releases/v0.1.0-code-audit.md)) apart from the platform crate's part that follows Rust's standard library under its license, on which, by the owner's rule, the release build waits for the owner's word ([decision 131](decisions/131-code-that-follows-another-projects-is-rewritten-clean.md)), and the owner publishes it. The speed gates, which the nightly jobs check exactly as written here:
 
 - **Memory** ([decision 023](decisions/023-v0.1-speed-bar.md)): saving a 10 GB file peaks at no more than 500,000,000 bytes, on GitHub's Linux runner.
 - **Status** (decisions [023](decisions/023-v0.1-speed-bar.md) and [129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)): `status` on an unchanged 100,000-file project takes under 2 seconds, both times it is run, on GitHub's Linux runner.
@@ -47,7 +47,7 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 **3. Names and paths**
 - Decision 004's always-on name rules and the portability check, in one module. The Windows rules are checked against Microsoft's documentation first.
-- *Done when:* table-driven tests cover every rule, including Windows device names, `.bolt` spellings and case or Unicode collisions; a fuzz target runs.
+- *Done when:* table-driven tests cover every rule, including Windows device names, `.opal` spellings and case or Unicode collisions; a fuzz target runs.
 
 **4. Folder listings**
 - Encode, decode and validate (storage-format.md §3).
@@ -63,23 +63,23 @@ Each step is small and ends with tests passing on Windows, macOS and Linux. Step
 
 **7. Object store**
 - Store, fetch and check objects across many packs, skip objects that are already stored. The lookup index lives in memory for now (rebuilt when the store opens); storing it in `cache/` waits until measurements show a need.
-- An internal integrity check that walks every pack and object: the core of the later `bolt verify` command (milestone 6), used by tests from now on.
+- An internal integrity check that walks every pack and object: the core of the later `opal verify` command (milestone 6), used by tests from now on.
 - *Done when:* property tests with random stores and fetches pass; the integrity check catches every corruption the pack tests introduce.
 
 **8. Diary, head and the lock**
 - Encode and decode diary entries (§9); replace `state/head` atomically; take the OS lock for changing commands, with the "waiting" message.
 - *Done when:* a crash between writing the pack and moving `head` leaves the repository exactly as before; two changing commands run one after the other; read-only commands never wait.
 
-**9. `bolt start`**
-- Create `.bolt/` (the format file, the folders, hidden on Windows), the empty first save and the line `main`, recorded in the first diary entry; refuse to start inside another project. No presets yet (milestone 6).
+**9. `opal start`**
+- Create `.opal/` (the format file, the folders, hidden on Windows), the empty first save and the line `main`, recorded in the first diary entry; refuse to start inside another project. No presets yet (milestone 6).
 - *Done when:* CLI tests pass on all three systems, and opening a repository with an unknown feature is refused with a clear message.
 
-**10. `bolt save`**
-- Walk the folder (respecting `.boltignore`, skipping `.bolt/`), store every file whole (streamed, never loaded fully into memory; chunking arrives in milestone 5 and changes no IDs), build folder listings from the bottom up, and write the save and its diary entry in one pack.
+**10. `opal save`**
+- Walk the folder (respecting `.opalignore`, skipping `.opal/`), store every file whole (streamed, never loaded fully into memory; chunking arrives in milestone 5 and changes no IDs), build folder listings from the bottom up, and write the save and its diary entry in one pack.
 - Record executable flags, symlinks and empty folders; refuse non-portable new names (decision 004); say so when nothing changed.
 - *Done when:* every saved file reads back byte-identically from the store; a property test with random folders passes; the malicious-name cases are refused.
 
-**11. `bolt history` and `bolt show`**
+**11. `opal history` and `opal show`**
 - `history` lists the saves on the current line (change ID, time, author, message). `show` lists what a save changed: added, removed and modified files with their sizes. Line-by-line differences come in milestone 3.
 - *Done when:* snapshot tests cover the output for people and the `--json` output.
 
@@ -116,7 +116,7 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
 - *Done when:* every refusal, limit and parser has a test, and the reader never panics on truncated or crafted input.
 
 **5. Import** ✅ (Tasks 12–14)
-- `bolt import`: commits become saves exactly and repeatably (decision 032), branches lines and server lines (033), tags kept exactly (034), dangerous names skipped (035), submodules bare links (036), LFS repositories refused until milestone 5 (037), one-time for now (040).
+- `opal import`: commits become saves exactly and repeatably (decision 032), branches lines and server lines (033), tags kept exactly (034), dangerous names skipped (035), submodules bare links (036), LFS repositories refused until milestone 5 (037), one-time for now (040).
 - The first save after an import stops at line endings Git converted (decision 039).
 - *Done when:* importing a repository twice, anywhere, gives the same saves, and an interrupted import can be run again.
 
@@ -134,26 +134,26 @@ Each step ends with tests passing on Windows, macOS and Linux; the plan's task n
 - *Done when:* every proven finding is fixed or ruled on, and the owner has imported one of their own repositories and tried a project inside a OneDrive folder (decision 026 #4).
 
 **The owner's checks** (2026-11-04, with a release build of `main` at `aae2a08`)
-- **Importing one of the owner's repositories** (a copy of Tailrd: 1,517 commits, 112 branches, 12 server branches, no tags). The import matched Git's counts, listed the 2 refs it leaves out, and took 3.5 s. Every file in `.git` was byte for byte the same afterwards. `history` and `show` matched `git log --first-parent` and `git show`, and a second import refused. Before it ran, Bolt asked for a name and email; its hint now says to make the settings file and its folder.
+- **Importing one of the owner's repositories** (a copy of Tailrd: 1,517 commits, 112 branches, 12 server branches, no tags). The import matched Git's counts, listed the 2 refs it leaves out, and took 3.5 s. Every file in `.git` was byte for byte the same afterwards. `history` and `show` matched `git log --first-parent` and `git show`, and a second import refused. Before it ran, Opalro asked for a name and email; its hint now says to make the settings file and its folder.
   - The first save stopped at line endings, as decision 039 says: Git for Windows had written 1,492 of the 1,925 files with CRLF. The hint's three Git commands fixed it.
-  - It would then have taken what Git's personal ignore lists hide, since Bolt doesn't read them (decision 038). `.git/info/exclude` hides 44 Git worktrees under `.worktrees/`: 468,000 files and 14 GB on disk, of which the project's `.gitignore` files keep out only part (about 190,000 files and 11 GB stay, by a rough count). The import warned about that list. The global `~/.config/git/ignore` hides `.claude/settings.local.json`, which was saved without a word, since nothing warns about that list.
-  - With the exclude lines copied into `.boltignore`, as the warning says, the first save took exactly the 6 files Git showed as untracked, the new `.boltignore` and that settings file; all 1,925 imported files matched. Git's personal lists, and saving the contents of nested repositories and worktrees (decision 043), are the owner's questions in [the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
-- **A project inside OneDrive** (Files On-Demand on). `start`, eleven saves in a row, `history` and `show` worked, and OneDrive never held a file Bolt needed. After "Free up space" on a file and then on `.bolt`, every command still worked. Windows hides OneDrive's placeholders from programs like Bolt, which run in its "disguise placeholders" mode, so Bolt sees ordinary files, and reading an online-only file downloads it first ([security.md](security.md) §7).
+  - It would then have taken what Git's personal ignore lists hide, since Opalro doesn't read them (decision 038). `.git/info/exclude` hides 44 Git worktrees under `.worktrees/`: 468,000 files and 14 GB on disk, of which the project's `.gitignore` files keep out only part (about 190,000 files and 11 GB stay, by a rough count). The import warned about that list. The global `~/.config/git/ignore` hides `.claude/settings.local.json`, which was saved without a word, since nothing warns about that list.
+  - With the exclude lines copied into `.opalignore`, as the warning says, the first save took exactly the 6 files Git showed as untracked, the new `.opalignore` and that settings file; all 1,925 imported files matched. Git's personal lists, and saving the contents of nested repositories and worktrees (decision 043), are the owner's questions in [the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
+- **A project inside OneDrive** (Files On-Demand on). `start`, eleven saves in a row, `history` and `show` worked, and OneDrive never held a file Opalro needed. After "Free up space" on a file and then on `.opal`, every command still worked. Windows hides OneDrive's placeholders from programs like Opalro, which run in its "disguise placeholders" mode, so Opalro sees ordinary files, and reading an online-only file downloads it first ([security.md](security.md) §7).
 
 ## Milestone 3: Working folder
 
 Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md) (the owner decided 048; Claude decided the rest at the owner's request). Plan: [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (2026-11-06). Decisions [060](decisions/060-user-git-settings-includes-and-paths.md) to [069](decisions/069-the-file-cache-matches-the-change-time.md) were made while building it.
 
 **0. Folder handles** ✅ (Task 1)
-- Every read and write inside the project goes through a folder Bolt holds open, refusing a link at each name: `rustix` on macOS and Linux, Windows' own calls in the platform crate (decision 048).
+- Every read and write inside the project goes through a folder Opalro holds open, refusing a link at each name: `rustix` on macOS and Linux, Windows' own calls in the platform crate (decision 048).
 - *Done when:* the handle tests pass on all three systems, and the owner has reviewed the new `unsafe` code line by line.
 
 **1. Names and limits** ✅ (Task 2)
-- One module decides what may be written: `.git` and `.bolt` spellings everywhere, real short names, `\`, `:` and device names on Windows; names up to 765 bytes, paths up to 4,096 (decisions 051, 059).
+- One module decides what may be written: `.git` and `.opal` spellings everywhere, real short names, `\`, `:` and device names on Windows; names up to 765 bytes, paths up to 4,096 (decisions 051, 059).
 - *Done when:* each rule has a test, `COM0` and `LPT0` save and write on Windows, and the name fuzz target runs.
 
 **2. The walk through handles, and the owner check** ✅ (Tasks 3–4)
-- `save` walks and reads the folder through handles; link targets read on Windows are stored with `/` (decision 045); the owner check resolves the starting folder and refuses a `.bolt` that vanishes mid-check.
+- `save` walks and reads the folder through handles; link targets read on Windows are stored with `/` (decision 045); the owner check resolves the starting folder and refuses a `.opal` that vanishes mid-check.
 - *Done when:* a folder swapped for a link mid-save is refused, not followed.
 
 **3. Packs** ✅ (Tasks 5–6)
@@ -161,7 +161,7 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 - *Done when:* a planted index costs reads, not memory; a merge stopped at any step loses nothing.
 
 **4. Caches and `status`** ✅ (Tasks 7–10)
-- A keyed file-state cache and change-ID cache; `bolt status`; `save` skips files the cache vouches for (decision 053).
+- A keyed file-state cache and change-ID cache; `opal status`; `save` skips files the cache vouches for (decision 053).
 - *Done when:* a planted or edited cache is ignored, unchanged files aren't opened, and `status` on 100,000 unchanged files is measured.
 
 **5. Writing files** ✅ (Tasks 11–13)
@@ -169,7 +169,7 @@ Planned on 2026-11-05, after decisions [048](decisions/048-handle-relative-file-
 - *Done when:* a switch stopped at any write is finished by the next command, with every file wholly old or new.
 
 **6. `goto`, `discard` and lines** ✅ (Tasks 14–16)
-- `goto` with safety copies and collisions, `discard`, saving away from a line, `bolt line` (decisions 050, 055).
+- `goto` with safety copies and collisions, `discard`, saving away from a line, `opal line` (decisions 050, 055).
 - *Done when:* going to a line and back restores every file byte for byte.
 
 **7. Saves** ✅ (Tasks 17–18)
@@ -200,11 +200,11 @@ Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-th
 - *Done when:* a discard's kept save holds exactly what was thrown away, deletions and folders included, and the diary's test vectors match storage-format.md §9.
 
 **1. Undo and redo** ✅ (Tasks 3–5)
-- The done and undone steps worked out from the diary; `bolt undo [N]`, `bolt redo [N]`, `bolt undo --list [--all]` and `bolt undo --to <entry>` (decisions 070, 072).
+- The done and undone steps worked out from the diary; `opal undo [N]`, `opal redo [N]`, `opal undo --list [--all]` and `opal undo --to <entry>` (decisions 070, 072).
 - *Done when:* the step lists match a replay of the diary, undo and redo of every command put back exactly what it did, and unsaved work in the way stops them before anything changes.
 
 **2. Shelves and amend** ✅ (Tasks 6–7)
-- `bolt shelf`, `bolt unshelf`, `bolt shelf --list` and `bolt save --amend` (decisions 073, 074).
+- `opal shelf`, `opal unshelf`, `opal shelf --list` and `opal save --amend` (decisions 073, 074).
 - *Done when:* each case of the decisions has a test, and undo takes each of them back.
 
 **3. Crash recovery** ✅ (Tasks 8–9)
@@ -232,7 +232,7 @@ Planned on 2026-11-06, after decisions [070](decisions/070-undo-and-redo-step-th
 Planned on 2026-11-08, after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done (steps 0 to 3 on 2026-11-08, steps 4 to 8 on 2026-11-09). Decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) were made while building it.
 
 **0. Chunk lists and the cutter** ✅ (Task 1)
-- Bolt's own FastCDC cuts files of 1 MiB to 128 GiB into chunks of 16 KiB to 256 KiB; the chunk-list record is read and written (decision 082).
+- Opalro's own FastCDC cuts files of 1 MiB to 128 GiB into chunks of 16 KiB to 256 KiB; the chunk-list record is read and written (decision 082).
 - *Done when:* the vectors of storage-format.md §13 pass, and the record and the cutter have fuzz targets.
 
 **1. Chunked files in the store** ✅ (Task 2)
@@ -258,7 +258,7 @@ Planned on 2026-11-08, after decisions [082](decisions/082-how-big-files-are-cut
 - *Done when:* each passes on all three systems.
 
 **7. Gates and benchmarks** ✅ (Tasks 10–11)
-- *Done when:* both speed gates are measured, and `docs/benchmarks.md` compares Bolt with Git and Git LFS, whatever it shows (decisions 023, 087, 088).
+- *Done when:* both speed gates are measured, and `docs/benchmarks.md` compares Opalro with Git and Git LFS, whatever it shows (decisions 023, 087, 088).
 
 **8. Follow-ups and docs** ✅ (Tasks 12–13)
 - *Done when:* the follow-ups list and the docs match the code.
@@ -276,29 +276,29 @@ Two sessions built it at once, each with its own steps, decisions and red-team s
 Decided on 2026-11-09, in decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed), and its plan written on 2026-11-10: [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md).
 
 **0. What a terminal can show** ✅ (Tasks 1–2)
-- Bolt finds out, for stdout and stderr each, whether it has colour, symbols and a width; errors, hints and warnings are laid out by it; progress is a bar or a turning mark (decision 120). Colour works on Windows.
-- *Done when:* with a terminal faked, each role has its colour and each symbol its plain form; without one, Bolt's own words are as plain as before.
+- Opalro finds out, for stdout and stderr each, whether it has colour, symbols and a width; errors, hints and warnings are laid out by it; progress is a bar or a turning mark (decision 120). Colour works on Windows.
+- *Done when:* with a terminal faked, each role has its colour and each symbol its plain form; without one, Opalro's own words are as plain as before.
 
 **1. Change IDs in Jujutsu's letters** ✅ (Task 3)
 - *Done when:* an imported save shows the letters its commit's `change-id` header has (decision 122).
 
-**2. `bolt.toml`** ✅ (Task 4)
-- The chunk threshold and the large-save question's numbers are read from the folder's `bolt.toml`; what Bolt can't use is passed over with a warning (decision 114).
+**2. `opal.toml`** ✅ (Task 4)
+- The chunk threshold and the large-save question's numbers are read from the folder's `opal.toml`; what Opalro can't use is passed over with a warning (decision 114).
 - *Done when:* the vectors of storage-format.md §12 pass, a hostile file never stops a save, and a project without the file saves byte for byte as before.
 
 **3. Presets** ✅ (Tasks 5–7)
-- The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `bolt start`'s question and `--preset`, and `bolt setup` (decisions 113 and 115).
-- *Done when:* each preset writes its vector byte for byte, `bolt undo` after a start gives the folder back, and a preset switch can be undone and redone.
+- The presets' rules as data, a look at the folder to suggest one, the `setup` step that writes the two rule files, `opal start`'s question and `--preset`, and `opal setup` (decisions 113 and 115).
+- *Done when:* each preset writes its vector byte for byte, `opal undo` after a start gives the folder back, and a preset switch can be undone and redone.
 
 **4. Git's words** ✅ (Task 8)
-- *Done when:* each shortcut runs its Bolt command, each explained word changes nothing, and the hint shows once (decision 116).
+- *Done when:* each shortcut runs its Opalro command, each explained word changes nothing, and the hint shows once (decision 116).
 
-**5. `bolt verify`** ✅ (Task 9)
+**5. `opal verify`** ✅ (Task 9)
 - Every pack and object, then everything the project needs; `tidy` records the window it used (decisions 118 and 123).
 - *Done when:* every kind of damage the pack tests make is found, a deleted pack shows as what the project lacks, and a command running beside it never makes it report damage.
 
 **6. Every command in the new design** ✅ (Tasks 10–12)
-- *Done when:* each command's output follows terminal.md at 60, 80 and 120 columns, and every place the canvas and Bolt's facts disagree is written down.
+- *Done when:* each command's output follows terminal.md at 60, 80 and 120 columns, and every place the canvas and Opalro's facts disagree is written down.
 
 **7. Follow-ups** ✅ (Task 13)
 - The rows decision 123 marks "done in milestone 6".
@@ -336,7 +336,7 @@ Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-wi
 - *Done when:* an unchanged `status` leaves `cache/files` untouched, and a torn cache is ignored and rebuilt.
 
 **3. The walk** ✅ (2026-11-10)
-- Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.bolt` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
+- Ignore lines that are plain names are found by lookup, not by trying each; a folder is listed before it is asked for `.git`, `.opal` and ignore files ([decision 101](decisions/101-the-walk-lists-a-folder-before-it-looks-inside.md)); each name is handled without building its path three times.
 - *Done when:* the matcher agrees with Git and with its old self on random rules, and every walk test passes unchanged.
 
 **4. The store and the listings** ✅ (2026-11-10)
@@ -405,18 +405,18 @@ Planned on 2026-11-11: [plans/2026-11-11-v0.1-engine.md](plans/2026-11-11-v0.1-e
 
 ### The package
 
-The owner decided that Bolt is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)); the rest was decided on 2026-11-11 in decisions [141](decisions/141-the-user-agreement.md) to [149](decisions/149-a-drive-that-cant-name-its-folders-is-told-not-offered-safe-folders.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-11-v0.1-package.md](plans/2026-11-11-v0.1-package.md).
+The owner decided that Opalro is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)); the rest was decided on 2026-11-11 in decisions [141](decisions/141-the-user-agreement.md) to [149](decisions/149-a-drive-that-cant-name-its-folders-is-told-not-offered-safe-folders.md) (Claude decided them at the owner's request, while the owner was away; each can be reversed). Plan: [plans/2026-11-11-v0.1-package.md](plans/2026-11-11-v0.1-package.md).
 
 **0. The starting point** ✅ (2026-11-11)
 - The stale draft release and the old archives among the release workflow's artifacts deleted; what the follow-ups still list before v0.1, and every place in what ships or goes on the website that points into the repository, written down (the plan's "Starting point").
 
 **1. The license in the repository** ✅ (2026-11-11; Task 1)
-- *Done when:* `LICENSE` says all rights reserved, the manifests name it and keep `publish = false`, `deny.toml` says why Bolt's own crates are passed over, and a test pins the manifests.
+- *Done when:* `LICENSE` says all rights reserved, the manifests name it and keep `publish = false`, `deny.toml` says why Opalro's own crates are passed over, and a test pins the manifests.
 
 **2. The user agreement** ✅ (2026-11-11; Task 2)
-- *Done when:* `USER-AGREEMENT.md` is written in plain language, marked a draft for a lawyer, with each of the owner's blanks marked, and says truthfully what Bolt sends.
+- *Done when:* `USER-AGREEMENT.md` is written in plain language, marked a draft for a lawyer, with each of the owner's blanks marked, and says truthfully what Opalro sends.
 
-**3. Bolt sends nothing** ✅ (2026-11-11; Task 3)
+**3. Opalro sends nothing** ✅ (2026-11-11; Task 3)
 - *Done when:* clippy and cargo-deny refuse networking in CI, and the import check refuses its two test programs and passes each release program on all four targets ([decision 142](decisions/142-bolt-sends-nothing-and-each-build-proves-it.md)).
 
 **4. The notices** ✅ (2026-11-11; Task 4)

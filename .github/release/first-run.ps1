@@ -6,10 +6,10 @@ param(
   [Parameter(Mandatory = $true)][string]$Version,
   [Parameter(Mandatory = $true)][string]$Page
 )
-if ($env:GITHUB_ACTIONS -ne 'true') { Write-Host 'first-run.ps1 removes Bolt and its settings from this account and edits its Path: it runs only in CI'; exit 2 }
+if ($env:GITHUB_ACTIONS -ne 'true') { Write-Host 'first-run.ps1 removes Opalro and its settings from this account and edits its Path: it runs only in CI'; exit 2 }
 $ErrorActionPreference = 'Stop'
 $script:current = ''
-$zip = "bolt-$Version-x86_64-pc-windows-msvc.zip"
+$zip = "opalro-$Version-x86_64-pc-windows-msvc.zip"
 
 function Step($name) { $script:current = $name; Write-Host ''; Write-Host "== $name" }
 function Check($ok) { if (-not $ok) { throw 'the check failed' } }
@@ -37,7 +37,7 @@ function New-TerminalPath {
 }
 
 try {
-  Remove-Item Env:BOLT_CONFIG_DIR, Env:BOLT_USER_NAME, Env:BOLT_USER_EMAIL -ErrorAction SilentlyContinue
+  Remove-Item Env:OPAL_CONFIG_DIR, Env:OPAL_USER_NAME, Env:OPAL_USER_EMAIL -ErrorAction SilentlyContinue
 
   Step 'the download page: the archive for this system, and SHA256SUMS, into the same folder'
   InDoc $Page "| ``$zip`` |"
@@ -64,45 +64,45 @@ try {
   Write-Host $listed[0]
   Check ($hash -eq $listed[0].Split(' ')[0])
 
-  Step 'the guide: unpack with Extract All, and move bolt.exe to a folder of your own'
+  Step 'the guide: unpack with Extract All, and move opal.exe to a folder of your own'
   InDoc $guide 'unpack the `.zip` (right-click it, then "Extract All")'
   # Extract All proposes a folder named after the archive, beside it.
   $unpacked = Join-Path $downloads ([IO.Path]::GetFileNameWithoutExtension($zip))
   Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
   InDoc $Page 'Read the user agreement, `USER-AGREEMENT.md`.'
   Check (Test-Path -LiteralPath (Join-Path $unpacked USER-AGREEMENT.md))
-  InDoc $guide 'Move `bolt.exe` to a folder of your own, such as `C:\Users\<you>\bin` (make the folder first if it isn''t there).'
+  InDoc $guide 'Move `opal.exe` to a folder of your own, such as `C:\Users\<you>\bin` (make the folder first if it isn''t there).'
   $bin = Join-Path $HOME bin
   New-Item -ItemType Directory -Path $bin | Out-Null
-  Move-Item -LiteralPath (Join-Path $unpacked bolt.exe) -Destination $bin
+  Move-Item -LiteralPath (Join-Path $unpacked opal.exe) -Destination $bin
 
   Step "the guide: add that folder to the account's Path"
   InDoc $guide 'Open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", "New", and add that folder. Open a new terminal.'
   # Not found before, so the folder added is what puts it there.
   New-TerminalPath
-  Check (-not (Get-Command bolt -ErrorAction SilentlyContinue))
+  Check (-not (Get-Command opal -ErrorAction SilentlyContinue))
   # The dialog's work, in the registry.
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   $userPath = (@($userPath -split ';' | Where-Object { $_ }) + $bin) -join ';'
   [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
 
-  Step 'the guide: in a new terminal, bolt --version'
+  Step 'the guide: in a new terminal, opal --version'
   New-TerminalPath
-  $found = (Get-Command bolt).Source
+  $found = (Get-Command opal).Source
   Write-Host "found: $found"
-  Check ($found -eq (Join-Path $bin bolt.exe))
-  InDoc $guide 'bolt --version'
-  $said = (powershell -NoProfile -Command 'bolt --version') -join "`n"
+  Check ($found -eq (Join-Path $bin opal.exe))
+  InDoc $guide 'opal --version'
+  $said = (powershell -NoProfile -Command 'opal --version') -join "`n"
   Write-Host $said
-  Check ($said -ceq "bolt $Version")
+  Check ($said -ceq "opal $Version")
 
-  Step 'the guide: tell Bolt who you are'
-  Run 'mkdir -Force $env:APPDATA\bolt\config'
-  InDoc $guide 'notepad $env:APPDATA\bolt\config\config.toml'
+  Step 'the guide: tell Opalro who you are'
+  Run 'mkdir -Force $env:APPDATA\opal\config'
+  InDoc $guide 'notepad $env:APPDATA\opal\config\config.toml'
   # Notepad's work: the guide's three lines, saved as UTF-8 with Windows line ends.
   $lines = '[user]', 'name = "Ana Lima"', 'email = "ana@example.com"'
   foreach ($l in $lines) { InDoc $guide $l }
-  [IO.File]::WriteAllText("$env:APPDATA\bolt\config\config.toml", ($lines -join "`r`n") + "`r`n",
+  [IO.File]::WriteAllText("$env:APPDATA\opal\config\config.toml", ($lines -join "`r`n") + "`r`n",
     (New-Object Text.UTF8Encoding $false))
 
   Step 'the guide: the first five minutes, in a new folder'
@@ -117,23 +117,23 @@ try {
     if ($l.StartsWith('```')) { $inSh = (-not $inSh) -and ($l -ceq '```sh') } elseif ($inSh) { $count++ }
   }
   Check ($count -eq 10)
-  Run 'bolt start --preset code'
+  Run 'opal start --preset code'
   Run 'echo "hello" > notes.txt'
-  Run 'bolt save "First notes"'
-  Run 'bolt status'
+  Run 'opal save "First notes"'
+  Run 'opal status'
   Run 'echo "hello again" > notes.txt'
-  Run 'bolt status'
-  Run 'bolt changes'
-  Run 'bolt save "More notes"'
-  Run 'bolt history'
-  Run 'bolt undo'
+  Run 'opal status'
+  Run 'opal changes'
+  Run 'opal save "More notes"'
+  Run 'opal history'
+  Run 'opal undo'
   Check (((Get-Content notes.txt) -join "`n") -ceq 'hello again')
 
-  Step 'the guide: removing Bolt from a computer'
+  Step 'the guide: removing Opalro from a computer'
   Set-Location -LiteralPath $HOME
-  Run 'Remove-Item $HOME\bin\bolt.exe'
-  Run 'Remove-Item -Recurse $env:APPDATA\bolt'
-  Check (-not (Test-Path -LiteralPath "$env:APPDATA\bolt"))
+  Run 'Remove-Item $HOME\bin\opal.exe'
+  Run 'Remove-Item -Recurse $env:APPDATA\opal'
+  Check (-not (Test-Path -LiteralPath "$env:APPDATA\opal"))
   InDoc $guide 'Then take the folder off your PATH: open Start, search for "environment variables", open "Edit environment variables for your account", choose `Path`, then "Edit", select the folder and choose "Delete". Leave it if other programs live in it.'
   Check (@(Get-ChildItem -LiteralPath $bin -Force).Count -eq 0)
   # The dialog's work, in the registry.
@@ -141,11 +141,11 @@ try {
   $userPath = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $bin }) -join ';'
   [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
 
-  Step 'in a new terminal, bolt is no longer found'
+  Step 'in a new terminal, opal is no longer found'
   New-TerminalPath
   Write-Host "Path: $env:Path"
   Check (-not (@($env:Path -split ';') -contains $bin))
-  Check (-not (Get-Command bolt -ErrorAction SilentlyContinue))
+  Check (-not (Get-Command opal -ErrorAction SilentlyContinue))
 
   Remove-Item -LiteralPath $reading, $practice, $unpacked -Recurse -Force
   Write-Host ''

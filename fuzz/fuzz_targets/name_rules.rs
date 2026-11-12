@@ -1,6 +1,6 @@
 #![no_main]
-use bolt_core::drive::Drive;
-use bolt_core::names;
+use opal_core::drive::Drive;
+use opal_core::names;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -19,10 +19,10 @@ fuzz_target!(|data: &[u8]| {
                 let _ = names::own_folder(n, drive);
             }
             // Whatever write-out may write, this system can hold, and it is neither `.git` nor
-            // `.bolt`.
+            // `.opal`.
             if names::writable_here(n, &short_names).is_ok() {
                 assert!(names::holdable_here(n));
-                assert!(!names::is_git_alias(n) && !names::is_bolt_alias(n));
+                assert!(!names::is_git_alias(n) && !names::is_opal_alias(n));
             }
         }
         let _ = names::folder_problems(&given);

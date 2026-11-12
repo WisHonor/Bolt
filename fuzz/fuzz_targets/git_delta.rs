@@ -1,6 +1,6 @@
 #![no_main]
-use bolt_core::git::craft::delta;
-use bolt_core::git::{MAX_IN_MEMORY_OBJECT, apply_delta};
+use opal_core::git::craft::delta;
+use opal_core::git::{MAX_IN_MEMORY_OBJECT, apply_delta};
 use libfuzzer_sys::fuzz_target;
 
 // The input's first two bytes give the base's length; the rest is a delta on it, and also an
