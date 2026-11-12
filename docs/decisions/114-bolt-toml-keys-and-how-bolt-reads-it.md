@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 008](008-layout-and-settings.md) (what `bolt.toml` holds, and what an unknown key does); [decision 016](016-presets.md) (the rule format; "exact key names are finalised in the format spec"); [decision 056](056-question-before-large-saves.md) (the question's numbers become settings); [decision 082](082-how-big-files-are-cut-into-chunks.md) (the 1 MiB threshold becomes `chunk-files-over`)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opal`)
 
 ## Context
 

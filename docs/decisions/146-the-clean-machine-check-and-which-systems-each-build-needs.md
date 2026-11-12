@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the v0.1 release: the package)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 119](119-packaging-v0.1.md) (each program is run before it is packed; the Windows program needs nothing installed; the Linux program runs on older systems)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opal`)
 
 ## Context
 

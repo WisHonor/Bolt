@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part. The two addresses are the owner's.
 - **Supersedes:** [decision 119](119-packaging-v0.1.md) in part (people got Bolt from the repository's release page, and `SECURITY.md` sent reports through GitHub's private reporting)
 - **Refines:** [decision 024](024-red-team-gate.md) (`SECURITY.md` says how to report a problem in private)
+- **Refined by:** [decision 151](151-opalro-com-and-support-at-opalro-com.md) (its two addresses: https://opalro.com and support@opalro.com)
 
 ## Context
 

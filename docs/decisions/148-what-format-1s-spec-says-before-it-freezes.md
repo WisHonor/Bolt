@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the v0.1 release: the package)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 121](121-format-1-freezes-at-v0.1.md) (what the freeze covers)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opal`)
 
 ## Context
 

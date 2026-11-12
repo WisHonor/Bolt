@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 017](017-commands-and-output.md) (output and error style; colours and progress only in a terminal; help shows examples first); [decision 058](058-changes-line-by-line.md) (colour in `bolt changes`, and colour on Windows)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opal`)
 
 ## Context
 
