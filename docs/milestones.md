@@ -364,3 +364,41 @@ Planned on 2026-11-10, after decisions [099](decisions/099-a-third-speed-gate-wi
 - The docs brought up to date, two red-team sessions from the sandbox (decision 024), a whole-branch review, the whole benchmark and all three gates run again, then a pull request whose checks all pass.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and [benchmarks.md](benchmarks.md) gives the numbers before and after, losses included.
 - **The third gate is not met yet.** `status` and the small save pass; going back on Linux is at twice Git's time or over, where it was 4.5 times, and missed in five runs of seven ([benchmarks.md](benchmarks.md) §8). What would settle it is the owner's call: the first row of this session's section of the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md).
+
+## Release: v0.1
+
+Two sessions get v0.1 ready at once (2026-11-11), each with its own steps: clean code and the gate (decisions [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) to [133](decisions/133-red-team-v0.1-rulings.md)), and the package (from 140). A ✅ marks a step that is done.
+
+### Clean code and the gate
+
+Planned on 2026-11-11: [plans/2026-11-11-v0.1-engine.md](plans/2026-11-11-v0.1-engine.md). Claude decided 129 to 133 at the owner's request while the owner was away; 128 is the owner's.
+
+**0. The starting point** ✅ (2026-11-11)
+- The Nightly workflow by hand on `main`: every job passed but Linux's `speed-gate`, where going back took 2.651 times Git's time.
+
+**1. The gate's new rule** ✅ (Task 1; decisions 128, 129 and 132)
+- `status` and the small save at most twice Git's time, going back at most three and a half times (twice is the goal for v0.2); the status gate fails its job from v0.1.
+
+**2. The deep tree** ✅ (Task 2; decision 130)
+- *Done when:* every command that walks a save refuses a planted deep tree of shared listings in seconds, and an honest save is answered as before.
+
+**3. The code audit** ✅ (Task 3; decision 131)
+- Every module, test, vector, script and dependency read against the other projects' code: [releases/v0.1.0-code-audit.md](releases/v0.1.0-code-audit.md).
+
+**4. The clean rewrites** ✅ (Tasks 4 to 13)
+- `ignore.rs`, `git/config.rs`, the look-alike names, the tidying of Git's paths, person lines and Git LFS pointers, written again from documentation and the programs' behaviour; copied test material replaced; the old code deleted.
+- *Done when:* old and new agree on a million generated inputs a property, refusals and messages included; reviewers with the other project's source open find no part that follows it.
+
+**5. Measured** ✅ (Task 14)
+- *Done when:* `status`, a small save, `goto` and `changes --save` take what they took before, turn by turn on one runner ([benchmarks.md](benchmarks.md) §10).
+
+**6. The follow-ups** ✅ (Task 15)
+
+**7. Red team** ✅ (Task 17; decision 133)
+- One session from the sandbox, with Windows and macOS on a `redteam/` CI branch ([report](redteam/2026-11-11-v0.1-release.md)): three Low findings, one fixed, two ruled on.
+
+**8. The gate, ten times** (Task 16)
+- *Done when:* ten runs on the finished code are published in [benchmarks.md](benchmarks.md) §10, and every miss of an enforced step has its cause written down.
+
+**9. Review, rulings and merge** (Task 18)
+- A whole-branch review, the rulings file, a pull request with CI green on all three systems.
