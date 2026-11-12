@@ -113,8 +113,9 @@ fn every_one_character_change_of_opalro_or_its_short_name_is_refused() {
 }
 
 /// `.opalroignore` and three other names whose short names start `OPALRO` take `OPALRO~1` to
-/// `OPALRO~4`, so `.opalro` gets a hashed short name no fixed list knows, and so does an
-/// `.opalroignore` made after it. A save naming both short names must write into neither.
+/// `OPALRO~4`, so `.opalro` gets its hashed short name, `OP9975~1`, which the spelling rule now
+/// refuses on every system, and an `.opalroignore` made after it gets one no fixed list knows. A
+/// save naming both short names must write into neither.
 #[cfg(windows)]
 #[test]
 #[ignore = "RT15: run on a redteam/* branch"]

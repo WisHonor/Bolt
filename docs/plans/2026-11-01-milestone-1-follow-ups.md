@@ -253,6 +253,12 @@ What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opal
 | The owner's call | A project can't be started or imported on Windows in a folder of about 253 characters or more (255 with the old name): `hide_path` hands `SetFileAttributesW` a plain path, so `.opalro` past 260 characters fails with an error, touching nothing else. Lifting it means giving the `\\?\` form of the path, or setting the attribute through the folder's open handle; either changes what the platform crate hands to Windows. The known problems tell the limit. |
 | ~~The owner's call, before publishing v0.1~~ Done 2026-11-12 | Whether a save also refuses `opalro~5` to `opalro~9` and the short name NTFS works out for `.opalro`, on every system ([decision 152](../decisions/152-red-team-rulings-on-the-name.md), RT15's suspicions). Windows compares the real short names already; a Linux computer writing to a Windows drive (WSL, ntfs-3g, a FAT stick) can't. The rule is part of format 1, so it can't be added after publishing. Done: the owner chose to refuse them, on every system ([decision 155](../decisions/155-every-short-name-of-opalro-is-refused.md)); `.opalro`'s hashed short name is `OP9975~1`. |
 
+## The final builds (2026-11-12)
+
+| By | Item |
+|---|---|
+| Later, with a block decoder of Opalro's own | A zstd frame with a compressed block that unpacks past RFC 8878's block limit (the window, at most 128 KiB) is read in an entry stored in at most 1 MiB, and refused in a larger one: zstd's one-call decoder doesn't look for it ([decision 154](../decisions/154-format-1s-zstd-is-exactly-one-frame.md); [the final builds' rulings](2026-11-12-v0.1-final-rulings.md), ruling 10). No writer makes one, and storage-format.md §11 lets a reader do either. |
+
 ## For the owner to decide
 
 - ~~The line-ending stop never asks~~ (kept 2026-11-04 in decision 039's review: the hint names both ways on, and a question could offer only saving the CRLF files, since Bolt never runs Git). From milestone 2's build, 2026-11-03. [Decision 039](../decisions/039-first-save-after-import.md) says the stop offers two ways on, and that without a terminal it names the flag; Bolt never asks, even in a terminal: the hint always offers both ways. Confirm, or ask for a question in a terminal.

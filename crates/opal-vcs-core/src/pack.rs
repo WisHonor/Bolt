@@ -1087,9 +1087,7 @@ impl PackReader {
                 Ok(Some(whole))
             }
             ZSTD => {
-                let frame_header = &data[..data.len().min(ZSTD_MAX_FRAME_HEADER as usize)];
-                let stated = zstd::zstd_safe::get_frame_content_size(frame_header);
-                if !stated.is_ok_and(|n| n.is_none_or(|n| n == size)) || !one_plain_frame(data) {
+                if !one_plain_frame(data, size) {
                     return Ok(None);
                 }
                 let Ok(size) = usize::try_from(size) else {
@@ -1134,22 +1132,25 @@ impl PackReader {
                     data_start,
                     stored.min(ZSTD_MAX_FRAME_HEADER),
                 )?;
-                if !plain_frame_header(&frame_header) {
-                    return Err(self.corrupt(format!(
-                        "the zstd data of {id} is not a frame format 1 allows"
-                    )));
-                }
-                match zstd::zstd_safe::get_frame_content_size(&frame_header) {
-                    Ok(None) => {}
-                    Ok(Some(n)) if n == size => {}
-                    _ => {
+                let start = match frame_start(&frame_header, size) {
+                    Ok(start) => start,
+                    Err(FrameFault::NotAllowed) => {
+                        return Err(self.corrupt(format!(
+                            "the zstd data of {id} is not a frame format 1 allows"
+                        )));
+                    }
+                    Err(FrameFault::WrongSize) => {
                         return Err(
                             self.corrupt(format!("the zstd frame of {id} has the wrong size"))
                         );
                     }
-                }
+                };
+                let walked = Walked {
+                    inner: data,
+                    walk: BlockWalk::new(start),
+                };
                 // Making a decoder fails only when memory runs out.
-                let decoder = zstd::stream::read::Decoder::new(data)
+                let decoder = zstd::stream::read::Decoder::new(walked)
                     .map_err(|_| PackError::OutOfMemory)?
                     .single_frame();
                 let mut decoded = decoder.take(size.saturating_add(1));
@@ -1259,38 +1260,150 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Whether `data` is one zstd frame as format 1 allows it, and nothing more. Only these go to the
-/// one-call decoder, which takes frames the streamed one refuses.
-fn one_plain_frame(data: &[u8]) -> bool {
-    plain_frame_header(data) && zstd::zstd_safe::find_frame_compressed_size(data) == Ok(data.len())
+/// Whether `data` is one zstd frame of `size` bytes as format 1 allows it, and nothing more, as
+/// far as can be told without decoding it. Only these go to the one-call decoder.
+fn one_plain_frame(data: &[u8], size: u64) -> bool {
+    frame_start(data, size).is_ok_and(|start| BlockWalk::new(start).feed(data))
+        && zstd::zstd_safe::find_frame_compressed_size(data) == Ok(data.len())
 }
 
-/// Whether `header`, the start of an entry's stored bytes, opens a zstd frame as format 1 allows
-/// it: the frame's magic (so no skippable frame and no format from before zstd 1.0), no
-/// dictionary ID, the header's spare bits clear, and a window of at most 2^27 bytes.
-fn plain_frame_header(header: &[u8]) -> bool {
+/// Why the start of an entry's zstd data breaks format 1's rules.
+#[derive(Debug, PartialEq)]
+enum FrameFault {
+    NotAllowed,
+    WrongSize,
+}
+
+/// The start of a frame format 1 allows: how long its header is, and the most a block may hold.
+#[derive(Clone, Copy, Debug)]
+struct FrameStart {
+    header_len: u64,
+    block_limit: u64,
+}
+
+/// Checks `header`, the first bytes of an entry's stored data, as the start of a zstd frame of
+/// `size` bytes: the frame's magic (so no skippable frame and no format from before zstd 1.0),
+/// no dictionary ID, the header's spare bits clear, a window of at most 2^27 bytes, and a
+/// content size of `size` if the header has one.
+fn frame_start(header: &[u8], size: u64) -> Result<FrameStart, FrameFault> {
     const MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     const MAX_WINDOW: u64 = 1 << 27;
+    const MAX_BLOCK: u64 = 128 << 10;
     // Bits 0 and 1 give a dictionary ID's size, bit 3 is reserved and bit 4 unused.
     const NOT_IN_FORMAT_1: u8 = 0x1B;
     let Some(&descriptor) = header.get(4) else {
-        return false;
+        return Err(FrameFault::NotAllowed);
     };
     if !header.starts_with(&MAGIC) || descriptor & NOT_IN_FORMAT_1 != 0 {
-        return false;
+        return Err(FrameFault::NotAllowed);
     }
-    let window = if descriptor & 0x20 != 0 {
+    let single_segment = descriptor & 0x20 != 0;
+    let stated =
+        zstd::zstd_safe::get_frame_content_size(header).map_err(|_| FrameFault::NotAllowed)?;
+    // zstd takes a content size of all ones for none, so the flags say whether there is one.
+    if descriptor & 0xE0 != 0 && stated != Some(size) {
+        return Err(FrameFault::WrongSize);
+    }
+    let window = if single_segment {
         // A single segment's window is its content size.
-        zstd::zstd_safe::get_frame_content_size(header)
-            .ok()
-            .flatten()
+        stated
     } else {
         header.get(5).and_then(|&b| {
             let base = 1u64.checked_shl(10 + u32::from(b >> 3))?;
             (base >> 3).checked_mul(u64::from(b & 7))?.checked_add(base)
         })
     };
-    window.is_some_and(|w| w <= MAX_WINDOW)
+    let window = window
+        .filter(|&w| w <= MAX_WINDOW)
+        .ok_or(FrameFault::NotAllowed)?;
+    let size_field = match descriptor >> 6 {
+        0 => u64::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    Ok(FrameStart {
+        header_len: 5 + u64::from(!single_segment) + size_field,
+        block_limit: window.min(MAX_BLOCK),
+    })
+}
+
+/// Follows a zstd frame's blocks as its bytes go by, and refuses a block over the frame's limit
+/// (its window, at most 128 KiB). zstd's streamed decoder checks that, but its one-call decoder
+/// doesn't for raw and RLE blocks, so both read paths check here first.
+struct BlockWalk {
+    limit: u64,
+    /// Bytes still to pass: the frame header's, then the body of each block.
+    skip: u64,
+    header: [u8; 3],
+    have: usize,
+    last_seen: bool,
+}
+
+impl BlockWalk {
+    fn new(start: FrameStart) -> Self {
+        BlockWalk {
+            limit: start.block_limit,
+            skip: start.header_len,
+            header: [0; 3],
+            have: 0,
+            last_seen: false,
+        }
+    }
+
+    /// Takes the frame's next bytes; false once a block holds more than the limit.
+    fn feed(&mut self, mut bytes: &[u8]) -> bool {
+        while !self.last_seen && !bytes.is_empty() {
+            if self.skip > 0 {
+                let n = bytes
+                    .len()
+                    .min(usize::try_from(self.skip).unwrap_or(usize::MAX));
+                self.skip -= n as u64;
+                bytes = bytes.get(n..).unwrap_or_default();
+                continue;
+            }
+            let Some((&b, rest)) = bytes.split_first() else {
+                break;
+            };
+            bytes = rest;
+            if let Some(slot) = self.header.get_mut(self.have) {
+                *slot = b;
+            }
+            self.have += 1;
+            if self.have == 3 {
+                self.have = 0;
+                let [a, b, c] = self.header;
+                let header = u32::from_le_bytes([a, b, c, 0]);
+                // An RLE block's size is how many bytes it makes; it stores one.
+                let (size, rle) = (u64::from(header >> 3), (header >> 1) & 3 == 1);
+                if size > self.limit {
+                    return false;
+                }
+                self.skip = if rle { 1 } else { size };
+                self.last_seen = header & 1 == 1;
+            }
+        }
+        true
+    }
+}
+
+/// An entry's stored bytes on their way to the streamed decoder, checked block by block.
+struct Walked<R> {
+    inner: R,
+    walk: BlockWalk,
+}
+
+impl<R: Read> Read for Walked<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if !self.walk.feed(buf.get(..n).unwrap_or_default()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a block holds more than its frame allows",
+            ));
+        }
+        Ok(n)
+    }
 }
 
 /// zstd tells its errors apart only by their text.
@@ -2222,6 +2335,7 @@ mod tests {
         UnusedBit,
         WithChecksum,
         WrongChecksum,
+        OversizedBlock,
         Legacy,
         UnknownCompression,
         RawSizeDiffers,
@@ -2230,6 +2344,18 @@ mod tests {
 
     /// A skippable frame holding four bytes.
     const SKIPPABLE: [u8; 12] = [0x50, 0x2A, 0x4D, 0x18, 4, 0, 0, 0, 1, 2, 3, 4];
+
+    /// A frame of one block of `kind` (0 raw, 1 RLE) holding `body` and making `size` bytes, with a
+    /// window from `window` (0x00 for 1 KiB, 0x50 for 1 MiB) and its content size given.
+    fn one_block_frame(window: u8, kind: u32, body: &[u8], size: usize) -> Vec<u8> {
+        let mut frame = ZSTD_MAGIC.to_vec();
+        frame.extend_from_slice(&[0x80, window]);
+        frame.extend_from_slice(&(size as u32).to_le_bytes());
+        let header = (size as u32) << 3 | kind << 1 | 1;
+        frame.extend_from_slice(&header.to_le_bytes()[..3]);
+        frame.extend_from_slice(body);
+        frame
+    }
 
     /// `frame` with a `Dictionary_ID` field of one byte, 0: no dictionary, which zstd reads.
     fn with_dictionary_id(frame: &[u8]) -> Vec<u8> {
@@ -2342,6 +2468,7 @@ mod tests {
                 }
                 (true, frame)
             }
+            Damage::OversizedBlock => (true, one_block_frame(0x50, 0, &data, len)),
             Damage::Legacy => {
                 let mut frame = vec![0x27, 0xB5, 0x2F, 0xFD];
                 // Fixed bytes, so both sizes meet the same old-format header; more than a
@@ -2424,6 +2551,12 @@ mod tests {
             (Damage::UnusedBit, not_allowed),
             (Damage::WithChecksum, Some("read")),
             (Damage::WrongChecksum, None),
+            (
+                Damage::OversizedBlock,
+                Some(
+                    "damaged: the zstd data of <id> is invalid: a block holds more than its frame allows",
+                ),
+            ),
             (Damage::Legacy, not_allowed),
             (
                 Damage::UnknownCompression,
@@ -2457,43 +2590,80 @@ mod tests {
     #[test]
     fn only_one_plain_frame_goes_to_the_one_call_decoder() {
         let bytes = b"plain frame ".repeat(100);
+        let plain_frame = |frame: &[u8]| one_plain_frame(frame, bytes.len() as u64);
         // The two ways Opalro writes a frame, and a frame with a checksum.
         let plain = zstd::bulk::compress(&bytes, ZSTD_LEVEL).unwrap();
-        assert!(one_plain_frame(&plain));
+        assert!(plain_frame(&plain));
         let mut streamed = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL).unwrap();
         std::io::Write::write_all(&mut streamed, &bytes).unwrap();
-        assert!(one_plain_frame(&streamed.finish().unwrap()));
+        assert!(plain_frame(&streamed.finish().unwrap()));
         let mut checked = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
         checked.include_checksum(true).unwrap();
         std::io::Write::write_all(&mut checked, &bytes).unwrap();
-        assert!(one_plain_frame(&checked.finish().unwrap()));
+        assert!(plain_frame(&checked.finish().unwrap()));
+        assert!(!one_plain_frame(&plain, bytes.len() as u64 + 1));
 
-        // Real frames, which zstd reads but format 1 doesn't hold: the one-call decoder takes
-        // any window, a dictionary ID of 0 means no dictionary, and the unused bit is ignored.
+        // Real frames, which zstd's one-call decoder reads but format 1 doesn't hold: it takes
+        // any window, a dictionary ID of 0 means no dictionary, the unused bit is ignored, and
+        // it doesn't check the size of a raw or RLE block against the window.
         let huge = huge_window_frame(&bytes);
-        assert!(!one_plain_frame(&huge));
+        assert!(!plain_frame(&huge));
         assert_eq!(zstd::bulk::decompress(&huge, bytes.len()).unwrap(), bytes);
         let with_id = with_dictionary_id(&plain);
-        assert!(!one_plain_frame(&with_id));
+        assert!(!plain_frame(&with_id));
         assert_eq!(
             zstd::bulk::decompress(&with_id, bytes.len()).unwrap(),
             bytes
         );
         let mut unused = plain.clone();
         unused[4] |= 0x10;
-        assert!(!one_plain_frame(&unused));
+        assert!(!plain_frame(&unused));
         assert_eq!(zstd::bulk::decompress(&unused, bytes.len()).unwrap(), bytes);
+        // A window of 1 KiB, so blocks of at most 1 KiB.
+        let raw = one_block_frame(0x00, 0, &bytes, bytes.len());
+        assert!(!plain_frame(&raw));
+        assert_eq!(zstd::bulk::decompress(&raw, bytes.len()).unwrap(), bytes);
+        let rle = one_block_frame(0x00, 1, b"z", 2048);
+        assert!(!one_plain_frame(&rle, 2048));
+        assert_eq!(zstd::bulk::decompress(&rle, 2048).unwrap(), [b'z'; 2048]);
+        assert!(one_plain_frame(&one_block_frame(0x00, 1, b"z", 1024), 1024));
+
         let mut skippable = SKIPPABLE.to_vec();
         skippable.extend_from_slice(&plain);
-        assert!(!one_plain_frame(&skippable));
+        assert!(!plain_frame(&skippable));
         let mut twice = plain.clone();
         twice.extend_from_slice(&plain);
-        assert!(!one_plain_frame(&twice));
+        assert!(!plain_frame(&twice));
         let mut legacy = plain.clone();
         legacy[0] = 0x27;
-        assert!(!one_plain_frame(&legacy));
-        assert!(!one_plain_frame(&plain[..plain.len() - 1]));
-        assert!(!one_plain_frame(&[]));
+        assert!(!plain_frame(&legacy));
+        assert!(!plain_frame(&plain[..plain.len() - 1]));
+        assert!(!plain_frame(&[]));
+    }
+
+    #[test]
+    fn frame_starts_are_judged_at_the_limits() {
+        let start = |rest: &[u8], size| frame_start(&[&ZSTD_MAGIC[..], rest].concat(), size);
+        // Windows of exactly 2^27, and of 2^27 + 2^24.
+        assert!(start(&[0x00, 0x88], 0).is_ok());
+        assert_eq!(start(&[0x00, 0x89], 0).err(), Some(FrameFault::NotAllowed));
+        // A single segment's window is its content size: 2^27, then 2^27 + 1.
+        assert!(start(&[0xA0, 0, 0, 0, 0x08], 1 << 27).is_ok());
+        assert_eq!(
+            start(&[0xA0, 1, 0, 0, 0x08], (1 << 27) + 1).err(),
+            Some(FrameFault::NotAllowed)
+        );
+        // The reserved bit, and a content size of all ones, which zstd reads as none given.
+        assert_eq!(start(&[0x08, 0x50], 0).err(), Some(FrameFault::NotAllowed));
+        let all_ones = [0xC0, 0x50, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(start(&all_ones, 10).err(), Some(FrameFault::WrongSize));
+        // No content size given, and one given in 1, 2, 4 and 8 bytes: the header's length.
+        let len = |rest: &[u8], size| start(rest, size).unwrap().header_len;
+        assert_eq!(len(&[0x00, 0x50], 7), 6);
+        assert_eq!(len(&[0x20, 7], 7), 6);
+        assert_eq!(len(&[0x40, 0x50, 7, 0], 263), 8);
+        assert_eq!(len(&[0x80, 0x50, 7, 0, 0, 0], 7), 10);
+        assert_eq!(len(&[0xC0, 0x50, 7, 0, 0, 0, 0, 0, 0, 0], 7), 14);
     }
 
     #[test]

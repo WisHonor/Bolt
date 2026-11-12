@@ -140,6 +140,8 @@ fn a_planted_save_naming_git_or_opal_spellings_writes_none_of_them() {
             ".OPALRO/x",
             ".opalro/tmp/x",
             "opalro~1",
+            "opalro~9",
+            "op9975~1/x",
             ".git",
             "a/.Git",
             "a/git~1/hooks/x",
