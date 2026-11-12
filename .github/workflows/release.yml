@@ -377,8 +377,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      # gh run download, for the archive and SHA256SUMS.
-      actions: read
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -391,18 +389,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The token stays in this step: the program under test never sees it.
-      - name: Download the archive and SHA256SUMS into a new folder
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
-        run: |
-          dl="$RUNNER_TEMP/download"
-          mkdir "$dl"
-          gh run download "$RUN_ID" --repo "$REPO" --name "$ARCHIVE" --dir "$dl"
-          gh run download "$RUN_ID" --repo "$REPO" --name sha256sums --dir "$dl"
-          ls -l "$dl"
+      # This run's own artifacts, outside the checkout, failing on a digest mismatch.
+      - name: Download the archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+      - name: Download SHA256SUMS
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sha256sums
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
       - name: Check it with the guide's command, and unpack it
         if: runner.os != 'Windows'
         run: |
@@ -541,7 +540,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
     env:
       ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
     defaults:
@@ -551,13 +549,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Download the archive and unpack it
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
+      - name: Download the archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ runner.temp }}/download
+          digest-mismatch: error
+      - name: Unpack it
         run: |
-          gh run download "$RUN_ID" --repo "$REPO" --name "$ARCHIVE" --dir "$RUNNER_TEMP/download"
           mkdir "$RUNNER_TEMP/pkg"
           if [ "$RUNNER_OS" = Windows ]; then
             7z x -bd -o"$RUNNER_TEMP/pkg" "$RUNNER_TEMP/download/$ARCHIVE" > /dev/null
