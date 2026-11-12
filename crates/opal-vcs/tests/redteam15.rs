@@ -37,6 +37,14 @@ fn the_import_shows_the_joiner_in_a_tracked_opalro_spelling() {
         if !lines.is_empty() {
             hidden.push(format!("{tracked:?}: {lines:?}"));
         }
+        // And the name is there, shown: a message that said nothing would pass the check above.
+        let shown = tracked
+            .trim_end_matches("/x")
+            .replace('\u{200c}', "\\u{200c}")
+            .replace('\u{200d}', "\\u{200d}");
+        if !said.contains(&shown) {
+            hidden.push(format!("{tracked:?}: {shown} was never shown"));
+        }
     }
     assert!(
         hidden.is_empty(),

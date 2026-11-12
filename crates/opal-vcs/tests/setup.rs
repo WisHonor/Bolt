@@ -40,7 +40,7 @@ fn vector(name: &str) -> (String, String) {
         .find(|v| v["name"] == name)
         .unwrap();
     (
-        v["opal_toml"].as_str().unwrap().to_owned(),
+        v["opalro_toml"].as_str().unwrap().to_owned(),
         v["opalroignore_block"].as_str().unwrap().to_owned(),
     )
 }

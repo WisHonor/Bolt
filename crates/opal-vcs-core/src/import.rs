@@ -1453,7 +1453,7 @@ mod tests {
         import(imported.path()).unwrap();
         for dir in [started.path(), imported.path()] {
             let format = std::fs::read_to_string(dir.join(".opalro/format")).unwrap();
-            assert_eq!(format, "opal-repository 1\nhash blake3\nfeature chunks\n");
+            assert_eq!(format, "opalro-repository 1\nhash blake3\nfeature chunks\n");
         }
     }
 

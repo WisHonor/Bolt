@@ -2629,7 +2629,7 @@ mod tests {
         write(root, "wt/src/main.rs", b"fn main() {}\n");
         write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
         write(root, "clone/readme.md", b"x");
-        write(root, "game/.opalro/format", b"opal-repository 1\n");
+        write(root, "game/.opalro/format", b"opalro-repository 1\n");
         write(root, "game/level.bin", b"x");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
@@ -2733,7 +2733,7 @@ mod tests {
         write(root, "wt/.git", b"gitdir: /elsewhere\n");
         write(root, "wt/a.txt", b"x");
         write(root, "clone/.git/HEAD", b"ref: refs/heads/main\n");
-        write(root, "game/.opalro/format", b"opal-repository 1\n");
+        write(root, "game/.opalro/format", b"opalro-repository 1\n");
         let saved = save_now(&mut repo).unwrap();
         let warnings = warnings_of(&saved).to_vec();
         assert_eq!(saved_paths(&repo, saved), ["keep.txt"]);

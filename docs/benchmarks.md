@@ -58,12 +58,12 @@ How they are measured:
 - **Memory gate,** in PowerShell from the repository's root, with `OPALRO_CONFIG_DIR` set to an empty folder and `OPALRO_USER_NAME` and `OPALRO_USER_EMAIL` set:
 
   ```powershell
-  New-Item -ItemType Directory "$env:TEMP\opal-gate"
-  $env:OPALRO_GATE_FILE = "$env:TEMP\opal-gate\big.bin"
+  New-Item -ItemType Directory "$env:TEMP\opalro-gate"
+  $env:OPALRO_GATE_FILE = "$env:TEMP\opalro-gate\big.bin"
   cargo test --release -p opal-vcs --test speed -j 2 -- --ignored --nocapture --exact write_the_memory_gate_file
   cargo build --release -p opal-vcs -j 2   # after the test, which builds its own opalro.exe
   $opalro = (Resolve-Path target\release\opalro.exe).Path
-  cd $env:TEMP\opal-gate
+  cd $env:TEMP\opalro-gate
   & $opalro start
   $p = Start-Process $opalro -ArgumentList 'save', '"A 10 GiB file"', '--yes' -NoNewWindow -PassThru
   $null = $p.Handle   # keeps the exit code and times readable after it ends
@@ -73,7 +73,7 @@ How they are measured:
       Start-Sleep -Milliseconds 200
   }
   "$peak bytes, $(($p.ExitTime - $p.StartTime).TotalSeconds) s, exit $($p.ExitCode)"
-  cd ..; Remove-Item -Recurse -Force opal-gate
+  cd ..; Remove-Item -Recurse -Force opalro-gate
   ```
 
   Deleting the folder gave back 20.02 GiB.

@@ -37,3 +37,8 @@ Your goals:
 - The follow-ups list's "Known limit" and "Known cost" rows, and RT14's known costs (docs/redteam/2026-11-11-v0.1-release.md).
 - Decision records, plans, rulings, red-team reports, the clean-room records and the code audit keep the old name on purpose (decision 150). So do the GitHub repository's name and the build path the Windows program carries (`D:\a\Bolt\Bolt\…`). Rust names inside the code keep `opal` (`is_opal_alias`, `OpalName`).
 - A project saved by a pre-release build isn't an Opalro project, and its old settings folder isn't read (decision 150).
+
+## Corrected after the session
+
+- The release builds hold no "bolt" in any letter case: the final review checked pull request #33's builds. The note above about the build path the Windows program carries was wrong.
+- The first line of `.opalro/format` is `opalro-repository 1` since the final review, not `opal-repository 1`: a person can read it, and the program prints it when it meets a format it doesn't know ([decision 150](../docs/decisions/150-the-name-is-opalro.md)).

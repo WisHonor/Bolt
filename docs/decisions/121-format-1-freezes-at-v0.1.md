@@ -6,7 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 008](008-layout-and-settings.md) (the format version, the feature list, and upgrades only through `bolt setup`); [decision 019](019-review-clarifications.md) (format 1 freezes at the v0.1 release); [decision 083](083-a-chunk-list-is-stored-under-its-files-id.md) (whether `feature chunks` stays a feature line "is settled when format 1 freezes"); [decision 012](012-lines.md) (how line names are compared)
 - **Refined by:** [decision 109](109-the-speed-sessions-follow-ups-and-format-1s-three-open-rows.md) (the three format questions it left open: none changes the format); [decision 148](148-what-format-1s-spec-says-before-it-freezes.md) (the conflict record's layout doesn't freeze, only its reservation and v0.1's behaviour on meeting it; the ignore rules keep Git's behaviour at the versions the spec names)
-- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`, or `opal` in what only the program uses)
 
 ## Context
 

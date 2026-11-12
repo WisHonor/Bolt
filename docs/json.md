@@ -510,7 +510,7 @@ Folders are not listed; the files in them are.
 A command that fails before it has printed anything gives a document of just this, with exit code 1:
 
 ```json
-{"opalro_json":1,"error":{"hint":"Run `opalro start` to make this folder an Opalro project.","message":"Not inside an Opalro project."},"warnings":[]}
+{"error":{"hint":"Run `opalro start` to make this folder an Opalro project.","message":"Not inside an Opalro project."},"opalro_json":1,"warnings":[]}
 ```
 
 | Field | Type | Meaning |

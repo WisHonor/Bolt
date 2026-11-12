@@ -702,8 +702,9 @@ mod tests {
 
     #[test]
     fn a_command_is_never_broken() {
-        // At 39 columns the break used to fall between `opalro` and `status`.
-        let s = screen(true, false, Some(39));
+        // At 41 columns the first line's room ends right after `opalro`, where the break used to
+        // fall.
+        let s = screen(true, false, Some(41));
         let line = format!(
             "Only what you named was saved: {} lists the changes left out.",
             s.command("opalro status")

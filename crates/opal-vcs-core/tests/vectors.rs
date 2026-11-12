@@ -1394,7 +1394,7 @@ struct PresetVector {
     name: String,
     preset: String,
     found: Vec<String>,
-    opal_toml: String,
+    opalro_toml: String,
     opalroignore_block: String,
 }
 
@@ -1430,7 +1430,7 @@ fn every_preset_vector_is_written_byte_for_byte() {
         assert_eq!(found.engines.len() + found.languages.len(), v.found.len());
         assert_eq!(
             presets::opal_toml(preset, &found).as_deref(),
-            Some(v.opal_toml.as_str()),
+            Some(v.opalro_toml.as_str()),
             "{}",
             v.name
         );

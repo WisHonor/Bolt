@@ -28,8 +28,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          # A new name since the rename: the old inputs begin with the old magic bytes.
+          key: fuzz-corpus-opalro-${{ github.run_id }}
+          restore-keys: fuzz-corpus-opalro-
       - name: Fuzz every target
         run: |
           for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids other_lines file_cache decode_journal decode_chunk_list cut_chunks parse_rules; do

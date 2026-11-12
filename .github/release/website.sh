@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Makes the copies of the docs meant for the website, zipped.
 # Usage: website.sh <version> <out-zip>
-# Fails when a copy still holds the repository's address or a link into it, or the old name.
+# Fails when a copy still holds an address on the owner's GitHub account, a link into the
+# repository, or the old name.
 set -euo pipefail
 
 version=$1
 out=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 repo=${GITHUB_REPOSITORY:-WisHonor/Bolt}
+# Every repository of the owner's, so links to the repository under an old name go too.
+owner=${repo%%/*}
 
 as_is=(docs/releases/download-page.md docs/releases/welcome.md docs/releases/reporting-a-problem.md
     docs/releases/known-problems.md "docs/releases/v$version.md" docs/guide.md USER-AGREEMENT.md SECURITY.md)
@@ -16,18 +19,18 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 mkdir -p "$dir/docs/releases"
 for f in "${as_is[@]}"; do cp "$f" "$dir/$f"; done
-# [text](link) -> text, for links into the repository: relative ones, and ones to its address.
+# [text](link) -> text, for links into the repository: relative ones, and ones to the owner's.
 for f in "${unlinked[@]}"; do
-    REPO=$repo perl -pe 's{\[([^\]]*)\]\((?:(?![a-z][a-z0-9+.-]*:|#)[^)]*|https?://(?:www\.)?github\.com/\Q$ENV{REPO}\E(?:[/#?][^)]*)?)\)}{$1}gi' \
+    OWNER=$owner perl -pe 's{\[([^\]]*)\]\((?:(?![a-z][a-z0-9+.-]*:|#)[^)]*|https?://(?:www\.)?github\.com/\Q$ENV{OWNER}\E/[^)]*)\)}{$1}gi' \
         "$f" > "$dir/$f"
 done
 
 bad=0
 for f in "${as_is[@]}" "${unlinked[@]}"; do
     # Not -F: with -i it aborts in Git for Windows' grep.
-    grep -i -q -e "$repo" "$dir/$f" && s=0 || s=$?
+    grep -i -q -e "$owner" "$dir/$f" && s=0 || s=$?
     if [ "$s" = 0 ]; then
-        echo "::error::The website copy of $f holds the repository's address"
+        echo "::error::The website copy of $f holds the repository's address, or another of its owner's"
         bad=1
     elif [ "$s" != 1 ]; then
         echo "::error::grep failed on $f"

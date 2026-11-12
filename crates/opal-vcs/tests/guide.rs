@@ -330,6 +330,33 @@ fn nothing_that_ships_points_into_the_repository() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// Decision 150, for the documents only the website gets: what a reader sees once the release
+/// drops their links' targets, as `website.sh` does, never says Bolt.
+#[test]
+fn the_website_documents_never_say_bolt() {
+    let mut wrong = Vec::new();
+    for rel in [
+        "docs/json.md",
+        "docs/storage-format.md",
+        "docs/benchmarks.md",
+    ] {
+        let doc = read_doc(rel);
+        let mut shown = String::new();
+        let mut rest = doc.as_str();
+        while let Some(at) = rest.find("](") {
+            shown.push_str(&rest[..=at]);
+            rest = rest[at + 2..]
+                .split_once(')')
+                .map_or("", |(_, after)| after);
+        }
+        shown.push_str(rest);
+        if shown.to_lowercase().contains("bolt") {
+            wrong.push(rel);
+        }
+    }
+    assert!(wrong.is_empty(), "still say Bolt: {wrong:?}");
+}
+
 /// The trimmed lines of the table `[name]` in `toml`, up to the next table.
 fn table<'a>(toml: &'a str, name: &str) -> Vec<&'a str> {
     let header = format!("[{name}]");

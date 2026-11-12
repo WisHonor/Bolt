@@ -758,7 +758,7 @@ fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
     let own = |folder: &str| -> io::Result<Vec<(String, String)>> {
         Ok(match folder {
             "" => vec![(".git".into(), "ZZ7EBA~1".into())],
-            "a" => vec![(".opalro".into(), "BO1234~1".into())],
+            "a" => vec![(".opalro".into(), "OP1234~1".into())],
             _ => vec![],
         })
     };
@@ -767,8 +767,8 @@ fn every_name_of_a_path_is_checked_against_its_folders_real_short_names() {
         Some("ZZ7EBA~1")
     );
     assert_eq!(
-        first_refused("a/bo1234~1/x", own).unwrap(),
-        Some("a/bo1234~1")
+        first_refused("a/op1234~1/x", own).unwrap(),
+        Some("a/op1234~1")
     );
     assert_eq!(first_refused("a/ZZ7EBA~1/x", own).unwrap(), None);
     assert_eq!(first_refused("b/c", own).unwrap(), None);

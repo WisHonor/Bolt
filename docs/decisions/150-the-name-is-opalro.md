@@ -3,9 +3,10 @@
 - **Status:** Accepted
 - **Date:** 2026-11-12
 - **Agenda topic:** none ([design.md](../design.md) §7, the open question "Name", to be settled before format 1 freezes)
-- **Decided by:** the owner: Opalro, for everything a person reads or types. The names only the program uses (the crates, the context strings, the magic bytes, the format file's first word) are Claude's calls at the owner's request; the owner can reverse any of them.
+- **Decided by:** the owner: Opalro, for everything a person reads or types. The names only the program uses (the crates, the context strings, the magic bytes) are Claude's calls at the owner's request; the owner can reverse any of them.
 - **Corrected before it was merged:** the owner first chose `opal` as a short form for the command and the files. The same day, once it turned out that Ruby's Opal compiler installs an `opal` command, the owner chose `opalro` for both (option D below).
 - **Supersedes in part:** the names in decisions [004](004-project-contents.md), [008](008-layout-and-settings.md), [025](025-red-team-m1-rulings.md), [059](059-bolt-spellings-left-out-like-git-spellings.md), [082](082-how-big-files-are-cut-into-chunks.md), [114](114-bolt-toml-keys-and-how-bolt-reads-it.md), [117](117-what-json-covers-at-v0.1.md), [119](119-packaging-v0.1.md), [120](120-the-terminal-ui.md), [121](121-format-1-freezes-at-v0.1.md), [145](145-one-release-workflow-for-every-version.md), [146](146-the-clean-machine-check-and-which-systems-each-build-needs.md) and [148](148-what-format-1s-spec-says-before-it-freezes.md). What each of them decided stays; only the names change.
+- **Refined by:** [decision 152](152-red-team-rulings-on-the-name.md) (the red team's rulings: RT15-1 fixed; more short names left to the owner before the freeze)
 
 ## Context
 
@@ -35,6 +36,7 @@ On 2026-11-12 the owner bought the domain opalro.com. No product, company or tra
 | The `--json` version field | `bolt_json` | `opalro_json` |
 | The environment variables | `BOLT_…` | `OPALRO_…` |
 | The personal settings folder (in the system's folder for settings) | `bolt` | `opalro` |
+| The first line of `.opalro/format`, which the program also prints when it meets a format it doesn't know | `bolt-repository 1` | `opalro-repository 1` |
 | The archives | `bolt-0.1.0-<system>.zip` or `.tar.gz`, and `bolt-0.1.0-website.zip` | `opalro-0.1.0-<system>…`, and `opalro-0.1.0-website.zip` |
 
 And what only the program uses, inside its files and its code, says `opal`:
@@ -43,7 +45,6 @@ And what only the program uses, inside its files and its code, says `opal`:
 |---|---|---|
 | The magic bytes at the start or end of the program's own files | `BOLTPACK`, `BOLTPEND`, `BOLTJRNL`, `BOLTFILE`, `BOLTCHID`, `BOLTLINE` | `OPALPACK`, `OPALPEND`, `OPALJRNL`, `OPALFILE`, `OPALCHID`, `OPALLINE` |
 | The fingerprints' context strings | `bolt-vcs <date> <purpose>` | `opal-vcs <date> <purpose>`, with the same dates and purposes |
-| The first line of `.opalro/format` | `bolt-repository 1` | `opal-repository 1` |
 | The crates | `bolt-vcs`, `bolt-vcs-core`, `bolt-vcs-platform` | `opal-vcs`, `opal-vcs-core`, `opal-vcs-platform` |
 
 A magic is eight bytes, four for the name and four for the file's kind, so the short form fits where the long one wouldn't.
@@ -52,7 +53,7 @@ A magic is eight bytes, four for the name and four for the file's kind, so the s
 
 ## Consequences
 
-- **Every fingerprint changes.** A context string is part of what each object's ID is made from, so every ID in the test vectors changes, and the vectors are printed again by their printer tests ([storage-format.md](../storage-format.md) §13). Nothing was published, so no kept project changes meaning. A project saved by a pre-release build (one with a `.bolt/` folder) isn't an Opalro project, and the personal settings in the old `bolt` settings folder aren't read: start such a project again with `opalro start`, and set the name and email again.
+- **Every record's fingerprint changes.** A context string is part of what each record's ID is made from, so every record's ID in the test vectors changes (a file's content ID uses none, and stays), and the vectors are printed again by their printer tests ([storage-format.md](../storage-format.md) §13). Nothing was published, so no kept project changes meaning. A project saved by a pre-release build (one with a `.bolt/` folder) isn't an Opalro project, and the personal settings in the old `bolt` settings folder aren't read: start such a project again with `opalro start`, and set the name and email again.
 - **`.bolt` becomes an ordinary name.** The rule that keeps a project's own folder out of saves now guards `.opalro`. The code that spots its spellings changes with it, including the first letter it looks for before anything else and the short names, so this change gets a red-team session before it is merged ([decision 024](024-red-team-gate.md)).
 - **Two names start alike on Windows.** `.opalro` and `.opalroignore` share their first six letters, so their 8.3 short names are both `OPALRO~` and a number, in the order they were made. A save never holds `opalro~1` to `opalro~4` in any case, so either one is safe.
 - **The trademark question moves, but stays.** A lawyer should still check OPALRO before v0.1 is sold. The page for the owner (part 4) now names the OPAL marks above instead of Puppet's BOLT. None of this is legal advice.

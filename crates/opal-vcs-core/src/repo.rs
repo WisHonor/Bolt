@@ -29,7 +29,7 @@ use crate::store::{Store, StoreError, is_damage};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 
-pub const FORMAT_TEXT: &str = "opal-repository 1\nhash blake3\nfeature chunks\n";
+pub const FORMAT_TEXT: &str = "opalro-repository 1\nhash blake3\nfeature chunks\n";
 /// The store may hold chunk lists, which builds from before them can't read safely.
 const CHUNKS: &str = "chunks";
 
@@ -761,12 +761,12 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
         .split('\n');
     match lines
         .next()
-        .and_then(|l| l.strip_prefix("opal-repository "))
+        .and_then(|l| l.strip_prefix("opalro-repository "))
     {
         Some("1") => {}
         Some(v) if v.bytes().all(|b| b.is_ascii_digit()) && !v.is_empty() => {
             return Err(RepoError::NewerFormat {
-                detail: format!("repository format \"opal-repository {v}\""),
+                detail: format!("repository format \"opalro-repository {v}\""),
             });
         }
         _ => return Err(damaged_format()),
@@ -1745,31 +1745,31 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// The format Opalro wrote before chunk lists.
-    const OLDER_FORMAT: &str = "opal-repository 1\nhash blake3\n";
+    const OLDER_FORMAT: &str = "opalro-repository 1\nhash blake3\n";
 
     #[test]
     fn format_file() {
         let chunks = BTreeSet::from(["chunks".to_owned()]);
         assert_eq!(
             FORMAT_TEXT,
-            "opal-repository 1\nhash blake3\nfeature chunks\n"
+            "opalro-repository 1\nhash blake3\nfeature chunks\n"
         );
         assert_eq!(parse_format(FORMAT_TEXT).unwrap().features, chunks);
         assert!(parse_format(OLDER_FORMAT).unwrap().features.is_empty());
         for (text, needle) in [
-            ("opal-repository 2\nhash blake3\n", "opal-repository 2"),
-            ("opal-repository 1\nhash sha256\n", "sha256"),
-            ("opal-repository 1\nhash sha3_256\n", "sha3_256"),
+            ("opalro-repository 2\nhash blake3\n", "opalro-repository 2"),
+            ("opalro-repository 1\nhash sha256\n", "sha256"),
+            ("opalro-repository 1\nhash sha3_256\n", "sha3_256"),
             (
-                "opal-repository 1\nhash blake3\nfeature large_files\n",
+                "opalro-repository 1\nhash blake3\nfeature large_files\n",
                 "large_files",
             ),
             (
-                "opal-repository 1\nhash blake3\nfeature teleport\n",
+                "opalro-repository 1\nhash blake3\nfeature teleport\n",
                 "teleport",
             ),
             (
-                "opal-repository 1\nhash blake3\nfeature chunks\nfeature teleport\n",
+                "opalro-repository 1\nhash blake3\nfeature chunks\nfeature teleport\n",
                 "teleport",
             ),
         ] {
@@ -1781,13 +1781,13 @@ mod tests {
         }
         for damaged in [
             "",
-            "opal-repository 1\n",
-            "opal-repository 1\r\nhash blake3\r\n",
-            "opal-repository 1\nhash blake3\r\n",
-            "opal-repository 1\nhash blake3\nfeature \n",
-            "opal-repository 1\nhash blake3\nfeature a b\n",
-            "opal-repository 1\nhash blake3\nfeature chunks\nfeature chunks\n",
-            "opal-repository 1\nhash blake3\nfeature chunks\n\n",
+            "opalro-repository 1\n",
+            "opalro-repository 1\r\nhash blake3\r\n",
+            "opalro-repository 1\nhash blake3\r\n",
+            "opalro-repository 1\nhash blake3\nfeature \n",
+            "opalro-repository 1\nhash blake3\nfeature a b\n",
+            "opalro-repository 1\nhash blake3\nfeature chunks\nfeature chunks\n",
+            "opalro-repository 1\nhash blake3\nfeature chunks\n\n",
             "hello\n",
         ] {
             assert!(
@@ -3708,7 +3708,7 @@ mod tests {
             }
         }
         // The hash named by a hostile `.opalro/format` is quoted in the message.
-        let e = parse_format("opal-repository 1\nhash \u{202e}evil\n").unwrap_err();
+        let e = parse_format("opalro-repository 1\nhash \u{202e}evil\n").unwrap_err();
         assert!(matches!(e, RepoError::NewerFormat { .. }), "{e:?}");
         assert!(e.to_string().contains("\"\\u{202e}evil\""), "{e}");
     }

@@ -27,7 +27,7 @@ new_shell() { env -i HOME="$HOME" TERM=dumb PATH=/usr/local/bin:/usr/bin:/bin:/u
 step "the download page: the archive for this system, and SHA256SUMS, into the same folder"
 in_doc "$page" "| \`$archive\` |"
 in_doc "$page" "Download the archive for your system, and \`SHA256SUMS\`, into the same folder."
-downloads="$HOME/Downloads/opal-first-run"
+downloads="$HOME/Downloads/opalro-first-run"
 mkdir -p "$downloads"
 cp "$from/$archive" "$from/SHA256SUMS" "$downloads/"
 cd "$downloads"
