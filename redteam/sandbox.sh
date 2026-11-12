@@ -4,9 +4,9 @@
 #   redteam/sandbox.sh run <cmd...>    run a command inside it (working dir /work = the copy)
 #   redteam/sandbox.sh down            stop and remove the container
 set -euo pipefail
-NAME=bolt-redteam
-IMAGE=bolt-redteam:latest
-CACHE=bolt-redteam-cargo
+NAME=opal-redteam
+IMAGE=opal-redteam:latest
+CACHE=opal-redteam-cargo
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 case "${1:-}" in

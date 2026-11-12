@@ -1,5 +1,5 @@
 [package]
-name = "bolt-vcs-fuzz"
+name = "opal-vcs-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -12,7 +12,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 tempfile = "3"
 # test-support for `Craft`, which writes the Git repositories the git_* targets read.
-bolt-vcs-core = { path = "../crates/bolt-vcs-core", features = ["test-support"] }
+opal-vcs-core = { path = "../crates/opal-vcs-core", features = ["test-support"] }
 
 # Not part of the main workspace, so `cargo test --workspace` and clippy never touch it.
 [workspace]

@@ -4,6 +4,7 @@
 - **Date:** 2026-11-01
 - **Agenda topic:** none (follows [decision 024](024-red-team-gate.md))
 - **Refined by:** [decision 026](026-ownership-check-details.md) (details of the ownership check, and limits left for later); [decision 027](027-project-folder-must-be-yours.md) (the project folder must be yours too); [decision 030](030-administrators-only-when-elevated.md) (the Administrators group counts only in an elevated terminal)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
 
 ## Context
 

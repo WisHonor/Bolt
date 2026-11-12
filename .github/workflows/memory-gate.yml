@@ -32,7 +32,7 @@ jobs:
       - name: Save a 10 GiB file
         shell: bash
         run: |
-          cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb 2>&1 | tee gate.txt
+          cargo test --release -p opal-vcs --test speed -- --ignored --nocapture --exact saving_a_10_gib_file_stays_under_500_mb 2>&1 | tee gate.txt
           # A name that matches no test passes too, and so does a skip: the measurement must be there.
           grep -q "test result: ok. 1 passed" gate.txt
           grep -q "saving 10 GiB: peak" gate.txt

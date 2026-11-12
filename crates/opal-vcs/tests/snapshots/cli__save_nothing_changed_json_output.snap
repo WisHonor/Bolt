@@ -1,0 +1,10 @@
+---
+source: crates/opal-vcs/tests/cli.rs
+expression: json
+---
+{
+  "opalro_json": 1,
+  "paths": [],
+  "result": "nothing_changed",
+  "warnings": []
+}

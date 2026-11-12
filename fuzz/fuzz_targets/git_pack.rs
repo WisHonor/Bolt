@@ -1,6 +1,6 @@
 #![no_main]
-use bolt_core::git::craft::{Craft, digest};
-use bolt_core::git::{GitId, HashKind, Repo};
+use opal_core::git::craft::{Craft, digest};
+use opal_core::git::{GitId, HashKind, Repo};
 use libfuzzer_sys::fuzz_target;
 
 // The input's first two bytes give the index's length; the rest is the pack. Each gets the

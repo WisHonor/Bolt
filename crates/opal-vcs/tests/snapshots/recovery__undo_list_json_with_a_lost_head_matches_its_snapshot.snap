@@ -1,0 +1,27 @@
+---
+source: crates/opal-vcs/tests/recovery.rs
+expression: masked(doc)
+---
+{
+  "ends": [
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    }
+  ],
+  "head_lost": true,
+  "opalro_json": 1,
+  "warnings": []
+}

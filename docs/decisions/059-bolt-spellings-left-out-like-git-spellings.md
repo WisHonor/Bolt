@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 3 planning, question 12; a follow-up from milestone 2)
 - **Decided by:** Claude, at the owner's request ("do whatever you think is best", 2026-11-05). The owner can reverse any part.
 - **Refines:** [decision 004](004-project-contents.md) (no part that Windows or macOS would treat as `.bolt`) and [decision 043](043-red-team-m2-rulings.md) (names Git treats as `.git` are left out of saves)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
 
 ## Context
 

@@ -6,6 +6,7 @@
 - **Refined by:** [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (the threshold is `bolt.toml`'s `chunk-files-over`); [decision 103](103-where-git-keeps-less-zstd-level-3-and-the-chunk-sizes-stay.md) (the chunk sizes stay)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 009](009-storage-engine.md) (chunking: FastCDC from 1 MB, 16 KB / 64 KB / 256 KB to start); decisions [013](013-local-data-and-offline.md) and [016](016-presets.md) (the threshold is fixed at 1 MiB until the presets make it a `bolt.toml` setting)
+- **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`, or `opal` in what only the program uses)
 
 ## Context
 

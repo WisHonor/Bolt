@@ -1,6 +1,6 @@
 #![no_main]
-use bolt_core::drive::Drive;
-use bolt_core::ignore::{Matcher, Rules, glob_match};
+use opal_core::drive::Drive;
+use opal_core::ignore::{Matcher, Rules, glob_match};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -22,8 +22,8 @@ fuzz_target!(|data: &[u8]| {
                 ignores_case,
                 composes_unicode,
             });
-            // A `.gitignore` at the top and a `.boltignore` below, so Git's verdict is looked
-            // for again where the `.boltignore` decides.
+            // A `.gitignore` at the top and a `.opalroignore` below, so Git's verdict is looked
+            // for again where the `.opalroignore` decides.
             matcher.enter("", vec![Rules::parse(data, "", true)]);
             matcher.enter("a/b", vec![Rules::parse(data, "a/b", false)]);
             for path in paths {

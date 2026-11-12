@@ -1,0 +1,14 @@
+---
+source: crates/opal-vcs/tests/tidy.rs
+expression: doc
+---
+{
+  "bytes_after": "[redacted]",
+  "bytes_before": "[redacted]",
+  "opalro_json": 1,
+  "packs_removed": 3,
+  "packs_written": 1,
+  "packs_young": 0,
+  "to_free": "[redacted]",
+  "warnings": []
+}

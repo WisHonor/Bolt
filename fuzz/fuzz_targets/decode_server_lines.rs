@@ -2,5 +2,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = bolt_core::diary::ServerLines::decode(data);
+    let _ = opal_core::diary::ServerLines::decode(data);
 });

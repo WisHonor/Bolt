@@ -1,0 +1,15 @@
+---
+source: crates/opal-vcs/tests/setup.rs
+expression: shown
+---
+{
+  "ask_before_saving_files_over": 10000,
+  "ask_before_saving_over": 100000000,
+  "chunk_files_over": 1048576,
+  "has_rules_file": true,
+  "ignore_block_lines": 4,
+  "opalro_json": 1,
+  "preset": "code",
+  "rules": [],
+  "warnings": []
+}

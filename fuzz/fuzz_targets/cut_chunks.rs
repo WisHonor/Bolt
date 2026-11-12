@@ -1,5 +1,5 @@
 #![no_main]
-use bolt_core::chunks::{Cutter, MAX_CHUNK, MIN_CHUNK, chunk_len};
+use opal_core::chunks::{Cutter, MAX_CHUNK, MIN_CHUNK, chunk_len};
 use libfuzzer_sys::fuzz_target;
 use std::io::{self, Read};
 

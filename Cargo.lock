@@ -148,59 +148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bolt-vcs"
-version = "0.1.0"
-dependencies = [
- "anstyle-query",
- "assert_cmd",
- "blake3",
- "bolt-vcs-core",
- "bolt-vcs-platform",
- "clap",
- "insta",
- "jiff",
- "proptest",
- "serde_json",
- "tempfile",
- "terminal_size",
- "unicode-normalization",
-]
-
-[[package]]
-name = "bolt-vcs-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "bolt-vcs-platform",
- "directories",
- "encoding_rs",
- "getrandom",
- "jiff",
- "miniz_oxide",
- "proptest",
- "serde",
- "serde_json",
- "sha1-checked",
- "sha2",
- "similar",
- "tempfile",
- "thiserror",
- "toml",
- "unicode-normalization",
- "zstd",
-]
-
-[[package]]
-name = "bolt-vcs-platform"
-version = "0.1.0"
-dependencies = [
- "libc",
- "rustix",
- "tempfile",
- "windows-sys",
-]
-
-[[package]]
 name = "borsh"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -698,6 +645,59 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "opal-vcs"
+version = "0.1.0"
+dependencies = [
+ "anstyle-query",
+ "assert_cmd",
+ "blake3",
+ "clap",
+ "insta",
+ "jiff",
+ "opal-vcs-core",
+ "opal-vcs-platform",
+ "proptest",
+ "serde_json",
+ "tempfile",
+ "terminal_size",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "opal-vcs-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "directories",
+ "encoding_rs",
+ "getrandom",
+ "jiff",
+ "miniz_oxide",
+ "opal-vcs-platform",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha1-checked",
+ "sha2",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "unicode-normalization",
+ "zstd",
+]
+
+[[package]]
+name = "opal-vcs-platform"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "tempfile",
+ "windows-sys",
+]
 
 [[package]]
 name = "option-ext"

@@ -1,0 +1,27 @@
+---
+source: crates/opal-vcs/tests/verify.rs
+expression: found
+---
+{
+  "bytes": "[redacted]",
+  "entries": 2,
+  "error": {
+    "hint": "Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.",
+    "message": "[redacted]"
+  },
+  "objects": 8,
+  "opalro_json": 1,
+  "packs": 3,
+  "problems": [
+    {
+      "kind": "object_damaged",
+      "message": "It doesn't match its fingerprint.",
+      "needed_by": null,
+      "object": "1edaff300ed3affdde799aa5903be746478016b455846bfd6b08c4474f7fe70d",
+      "pack": "00.pack"
+    }
+  ],
+  "problems_total": 1,
+  "saves": 2,
+  "warnings": []
+}

@@ -1,0 +1,24 @@
+---
+source: crates/opal-vcs/tests/setup.rs
+expression: doc
+---
+{
+  "found": {
+    "engines": [
+      "unity"
+    ],
+    "languages": []
+  },
+  "opalro_json": 1,
+  "position": {
+    "line": "main"
+  },
+  "preset": "game",
+  "root": "[redacted]",
+  "rules_written": [
+    "opalro.toml",
+    ".opalroignore"
+  ],
+  "save": "[redacted]",
+  "warnings": []
+}

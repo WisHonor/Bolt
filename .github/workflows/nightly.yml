@@ -28,8 +28,9 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          # A new name since the rename: the old inputs begin with the old magic bytes.
+          key: fuzz-corpus-opalro-${{ github.run_id }}
+          restore-keys: fuzz-corpus-opalro-
       - name: Fuzz every target
         run: |
           for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids other_lines file_cache decode_journal decode_chunk_list cut_chunks parse_rules; do
@@ -59,9 +60,9 @@ jobs:
       - name: Import it and compare with Git
         shell: bash
         env:
-          BOLT_DIFF_REPO: ${{ runner.temp }}/git
+          OPALRO_DIFF_REPO: ${{ runner.temp }}/git
         run: |
-          cargo test --release -p bolt-vcs --test import_vs_git -- --ignored --nocapture --exact a_real_repository_matches_git 2>&1 | tee differential.txt
+          cargo test --release -p opal-vcs --test import_vs_git -- --ignored --nocapture --exact a_real_repository_matches_git 2>&1 | tee differential.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" differential.txt
 
@@ -79,7 +80,7 @@ jobs:
       - name: Inflate big, mostly-zero streams
         shell: bash
         run: |
-          cargo test --release -p bolt-vcs-core --lib -- --ignored --exact git::odb::tests::big_mostly_zero_streams_inflate_whole 2>&1 | tee sweep.txt
+          cargo test --release -p opal-vcs-core --lib -- --ignored --exact git::odb::tests::big_mostly_zero_streams_inflate_whole 2>&1 | tee sweep.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" sweep.txt
 
@@ -97,7 +98,7 @@ jobs:
       - name: Write out a list of 8,388,608 one-byte chunks
         shell: bash
         run: |
-          cargo test --release -p bolt-vcs --test corpus_chunks -- --ignored --nocapture --exact a_list_of_the_most_chunks_a_list_may_hold_is_written_out_whole 2>&1 | tee chunks.txt
+          cargo test --release -p opal-vcs --test corpus_chunks -- --ignored --nocapture --exact a_list_of_the_most_chunks_a_list_may_hold_is_written_out_whole 2>&1 | tee chunks.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" chunks.txt
 
@@ -117,7 +118,7 @@ jobs:
         env:
           PROPTEST_CASES: "1024"
         run: |
-          cargo test --release -p bolt-vcs --test model 2>&1 | tee model.txt
+          cargo test --release -p opal-vcs --test model 2>&1 | tee model.txt
           grep -q "test result: ok. 1 passed" model.txt
 
   # The status gate: status on an unchanged 100,000-file project. The test prints both times and
@@ -134,11 +135,11 @@ jobs:
       - name: Time status on 100,000 files
         shell: bash
         run: |
-          cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project 2>&1 | tee speed.txt
+          cargo test --release -p opal-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project 2>&1 | tee speed.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" speed.txt
-          # A hostile ignore file costs Bolt's matcher at most twice Git's time (timed in a release build only).
-          cargo test --release -p bolt-vcs --test redteam14 -- --nocapture --exact hostile_glob_ignore_lines_cost_bolt_no_more_than_twice_git 2>&1 | tee globs.txt
+          # A hostile ignore file costs Opalro's matcher at most twice Git's time (timed in a release build only).
+          cargo test --release -p opal-vcs --test redteam14 -- --nocapture --exact hostile_glob_ignore_lines_cost_opal_no_more_than_twice_git 2>&1 | tee globs.txt
           grep -q "test result: ok. 1 passed" globs.txt
 
   # Saving a 10 GiB file of incompressible bytes may peak at 500,000,000 bytes of memory at most.
@@ -147,7 +148,7 @@ jobs:
     if: github.event_name != 'push'
     uses: ./.github/workflows/memory-gate.yml
 
-  # Bolt's status and small save on Git's source, at most twice Git's time, and goto at most
+  # Opalro's status and small save on Git's source, at most twice Git's time, and goto at most
   # three and a half times, twice being its goal for v0.2. Nightly and by hand, not on pushes.
   speed-gate:
     if: github.event_name != 'push'

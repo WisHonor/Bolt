@@ -1,0 +1,123 @@
+---
+source: crates/opal-vcs/tests/undo.rs
+expression: "doc(&[\"undo\", \"--list\", \"--all\"])"
+---
+{
+  "entries": [
+    {
+      "action": "redo",
+      "command": "redo",
+      "effects": [
+        {
+          "from": {
+            "line": "main"
+          },
+          "kind": "position",
+          "to": {
+            "save": "[redacted]"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": "[redacted]",
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "undo",
+      "command": "undo",
+      "effects": [
+        {
+          "from": {
+            "save": "[redacted]"
+          },
+          "kind": "position",
+          "to": {
+            "line": "main"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": "[redacted]",
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "goto",
+      "effects": [
+        {
+          "from": {
+            "line": "main"
+          },
+          "kind": "position",
+          "to": {
+            "save": "[redacted]"
+          }
+        },
+        {
+          "from": "[redacted]",
+          "kind": "files",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "save",
+      "effects": [
+        {
+          "from": "[redacted]",
+          "kind": "line",
+          "name": "main",
+          "to": "[redacted]"
+        }
+      ],
+      "entry": "[redacted]",
+      "first": false,
+      "target": null,
+      "time_ms": "[redacted]"
+    },
+    {
+      "action": "command",
+      "command": "start",
+      "effects": [],
+      "entry": "[redacted]",
+      "first": true,
+      "target": null,
+      "time_ms": "[redacted]"
+    }
+  ],
+  "opalro_json": 1,
+  "warnings": []
+}

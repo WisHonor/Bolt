@@ -1,5 +1,5 @@
 #![no_main]
-use bolt_core::git::{
+use opal_core::git::{
     HashKind, is_exact_lfs_pointer, is_lfs_lookalike, lfs_pointer, looks_like_lfs_pointer,
     parse_commit, parse_person, parse_tag, parse_tree,
 };

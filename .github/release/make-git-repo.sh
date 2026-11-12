@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Makes a small Git repository for Bolt to import: three commits on two branches, a tag,
+# Makes a small Git repository for Opalro to import: three commits on two branches, a tag,
 # a subfolder and a 2 MiB file. None of this computer's Git settings are read.
 # Usage: make-git-repo.sh <dir>
 set -euo pipefail

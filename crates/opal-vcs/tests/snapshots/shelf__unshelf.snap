@@ -1,0 +1,18 @@
+---
+source: crates/opal-vcs/tests/shelf.rs
+expression: "doc(&[\"unshelf\"])"
+---
+{
+  "carried": 0,
+  "finished": false,
+  "not_written": [],
+  "opalro_json": 1,
+  "placeholders": [],
+  "removed": 3,
+  "shelf": {
+    "label": "1",
+    "save": "[redacted]"
+  },
+  "warnings": [],
+  "written": 3
+}

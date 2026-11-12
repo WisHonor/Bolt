@@ -18,7 +18,7 @@ jobs:
     if: "!startsWith(github.ref, 'refs/heads/redteam/')"
     uses: ./.github/workflows/speed-gate.yml
 
-  # Bolt, Git, and Git with Git LFS through the same steps on the same data, and the speeds of
+  # Opalro, Git, and Git with Git LFS through the same steps on the same data, and the speeds of
   # the parts (bench/README.md). docs/benchmarks.md holds the results.
   against-git:
     if: "!startsWith(github.ref, 'refs/heads/redteam/')"
@@ -67,11 +67,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install hyperfine
         run: cargo install --locked hyperfine --version 1.20.0
-      - name: Build bolt
-        run: cargo build --release -p bolt-vcs
+      - name: Build opalro
+        run: cargo build --release -p opal-vcs
       - name: Versions
         run: |
-          echo "bolt at $GITHUB_SHA"
+          echo "opalro at $GITHUB_SHA"
           git --version && git lfs version && hyperfine --version && jq --version && openssl version
       - name: Fetch the code project and Godot's demos
         run: |
@@ -79,11 +79,11 @@ jobs:
           bash bench/data.sh godot "$BENCH_DATA/godot"
       - name: Speeds of the parts, and what compressing again would save
         run: |
-          export BOLT_BENCH_CODE=$BENCH_DATA/code BOLT_BENCH_GODOT=$BENCH_DATA/godot
-          cargo test --release -p bolt-vcs-core --test throughput -- --ignored --nocapture --test-threads=1 2>&1 | tee throughput.txt
+          export OPALRO_BENCH_CODE=$BENCH_DATA/code OPALRO_BENCH_GODOT=$BENCH_DATA/godot
+          cargo test --release -p opal-vcs-core --test throughput -- --ignored --nocapture --test-threads=1 2>&1 | tee throughput.txt
           # A name that matches no test passes too, so the tests must have run.
           grep -q "test result: ok. 2 passed" throughput.txt
-      - name: Bolt, Git and Git LFS
+      - name: Opalro, Git and Git LFS
         run: |
           export PATH="$PWD/target/release:$PATH"
           bash bench/run.sh sets "$BENCH_DATA" "$BENCH_RESULTS"
@@ -97,7 +97,7 @@ jobs:
           path: ${{ env.BENCH_RESULTS }}
           if-no-files-found: ignore
 
-  # Imports git/git with main's bolt and this commit's in turn, three times each on the same
+  # Imports git/git with main's opalro and this commit's in turn, three times each on the same
   # machine, with each one's time and peak memory, and the first save after each import.
   import-git:
     if: "!startsWith(github.ref, 'refs/heads/redteam/')"
@@ -120,15 +120,15 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Build both
         run: |
-          cargo build --release -p bolt-vcs
-          cargo build --release -p bolt-vcs --manifest-path main-build/Cargo.toml
+          cargo build --release -p opal-vcs
+          cargo build --release -p opal-vcs --manifest-path main-build/Cargo.toml
           echo "main at $(git -C main-build rev-parse HEAD), this branch at $GITHUB_SHA"
       - name: Clone git/git with its whole history
         run: git clone --quiet https://github.com/git/git "$RUNNER_TEMP/git"
-      - name: Import it with each bolt in turn
-        run: bash bench/run.sh import "$RUNNER_TEMP/git" "$PWD/main-build/target/release/bolt" "$PWD/target/release/bolt"
+      - name: Import it with each opalro in turn
+        run: bash bench/run.sh import "$RUNNER_TEMP/git" "$PWD/main-build/target/release/opalro" "$PWD/target/release/opalro"
 
-  # The red team's RT4-1 repository: 100 commits sharing a 1 MB message, each stored whole in Bolt
+  # The red team's RT4-1 repository: 100 commits sharing a 1 MB message, each stored whole in Opalro
   # since records aren't chunked. Attack code, so it runs only on redteam/ branches. The test's
   # bound is expected to fail; the sizes are printed either way.
   rt4-1-sizes:
@@ -143,5 +143,5 @@ jobs:
       - name: Import RT4-1's repository
         shell: bash
         run: |
-          cargo test --release -p bolt-vcs --test redteam4 -- --ignored --nocapture --exact rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_bolt 2>&1 | tee rt4.txt || true
+          cargo test --release -p opal-vcs --test redteam4 -- --ignored --nocapture --exact rt4_1_a_small_history_without_merges_does_not_import_into_a_huge_opal 2>&1 | tee rt4.txt || true
           grep "RT4-1 sizes" rt4.txt

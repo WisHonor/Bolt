@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  # On Git's source, Bolt's status and small save may take at most twice Git's time, and goto
+  # On Git's source, Opalro's status and small save may take at most twice Git's time, and goto
   # three and a half times, twice being its goal for v0.2 (bench/README.md). The bench and nightly
   # workflows both call this job.
   speed-gate:
@@ -54,13 +54,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install hyperfine
         run: cargo install --locked hyperfine --version 1.20.0
-      - name: Build bolt
-        run: cargo build --release -p bolt-vcs
+      - name: Build opalro
+        run: cargo build --release -p opal-vcs
       - name: Versions
         run: |
-          echo "bolt at $GITHUB_SHA"
+          echo "opalro at $GITHUB_SHA"
           git --version && hyperfine --version && jq --version
-      - name: Bolt against Git
+      - name: Opalro against Git
         run: |
           export PATH="$PWD/target/release:$PATH"
           bash bench/run.sh gate "$BENCH_DATA" "$BENCH_RESULTS"

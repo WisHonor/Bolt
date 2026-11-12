@@ -41,7 +41,7 @@ jobs:
         id: version
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "bolt-vcs") | .version')
+            | jq -r '.packages[] | select(.name == "opal-vcs") | .version')
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Not a plain version: $version"
             exit 1
@@ -64,9 +64,9 @@ jobs:
       - name: Write the notices
         run: |
           "$RUNNER_TEMP/cargo-about/cargo-about" generate --locked -c about.toml \
-            -m crates/bolt-vcs/Cargo.toml -o THIRD-PARTY-LICENSES.html about.hbs
-          if grep -q 'bolt-vcs' THIRD-PARTY-LICENSES.html; then
-            echo "::error::Bolt's own crates are in the notices"
+            -m crates/opal-vcs/Cargo.toml -o THIRD-PARTY-LICENSES.html about.hbs
+          if grep -q 'opal-vcs' THIRD-PARTY-LICENSES.html; then
+            echo "::error::Opalro's own crates are in the notices"
             exit 1
           fi
           # The standard library is built in too; its notices come with the toolchain.
@@ -84,16 +84,16 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          zip="$RUNNER_TEMP/bolt-$VERSION-website.zip"
+          zip="$RUNNER_TEMP/opalro-$VERSION-website.zip"
           bash .github/release/website.sh "$VERSION" "$zip"
           unzip -l "$zip"
           sum=$(sha256sum "$zip" | cut -d ' ' -f 1)
-          echo "SHA-256 of bolt-$VERSION-website.zip: $sum"
+          echo "SHA-256 of opalro-$VERSION-website.zip: $sum"
           echo "sha256=$sum" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: website
-          path: ${{ runner.temp }}/bolt-${{ steps.version.outputs.version }}-website.zip
+          path: ${{ runner.temp }}/opalro-${{ steps.version.outputs.version }}-website.zip
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'pull_request' && 3 || 90 }}
 
@@ -150,8 +150,8 @@ jobs:
       # No cache: a release is built from the sources alone.
       - name: Build
         run: |
-          cargo build --release --locked -p bolt-vcs --target "$TARGET"
-          bin="target/$TARGET/release/bolt$EXE"
+          cargo build --release --locked -p opal-vcs --target "$TARGET"
+          bin="target/$TARGET/release/opalro$EXE"
           if [ "$RUNNER_OS" = Linux ]; then
             ldd --version | head -n 1
             echo "Newest glibc symbol it needs: $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
@@ -207,21 +207,21 @@ jobs:
               exit 1
             fi
           done
-          bash "$check" "target/$TARGET/release/bolt$EXE"
+          bash "$check" "target/$TARGET/release/opalro$EXE"
       - name: Smoke test
         run: |
-          bin="$GITHUB_WORKSPACE/target/$TARGET/release/bolt$EXE"
+          bin="$GITHUB_WORKSPACE/target/$TARGET/release/opalro$EXE"
           scratch=$(mktemp -d)
           if command -v cygpath > /dev/null; then scratch=$(cygpath -m "$scratch"); fi
-          export BOLT_CONFIG_DIR="$scratch/config"
-          unset BOLT_USER_NAME BOLT_USER_EMAIL
-          mkdir "$BOLT_CONFIG_DIR" "$scratch/project"
+          export OPALRO_CONFIG_DIR="$scratch/config"
+          unset OPALRO_USER_NAME OPALRO_USER_EMAIL
+          mkdir "$OPALRO_CONFIG_DIR" "$scratch/project"
           printf '[user]\nname = "Release Smoke Test"\nemail = "smoke@example.invalid"\n' \
-            > "$BOLT_CONFIG_DIR/config.toml"
+            > "$OPALRO_CONFIG_DIR/config.toml"
           cd "$scratch/project"
           set -x
           said=$("$bin" --version)
-          [ "$said" = "bolt $VERSION" ]
+          [ "$said" = "opalro $VERSION" ]
           "$bin" start --preset custom
           echo "Hello" > hello.txt
           "$bin" save "First"
@@ -239,11 +239,11 @@ jobs:
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage/docs"
           gh run download "$RUN_ID" --repo "$REPO" --name third-party-licenses --dir "$stage"
-          cp "target/$TARGET/release/bolt$EXE" "$stage/"
+          cp "target/$TARGET/release/opalro$EXE" "$stage/"
           cp README.md USER-AGREEMENT.md "$stage/"
           cp docs/guide.md "$stage/docs/"
-          archive="bolt-$VERSION-$TARGET.$EXT"
-          files=("bolt$EXE" README.md docs/guide.md USER-AGREEMENT.md
+          archive="opalro-$VERSION-$TARGET.$EXT"
+          files=("opalro$EXE" README.md docs/guide.md USER-AGREEMENT.md
                  THIRD-PARTY-LICENSES.html THIRD-PARTY-LICENSES-RUST.html)
           # Not -F: with -i it aborts in Git for Windows' grep.
           s=0
@@ -313,11 +313,11 @@ jobs:
         run: |
           down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
           mkdir "$dist"
-          gh run download "$RUN_ID" --repo "$REPO" --pattern "bolt-$VERSION-*" --dir "$down"
+          gh run download "$RUN_ID" --repo "$REPO" --pattern "opalro-$VERSION-*" --dir "$down"
           names=()
           for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
                    aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz; do
-            name="bolt-$VERSION-$t"
+            name="opalro-$VERSION-$t"
             mv "$down/$name/$name" "$dist/$name"
             names+=("$name")
             # Only what the build job hashed goes into SHA256SUMS.
@@ -380,7 +380,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       TARGET: ${{ matrix.target }}
-      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      ARCHIVE: opalro-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
       CONTAINERS: ${{ matrix.containers }}
     defaults:
       run:
@@ -408,15 +408,15 @@ jobs:
           cd "$RUNNER_TEMP/download"
           # The guide's line names the Apple silicon archive for both Macs.
           if [ "$RUNNER_OS" = macOS ]; then
-            line="grep bolt-$VERSION-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c"
+            line="grep opalro-$VERSION-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c"
           else
-            line="grep bolt-$VERSION-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c"
+            line="grep opalro-$VERSION-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c"
           fi
           if ! grep -qF -- "$line" "$GITHUB_WORKSPACE/docs/guide.md"; then
             echo "::error::No longer in the guide: $line"
             exit 1
           fi
-          said=$(eval "${line/bolt-$VERSION-aarch64-apple-darwin.tar.gz/$ARCHIVE}")
+          said=$(eval "${line/opalro-$VERSION-aarch64-apple-darwin.tar.gz/$ARCHIVE}")
           echo "$said"
           [ "$said" = "$ARCHIVE: OK" ]
           mkdir "$RUNNER_TEMP/pkg"
@@ -446,7 +446,7 @@ jobs:
       - name: What the program declares, against what the guide says it needs
         if: runner.os != 'Windows'
         run: |
-          bin="$RUNNER_TEMP/pkg/bolt"
+          bin="$RUNNER_TEMP/pkg/opalro"
           if [ "$RUNNER_OS" = Linux ]; then
             grep -qF 'glibc 2.34 or newer' docs/guide.md
             newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
@@ -472,13 +472,13 @@ jobs:
         run: bash .github/release/make-git-repo.sh "$RUNNER_TEMP/repo"
       - name: The clean-machine script
         if: runner.os != 'Windows'
-        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/bolt" "$VERSION" "$RUNNER_TEMP/repo"
+        run: bash .github/release/clean-machine.sh "$RUNNER_TEMP/pkg/opalro" "$VERSION" "$RUNNER_TEMP/repo"
       - name: The clean-machine script
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\clean-machine.ps1 `
-            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
+            -Opalro $env:RUNNER_TEMP\pkg\opalro.exe -Version $env:VERSION -GitRepo $env:RUNNER_TEMP\repo
           exit $LASTEXITCODE
       - name: In bare containers
         if: matrix.containers && runner.os != 'Windows'
@@ -488,7 +488,7 @@ jobs:
           cp -R "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/repo" .github/release/clean-machine.sh "$mount/"
           for image in $CONTAINERS; do
             echo "::group::$image"
-            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/bolt "$VERSION" /w/repo
+            docker run --rm -v "$mount:/w:ro" "$image" bash /w/clean-machine.sh /w/pkg/opalro "$VERSION" /w/repo
             echo "::endgroup::"
           done
       - name: In bare containers
@@ -504,7 +504,7 @@ jobs:
           foreach ($image in $env:CONTAINERS -split ' ') {
             Write-Host "::group::$image"
             docker run --rm -v "${mount}:C:\w" $image powershell -NoProfile -ExecutionPolicy Bypass `
-              -File C:\w\clean-machine.ps1 -Bolt C:\w\pkg\bolt.exe -Version $env:VERSION -GitRepo C:\w\repo
+              -File C:\w\clean-machine.ps1 -Opalro C:\w\pkg\opalro.exe -Version $env:VERSION -GitRepo C:\w\repo
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Write-Host '::endgroup::'
           }
@@ -522,7 +522,7 @@ jobs:
             -Page $env:GITHUB_WORKSPACE\docs\releases\download-page.md
           exit $LASTEXITCODE
 
-  # Bolt where ordinary computers keep projects: FAT32 and exFAT drives, their top, a network
+  # Opalro where ordinary computers keep projects: FAT32 and exFAT drives, their top, a network
   # share. What it says is written down in testing.md, not gated: the release doesn't need this.
   ordinary-computers:
     needs: [prepare, build]
@@ -541,7 +541,7 @@ jobs:
     permissions:
       contents: read
     env:
-      ARCHIVE: bolt-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      ARCHIVE: opalro-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
     defaults:
       run:
         shell: bash
@@ -569,13 +569,13 @@ jobs:
           fi
       - name: The tries
         if: runner.os != 'Windows'
-        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/bolt"
+        run: bash .github/release/ordinary-computers.sh "$RUNNER_TEMP/pkg/opalro"
       - name: The tries
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .github\release\ordinary-computers.ps1 `
-            -Bolt $env:RUNNER_TEMP\pkg\bolt.exe
+            -Opalro $env:RUNNER_TEMP\pkg\opalro.exe
           exit $LASTEXITCODE
 
   # The only job that may write, a draft release: only on a hand start from main, never elsewhere.
@@ -635,12 +635,12 @@ jobs:
         run: |
           down="$RUNNER_TEMP/download" dist="$RUNNER_TEMP/dist"
           mkdir "$dist"
-          gh run download "$RUN_ID" --repo "$REPO" --pattern "bolt-$VERSION-*" --dir "$down"
+          gh run download "$RUN_ID" --repo "$REPO" --pattern "opalro-$VERSION-*" --dir "$down"
           gh run download "$RUN_ID" --repo "$REPO" --name sha256sums --dir "$dist"
           gh run download "$RUN_ID" --repo "$REPO" --name website --dir "$dist"
           for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
                    aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz; do
-            name="bolt-$VERSION-$t"
+            name="opalro-$VERSION-$t"
             mv "$down/$name/$name" "$dist/$name"
           done
           if [ -n "$(find "$down" -type f)" ]; then
@@ -651,7 +651,7 @@ jobs:
           # Each file against the hash the job that made it gave, not only against SHA256SUMS.
           for t in x86_64-pc-windows-msvc.zip x86_64-unknown-linux-gnu.tar.gz \
                    aarch64-apple-darwin.tar.gz x86_64-apple-darwin.tar.gz website.zip; do
-            name="bolt-$VERSION-$t"
+            name="opalro-$VERSION-$t"
             if [ "$t" = website.zip ]; then
               made=$WEBSITE_SHA256
             else
@@ -671,8 +671,8 @@ jobs:
             exit 1
           fi
           ls -l "$dist"
-          want=$(printf '%s\n' SHA256SUMS "bolt-$VERSION-website.zip" "bolt-$VERSION-x86_64-pc-windows-msvc.zip" \
-            "bolt-$VERSION-"{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-apple-darwin}.tar.gz | sort)
+          want=$(printf '%s\n' SHA256SUMS "opalro-$VERSION-website.zip" "opalro-$VERSION-x86_64-pc-windows-msvc.zip" \
+            "opalro-$VERSION-"{x86_64-unknown-linux-gnu,aarch64-apple-darwin,x86_64-apple-darwin}.tar.gz | sort)
           if [ "$(ls -A "$dist" | sort)" != "$want" ]; then
             echo "::error::The draft's files aren't exactly the four archives, SHA256SUMS and the website copies"
             exit 1
@@ -685,5 +685,5 @@ jobs:
           cp "docs/releases/$TAG.md" "$notes"
           printf '\nMade by %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$REPO" "$RUN_ID" >> "$notes"
           gh release create "$TAG" --repo "$REPO" --draft --target "$GITHUB_SHA" \
-            --title "Bolt $VERSION" --notes-file "$notes" \
-            "$dist"/bolt-"$VERSION"-*.zip "$dist"/bolt-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"
+            --title "Opalro $VERSION" --notes-file "$notes" \
+            "$dist"/opalro-"$VERSION"-*.zip "$dist"/opalro-"$VERSION"-*.tar.gz "$dist/SHA256SUMS"

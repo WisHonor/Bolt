@@ -1,0 +1,40 @@
+[package]
+name = "opal-vcs-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[lib]
+name = "opal_core"
+
+[features]
+fault-injection = []
+test-support = []
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1.8.7"
+opal-vcs-platform = { path = "../opal-vcs-platform" }
+directories = "6.0.0"
+encoding_rs = "0.8.44"
+getrandom = "0.4.3"
+jiff = "0.2.38"
+miniz_oxide = "0.9.1"
+serde = { version = "1", features = ["derive"] }
+sha1-checked = { version = "0.10.0", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
+similar = { version = "2.7.0", default-features = false }
+thiserror = "2.0.21"
+toml = "1.1.8"
+unicode-normalization = "0.1.26"
+zstd = "0.14.3"
+
+[dev-dependencies]
+opal-vcs-platform = { path = "../opal-vcs-platform", features = ["test-support"] }
+proptest = "1.12.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.27.0"

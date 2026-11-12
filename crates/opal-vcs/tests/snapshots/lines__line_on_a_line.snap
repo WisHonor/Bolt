@@ -1,0 +1,15 @@
+---
+source: crates/opal-vcs/tests/lines.rs
+expression: line(&env)
+---
+{
+  "lines": [
+    "main"
+  ],
+  "opalro_json": 1,
+  "position": {
+    "line": "main"
+  },
+  "server_lines": [],
+  "warnings": []
+}

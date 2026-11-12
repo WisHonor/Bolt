@@ -1,4 +1,4 @@
-# Bolt
+# Opalro
 
 A new version control system with its own engine (not a Git wrapper), written in Rust. One tool for code and large binary assets: friendly commands, undo for everything, great big-file handling.
 
@@ -13,7 +13,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 
 ## Working with the owner
 - The owner is learning Rust and VCS internals and wants to understand and own every core decision.
-- Bolt is a personal project, but design it as if it would be marketed and sold: the bar is "best on the market". Keep the technical goals ambitious.
+- Opalro is a personal project, but design it as if it would be marketed and sold: the bar is "best on the market". Keep the technical goals ambitious.
 - Plain language first (everyday analogies welcome), then the technical detail.
 - One topic at a time, in agenda order: explain it, give 2–3 realistic options with trade-offs and which existing VCS does each, recommend one, then wait for the owner's decision.
 - Be honest: push back on bad ideas, call out over-ambition, say when something is hard or already solved elsewhere.
@@ -24,7 +24,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 1. Never lose or corrupt user data: atomic writes, repository locking, hash verification on every read and every received object, crash safety.
 2. Security by design: treat every repository and server as potentially malicious.
 3. Testability: unit, round-trip, property-based, differential vs. Git, crash, fuzz, malicious-repo corpus; CI on Windows, macOS and Linux.
-4. Provable claims: reproducible benchmarks vs. Git, `bolt verify`, a documented storage format spec.
+4. Provable claims: reproducible benchmarks vs. Git, `opalro verify`, a documented storage format spec.
 5. Correct first, fast second: measure before optimizing.
 
 ## Engineering rules (decision 022)

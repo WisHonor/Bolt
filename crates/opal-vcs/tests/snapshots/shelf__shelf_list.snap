@@ -1,0 +1,23 @@
+---
+source: crates/opal-vcs/tests/shelf.rs
+expression: "doc(&[\"shelf\", \"--list\"])"
+---
+{
+  "opalro_json": 1,
+  "shelves": [
+    {
+      "files": 5,
+      "label": "1",
+      "line": "main",
+      "message": "Mine",
+      "save": "[redacted]",
+      "saver": {
+        "email": "test@example.com",
+        "name": "Test",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      }
+    }
+  ],
+  "warnings": []
+}

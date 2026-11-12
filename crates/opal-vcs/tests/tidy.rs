@@ -1,0 +1,320 @@
+//! `opalro tidy`, end to end.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::fs;
+use std::time::{Duration, SystemTime};
+
+use opal_core::repo::Repository;
+use serde_json::{Value, json};
+
+mod support;
+use support::{Env, id_of, main_tip, text, write_noise};
+
+/// `opalro <args>`, which must succeed; what it printed, and what it said on stderr.
+fn ok(env: &Env, args: &[&str]) -> (String, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{args:?}: {}",
+        text(&out.stderr)
+    );
+    (text(&out.stdout), text(&out.stderr))
+}
+
+/// A project with a file saved, and 64 KiB that don't compress in a pack of their own, which
+/// nothing reaches, as a crash can leave them.
+fn with_garbage() -> Env {
+    let env = Env::empty();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    fs::write(env.root().join("a.txt"), "one").unwrap();
+    ok(&env, &["save", "One"]);
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let lost: Vec<u8> = (0..64 << 10)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x.to_le_bytes()[3]
+        })
+        .collect();
+    packs.add_content(&lost).unwrap();
+    packs.finish().unwrap();
+    drop(lock);
+    env
+}
+
+/// Makes every pack of the project `hours` old, so that `tidy` may change it.
+fn age(env: &Env, hours: u64) {
+    let packs = env.root().join(".opalro").join("store").join("packs");
+    for entry in fs::read_dir(packs).unwrap() {
+        let file = fs::File::options()
+            .write(true)
+            .open(entry.unwrap().path())
+            .unwrap();
+        let then = SystemTime::now() - Duration::from_secs(hours * 3600);
+        file.set_modified(then).unwrap();
+    }
+}
+
+#[test]
+fn tidy_says_what_it_will_free_and_what_it_freed() {
+    let env = with_garbage();
+    age(&env, 48);
+    let (head, packs) = env.standing();
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["opalro_json"], 1);
+    let (before, after) = (doc["bytes_before"].as_u64(), doc["bytes_after"].as_u64());
+    let freed = before.unwrap() - after.unwrap();
+    assert!(freed >= 64 << 10, "{doc}");
+    // Nothing kept is in two packs here, so the estimate is exact.
+    assert_eq!(doc["to_free"], json!(freed), "{doc}");
+    assert_eq!(doc["packs_removed"], json!(packs.len()), "{doc}");
+    assert_eq!(doc["packs_written"], 1, "{doc}");
+    assert_eq!(doc["packs_young"], 0, "{doc}");
+    assert_eq!(doc["warnings"], json!([]), "{doc}");
+    // It makes no diary entry, and the project reads as before.
+    assert_eq!(env.standing().0, head);
+    let (status, _) = ok(&env, &["status"]);
+    assert!(status.contains("Nothing changed since"), "{status}");
+
+    // In text, what it freed. Not in a terminal, so no estimate first.
+    let env = with_garbage();
+    age(&env, 48);
+    let (said, told) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Freed ") && said.contains(" KiB  ("),
+        "{said}"
+    );
+    assert!(said.ends_with(" packs removed, 1 written)\n"), "{said}");
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert_eq!(told, "");
+}
+
+/// A second tidy a day later rewrites the small pack the first wrote, which frees nothing: that is
+/// nothing to free, not something it couldn't free.
+#[test]
+fn a_routine_tidy_with_nothing_to_free_says_so() {
+    let env = with_garbage();
+    age(&env, 48);
+    ok(&env, &["tidy"]);
+    age(&env, 48);
+    let (said, told) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert_eq!(told, "");
+    // Old enough to rewrite, so the estimate is worked out, not 0 for packs too young.
+    age(&env, 48);
+    let doc: Value = serde_json::from_slice(
+        &env.opalro()
+            .args(["tidy", "--json"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(doc["packs_young"], 0, "{doc}");
+    assert_eq!(doc["to_free"], 0, "{doc}");
+}
+
+#[test]
+fn tidy_says_freed_and_how_many_packs() {
+    let env = with_garbage();
+    age(&env, 48);
+    let packs = env.standing().1.len();
+    let (said, _) = ok(&env, &["tidy"]);
+    let (freed, packed) = said
+        .strip_prefix("Freed ")
+        .unwrap()
+        .split_once("  ")
+        .unwrap();
+    assert!(freed.ends_with(" KiB"), "{said}");
+    assert_eq!(packed, format!("({packs} packs removed, 1 written)\n"));
+    // Run again at once, it has nothing to free, says how much is stored, and why the pack it
+    // just wrote stays as it is.
+    let (said, _) = ok(&env, &["tidy"]);
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.contains(".\n\n    Left 1 pack changed in the last 24 hours as it is: "),
+        "{said}"
+    );
+}
+
+/// Something to free, but every pack it would remove stays: it says nothing could be freed, never
+/// that there was nothing to free, and the warnings say why.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn tidy_that_frees_nothing_it_found_says_nothing_could_be_freed() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env
+        .opalro()
+        .arg("tidy")
+        .env("OPALRO_FAULT_FAIL", "tidy:removing")
+        .output()
+        .unwrap();
+    let (said, told) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{told}");
+    assert!(
+        said.starts_with("Nothing could be freed: storage still holds ") && said.ends_with(".\n"),
+        "{said}"
+    );
+    assert!(
+        told.starts_with("warning: Opalro couldn't remove pack "),
+        "{told}"
+    );
+}
+
+#[test]
+fn tidy_stopped_by_a_pack_it_cannot_read_prints_only_the_error_and_its_hint() {
+    let env = with_garbage();
+    fs::write(
+        env.root().join(".opalro/store/packs/zz.pack"),
+        vec![b'x'; 200],
+    )
+    .unwrap();
+    age(&env, 48);
+    let out = env.opalro().arg("tidy").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "");
+    let said = text(&out.stderr);
+    let (error, hint) = said.split_once("\n\n").unwrap();
+    // Every word of the error but the pack's path, which is the system's own spelling of it.
+    let pack = error
+        .strip_prefix("error: Opalro can't tidy this project: pack ")
+        .and_then(|rest| rest.strip_suffix(" is damaged (the file does not start with OPALPACK)."))
+        .unwrap_or_else(|| panic!("{said}"));
+    let named = std::path::Path::new(pack);
+    assert!(
+        named.ends_with(".opalro/store/packs/zz.pack") && named.is_absolute(),
+        "{said}"
+    );
+    assert_eq!(
+        hint,
+        "hint: Nothing was removed. Check the pack's permissions. If it is damaged for good, \
+         moving it out of .opalro/store/packs lets `opalro tidy` run, losing what only it holds, and \
+         the chunks only its chunk lists name.\n"
+    );
+}
+
+#[test]
+fn tidy_leaves_packs_changed_in_the_last_day_untouched() {
+    let env = with_garbage();
+    let before = env.standing();
+    let (said, _) = ok(&env, &["tidy"]);
+    let young = before.1.len();
+    assert!(
+        said.starts_with("Nothing to free: storage holds "),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(&format!(
+            " KiB.\n\n    Left {young} packs changed in the last 24 hours as they are: a later \
+             opalro tidy frees what they hold that nothing needs.\n"
+        )),
+        "{said}"
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn tidy_keeps_every_chunk_of_the_big_files_it_keeps() {
+    let env = Env::empty();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let big = env.root().join("big.bin");
+    let first = write_noise(&big, 1, 2 << 20);
+    ok(&env, &["save", "Big"]);
+    let one = main_tip(&env);
+    let second = write_noise(&big, 2, 2 << 20);
+    ok(&env, &["save", "Another"]);
+    let two = main_tip(&env);
+    age(&env, 48);
+    ok(&env, &["tidy"]);
+    ok(&env, &["goto", &one.to_hex()]);
+    assert_eq!(id_of(&big), first);
+    ok(&env, &["goto", &two.to_hex()]);
+    assert_eq!(id_of(&big), second);
+}
+
+#[test]
+fn tidy_stops_at_a_pack_it_cannot_read() {
+    let env = with_garbage();
+    let junk = env.root().join(".opalro/store/packs/zz.pack");
+    fs::write(&junk, vec![b'x'; 200]).unwrap();
+    age(&env, 48);
+    let before = env.standing();
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let said = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        said.contains("zz.pack") && said.contains("damaged"),
+        "{doc}"
+    );
+    let hint = doc["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains(".opalro/store/packs"), "{doc}");
+    assert!(hint.contains("only its chunk lists name"), "{doc}");
+    // Nothing was removed.
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn a_bad_undo_window_stops_tidy_naming_the_settings_file() {
+    let env = with_garbage();
+    age(&env, 48);
+    let config = env.config().join("config.toml");
+    for (setting, said) in [
+        (
+            "undo-window-days = 0\n",
+            "is not a valid Opalro settings file: undo-window-days must be a whole number of days \
+             from 1 to 36500, not 0",
+        ),
+        (
+            "[editor]\nundo-window-days = 30\n",
+            "undo-window-days must be at the top of",
+        ),
+    ] {
+        fs::write(&config, setting).unwrap();
+        let before = env.standing();
+        let out = env.opalro().arg("tidy").output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{setting}");
+        let err = text(&out.stderr);
+        assert!(err.contains(said), "{err}");
+        assert!(err.contains(&config.display().to_string()), "{err}");
+        assert_eq!(env.standing(), before, "{setting}");
+    }
+    fs::write(&config, "undo-window-days = 1\n").unwrap();
+    let (said, _) = ok(&env, &["tidy"]);
+    assert!(said.contains("written)\n"), "{said}");
+}
+
+#[test]
+fn tidy_json_matches_its_snapshot() {
+    let env = with_garbage();
+    age(&env, 48);
+    let out = env.opalro().args(["tidy", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let mut doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Sizes on disk depend on the times in the records, which differ from run to run.
+    for key in ["to_free", "bytes_before", "bytes_after"] {
+        assert!(doc[key].is_u64(), "{doc}");
+        doc[key] = "[redacted]".into();
+    }
+    insta::assert_json_snapshot!(doc);
+}
