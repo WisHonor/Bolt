@@ -30,7 +30,8 @@ similar = { version = "2.7.0", default-features = false }
 thiserror = "2.0.21"
 toml = "1.1.8"
 unicode-normalization = "0.1.26"
-zstd = "0.14.3"
+# Without the legacy decoders: format 1 holds only frames from zstd 1.0 on.
+zstd = { version = "0.14.3", default-features = false }
 
 [dev-dependencies]
 opal-vcs-platform = { path = "../opal-vcs-platform", features = ["test-support"] }

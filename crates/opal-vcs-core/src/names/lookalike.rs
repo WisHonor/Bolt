@@ -21,10 +21,15 @@ pub fn is_git_alias(name: &str) -> bool {
         })
 }
 
+/// NTFS's hashed short name of `.opalro` starts with this: the name's first two letters, then the
+/// four hex digits NTFS works out from the whole name.
+const OPALRO_HASHED: &[u8; 6] = b"op9975";
+
 /// Whether some Windows or macOS drive could take `name` for `.opalro`: its part before any `/` or
-/// `\`, without the characters HFS+ ignores, as NTFS opens it.
+/// `\`, without the characters HFS+ ignores, as NTFS opens it. The short names `opalro~1` to
+/// `opalro~9` and the hashed one count on every system, whatever drive the name ends up on.
 pub fn is_opal_alias(name: &str) -> bool {
-    if !may_spell(name, b'o') {
+    if !may_spell(name, b'o') && !name.starts_with('~') {
         return false;
     }
     let part = name.split(['/', '\\']).next().unwrap_or(name);
@@ -34,7 +39,9 @@ pub fn is_opal_alias(name: &str) -> bool {
         Cow::Borrowed(part)
     };
     let part = ntfs_form(&kept);
-    part.eq_ignore_ascii_case(".opalro") || short_name(part, b"opalro", b'1'..=b'4')
+    part.eq_ignore_ascii_case(".opalro")
+        || short_name(part, b"opalro", b'1'..=b'9')
+        || is_hashed_short_name(part, OPALRO_HASHED)
 }
 
 /// Whether `name` is NTFS's hashed short name with this six-byte start (two letters of the long

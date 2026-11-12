@@ -13,9 +13,20 @@ fn every_opal_spelling_is_refused() {
         "opalro~1",
         "OPALRO~1",
         "opalro~4",
+        "opalro~5",
+        "OPALRO~9",
+        "opalro~9. ",
+        "op9975~1",
+        "OP9975~9",
+        "op9975~1:x",
+        "op997~12",
+        "o~123456",
+        "~1234567",
+        "\u{200C}op9975~1",
         ".opalro\\x",
         ".OPALRO.\\x",
         "opalro~1\\x",
+        "op9975~1\\x",
         ".opalro::$INDEX_ALLOCATION",
         ".opalro:stream",
         ".o\u{200C}palro",
@@ -29,8 +40,15 @@ fn every_opal_spelling_is_refused() {
         "opalro.toml",
         ".opalros",
         "opalro",
-        "opalro~5",
+        "opalro~0",
         "opalro~12",
+        "opalr~10",
+        "op9975~0",
+        "op9975~10",
+        "op997~1",
+        "op9976~1",
+        "~123456",
+        "gi7eba~1",
         "x\\.opalro",
     ] {
         assert_eq!(validate_name(ok), Ok(()), "{ok}");
@@ -192,6 +210,67 @@ fn short_names_of_gitmodules_match_what_git_fsck_flags() {
     ] {
         assert!(!short(name), "{name:?}");
     }
+}
+
+/// The four hex digits of a hashed short name, worked out from the long name as NTFS does (the
+/// hash the Wikipedia article "8.3 filename" gives).
+fn ntfs_hash(name: &str) -> String {
+    let sum = name
+        .encode_utf16()
+        .fold(0u16, |sum, c| sum.wrapping_mul(0x25).wrapping_add(c));
+    let mut n = i32::from(sum).wrapping_mul(314_159_269);
+    if n < 0 {
+        n = n.wrapping_neg();
+    }
+    let q = ((i64::from(n).wrapping_mul(1_152_921_497) as u64) >> 60) as i32;
+    let sum = n.wrapping_sub(q.wrapping_mul(1_000_000_007)) as u16;
+    // The four digits come out in reverse order.
+    let sum = (sum >> 12) | ((sum >> 4) & 0x0f0) | ((sum << 4) & 0xf00) | (sum << 12);
+    format!("{sum:04x}")
+}
+
+#[test]
+fn the_hashed_short_name_of_opalro_is_worked_out_as_ntfs_does() {
+    // Git's prefixes for its own files, and `GI2837~1`, which a Windows runner gave `.git`.
+    for (name, hash) in [
+        (".gitmodules", "7eba"),
+        (".gitignore", "250a"),
+        (".gitattributes", "7d29"),
+        (".mailmap", "ba30"),
+        (".git", "2837"),
+    ] {
+        assert_eq!(ntfs_hash(name), hash, "{name}");
+    }
+    assert_eq!(
+        format!("op{}", ntfs_hash(".opalro")).as_bytes(),
+        OPALRO_HASHED
+    );
+}
+
+/// The short name a Windows drive gives `.opalro` once `OPALRO~1` to `OPALRO~4` are taken is the
+/// hashed one refused everywhere.
+#[cfg(windows)]
+#[test]
+fn a_windows_drive_gives_opalro_the_hashed_short_name_refused_everywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    for taken in ["o palro", "op alro", "opa lro", "opal ro"] {
+        std::fs::create_dir(dir.path().join(taken)).unwrap();
+    }
+    std::fs::create_dir(dir.path().join(".opalro")).unwrap();
+    let top = opal_platform::dir::Dir::open_top(dir.path()).unwrap();
+    let short = top
+        .entries()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.name == ".opalro")
+        .and_then(|e| e.short_name)
+        .map(|s| s.to_string_lossy().into_owned());
+    let Some(short) = short else {
+        println!("Skipped: this drive gives no 8.3 names.");
+        return;
+    };
+    assert_eq!(short, "OP9975~1");
+    assert!(is_opal_alias(&short));
 }
 
 #[test]

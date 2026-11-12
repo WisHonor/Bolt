@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the name: the red team's session on the rename)
 - **Decided by:** Claude, at the owner's request. The owner can reverse any part.
 - **Refines:** [decision 150](150-the-name-is-opalro.md) (what the guard on the project's own folder covers)
+- **Refined by:** [decision 155](155-more-short-names-of-opalro-are-refused.md) (the owner chose B)
 
 ## Context
 

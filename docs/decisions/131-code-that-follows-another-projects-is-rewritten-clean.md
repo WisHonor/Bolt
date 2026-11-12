@@ -4,7 +4,7 @@
 - **Date:** 2026-11-11
 - **Agenda topic:** none (getting v0.1 ready: clean code and the gate)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
-- **Refined by:** [decision 133](133-red-team-v0.1-rulings.md) (the ignore matcher's working space fixed; a boolean of -2^31, which Git reads two ways by system, left as it was)
+- **Refined by:** [decision 133](133-red-team-v0.1-rulings.md) (the ignore matcher's working space fixed; a boolean of -2^31, which Git reads two ways by system, left as it was); [decision 153](153-the-platform-code-that-follows-rusts-stays.md) (the platform code that follows Rust's stays, under Rust's license)
 - **Refines:** the owner's license decision for v0.1 (closed: all rights reserved, the source private, builds downloaded under a user agreement), which the package session records as decision 140
 
 ## Context

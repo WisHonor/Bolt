@@ -1,0 +1,165 @@
+RT16 proofs (redteam16.rs, run with --ignored), in the sandbox. Without --ignored the file passes: 0 passed; 0 failed; 6 ignored.
+
+=== On 1eaa3b1, the code briefed: cargo test -j 2 --release -p opal-vcs --test redteam16 -- --ignored --test-threads=2
+
+    Finished `release` profile [optimized] target(s) in 3.99s
+     Running tests/redteam16.rs (target/release/deps/redteam16-01b017e350101655)
+
+running 6 tests
+test rt16_1_a_small_file_whose_rle_block_is_over_its_limit_is_damaged ... FAILED
+test rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged ... FAILED
+test rt16_2_a_content_size_of_all_ones_is_damage ... FAILED
+test rt16_3_matches_past_the_window_are_damage ... FAILED
+test rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file ... FAILED
+test rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one ... FAILED
+
+failures:
+
+---- rt16_1_a_small_file_whose_rle_block_is_over_its_limit_is_damaged stdout ----
+
+thread 'rt16_1_a_small_file_whose_rle_block_is_over_its_limit_is_damaged' (10166) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+an RLE block of 200 KiB: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmpW10EIj: no problems found.
+
+    + 7 stored objects in 3 packs (4.5 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged stdout ----
+
+thread 'rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged' (10165) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+a last block of 70 KiB in a 64 KiB window: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmpvooY49: no problems found.
+
+    + 7 stored objects in 3 packs (12 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+---- rt16_2_a_content_size_of_all_ones_is_damage stdout ----
+
+thread 'rt16_2_a_content_size_of_all_ones_is_damage' (10201) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+a content size of 2^64 - 1: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmp088g0B: no problems found.
+
+    + 7 stored objects in 3 packs (5.5 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+---- rt16_3_matches_past_the_window_are_damage stdout ----
+
+thread 'rt16_3_matches_past_the_window_are_damage' (10205) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+matches 450 KiB back, window 128 KiB: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmpnPrG1m: no problems found.
+
+    + 7 stored objects in 3 packs (455 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+---- rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file stdout ----
+
+thread 'rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file' (10241) panicked at crates/opal-vcs/tests/redteam16.rs:234:5:
+assertion `left == right` failed: one frame (7800 B stored), two answers:
+  as a listing: Ok(1120256)
+  as a file: Err("pack /tmp/.tmpCc1nzj/e76b02cec170ea9980e1ee1e93dff2f7b2c9b220c5e1e7276b08da0315ca2129.pack is damaged: the zstd data of f60255ff1691bd95ac8a6414ed7825215a0df16b8390f4e285eb04ced507ca1c is invalid: Data corruption detected")
+  left: true
+ right: false
+
+---- rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one stdout ----
+
+thread 'rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one' (10237) panicked at crates/opal-vcs/tests/redteam16.rs:266:5:
+after tidy, the file's only copy is the planted frame (1 copies); verify says:
+Verified .tmpn9j0Ew: no problems found.
+
+    + 7 stored objects in 1 pack (9.9 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+
+failures:
+    rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged
+    rt16_1_a_small_file_whose_rle_block_is_over_its_limit_is_damaged
+    rt16_2_a_content_size_of_all_ones_is_damage
+    rt16_3_matches_past_the_window_are_damage
+    rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one
+    rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+error: test failed, to rerun pass `-p opal-vcs --test redteam16`
+exit=101
+
+=== On c8eedd0, the branch's tip, with the code review's fix 69b72d0: redteam/attacks15/run.sh proofs
+
+    Finished `release` profile [optimized] target(s) in 3.92s
+     Running tests/redteam16.rs (target/release/deps/redteam16-01b017e350101655)
+
+running 6 tests
+test rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged ... FAILED
+test rt16_1_a_small_file_whose_rle_block_is_over_its_limit_is_damaged ... ok
+test rt16_3_matches_past_the_window_are_damage ... FAILED
+test rt16_2_a_content_size_of_all_ones_is_damage ... ok
+test rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file ... FAILED
+test rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one ... FAILED
+
+failures:
+
+---- rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged stdout ----
+
+thread 'rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged' (10317) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+a last block of 70 KiB in a 64 KiB window: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmpOfNV1P: no problems found.
+
+    + 7 stored objects in 3 packs (12 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- rt16_3_matches_past_the_window_are_damage stdout ----
+
+thread 'rt16_3_matches_past_the_window_are_damage' (10355) panicked at crates/opal-vcs/tests/redteam16.rs:129:5:
+matches 450 KiB back, window 128 KiB: format 1 refuses this frame, yet the save took it as the file's copy and `opalro verify` passed it (Some(0)):
+Verified .tmpovFnbX: no problems found.
+
+    + 7 stored objects in 3 packs (455 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+---- rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file stdout ----
+
+thread 'rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file' (10390) panicked at crates/opal-vcs/tests/redteam16.rs:234:5:
+assertion `left == right` failed: one frame (7800 B stored), two answers:
+  as a listing: Ok(1120256)
+  as a file: Err("pack /tmp/.tmpXRnBOH/e76b02cec170ea9980e1ee1e93dff2f7b2c9b220c5e1e7276b08da0315ca2129.pack is damaged: the zstd data of f60255ff1691bd95ac8a6414ed7825215a0df16b8390f4e285eb04ced507ca1c is invalid: Data corruption detected")
+  left: true
+ right: false
+
+---- rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one stdout ----
+
+thread 'rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one' (10389) panicked at crates/opal-vcs/tests/redteam16.rs:266:5:
+after tidy, the file's only copy is the planted frame (1 copies); verify says:
+Verified .tmp4vhCcv: no problems found.
+
+    + 7 stored objects in 1 pack (9.9 KiB) match their fingerprints
+    + 2 saves, 1 line and 0 shelves point to objects that exist
+    + the undo diary (2 entries) is intact
+
+
+
+failures:
+    rt16_1_a_small_file_whose_last_block_decodes_past_its_limit_is_damaged
+    rt16_3_matches_past_the_window_are_damage
+    rt16_4_tidy_keeps_the_persons_own_copy_over_a_planted_one
+    rt16_5_the_same_frame_is_read_as_a_listing_and_refused_as_a_file
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+error: test failed, to rerun pass `-p opal-vcs --test redteam16`
+exit=101
