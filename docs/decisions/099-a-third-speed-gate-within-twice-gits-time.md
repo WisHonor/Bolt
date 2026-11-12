@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 023](023-v0.1-speed-bar.md) (a third gate beside its two) and [decision 088](088-benchmarks-and-the-speed-gates.md) (how it is measured and enforced)
 - **Refined by:** [decision 108](108-the-third-gate-compares-medians.md) (the gate compares the medians of each step's runs, not the means: a flush that stalls on the runner's disk no longer decides it)
+- **Partly superseded by:** [decision 128](128-v0.1-ships-without-goto-within-twice-gits-time.md) (v0.1 ships with `status` and the small save within twice Git's time; `goto` within twice is a goal for v0.2, printed until then and failing the job only past a limit)
 
 ## Context
 

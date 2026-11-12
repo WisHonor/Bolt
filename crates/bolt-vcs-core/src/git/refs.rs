@@ -198,9 +198,9 @@ fn parse_head(text: &[u8], hash: HashKind) -> Result<Head, GitError> {
     )))
 }
 
-/// A ref file read as Git reads it (`parse_loose_ref_contents`, after `strbuf_rtrim`): `ref:`, any
-/// whitespace and another ref's name; or an ID, then the end, or whitespace and anything at all
-/// (FETCH_HEAD's form). Git would stop at a NUL; Bolt refuses one, as in config.
+/// A ref file read as Git reads it, whitespace at its end dropped: `ref:`, any whitespace and
+/// another ref's name; or an ID, then the end, or whitespace and anything at all (FETCH_HEAD's
+/// form). Git would stop at a NUL; Bolt refuses one, as in config.
 fn parse_ref_file(text: &[u8], hash: HashKind) -> Option<Contents<'_>> {
     if text.contains(&0) {
         return None;
@@ -349,9 +349,9 @@ fn read_packed(
     Ok(refs)
 }
 
-/// Git's `check_refname_format` with no options: two levels at least, and no level that is
-/// empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a space,
-/// or any of `:?[\^~*`; the name isn't `@` and doesn't end with `.`.
+/// Whether `git check-ref-format` takes `name` with no options: two levels at least, and no level
+/// that is empty, starts with `.`, ends with `.lock`, or holds `..`, `@{`, a control character, a
+/// space, or any of `:?[\^~*`; the name isn't `@` and doesn't end with `.`.
 fn is_valid_ref_name(name: &[u8]) -> bool {
     let mut levels = 0usize;
     for level in name.split(|&c| c == b'/') {
@@ -384,189 +384,152 @@ mod tests {
     use crate::git::craft::Craft;
     use crate::git::{GitError, GitId, HashKind, Repo};
 
-    /// `git check-ref-format [options] <name>`, built on `is_valid_ref_name`, which takes no
-    /// options. Options read as in builtin/check-ref-format.c: `--normalize` collapses slashes
-    /// first; `--refspec-pattern` allows one `*`, which checks like a plain letter; and
-    /// `--allow-onelevel` drops only the two-level rule, as a level put above shows.
-    fn check_ref_format(name: &[u8], options: &str) -> bool {
-        let mut name = name.to_vec();
-        if options.contains("--normalize") {
-            name = collapse_slashes(&name);
-        }
-        if options.contains("--refspec-pattern") {
-            if name.iter().filter(|&&c| c == b'*').count() > 1 {
-                return false;
-            }
-            name = name
-                .iter()
-                .map(|&c| if c == b'*' { b'a' } else { c })
-                .collect();
-        }
-        if options.contains("--allow-onelevel") {
-            name != b"@" && is_valid_ref_name(&[b"x/", &name[..]].concat())
-        } else {
-            is_valid_ref_name(&name)
-        }
-    }
-
-    /// builtin/check-ref-format.c's `collapse_slashes`.
-    fn collapse_slashes(name: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut prev = b'/';
-        for &c in name {
-            if prev == b'/' && c == b'/' {
-                continue;
-            }
-            out.push(c);
-            prev = c;
-        }
-        out
-    }
-
-    /// Every `valid_ref`, `invalid_ref`, `valid_ref_normalized` and `invalid_ref_normalized` row
-    /// of Git's t1402-check-ref-format.sh (v2.56.0), in order. The `--branch` tests need a
-    /// repository's history and aren't name rules.
     #[test]
-    fn ref_names_follow_check_ref_format() {
-        let (onelevel, pattern, normalize) =
-            ("--allow-onelevel", "--refspec-pattern", "--normalize");
-        let both = "--refspec-pattern --allow-onelevel";
-        let mut rows: Vec<(bool, Vec<u8>, &str)> = Vec::new();
-        let mut row = |valid: bool, name: &[u8], options: &'static str| {
-            rows.push((valid, name.to_vec(), options));
-        };
-        row(false, b"", "");
-        row(false, b"/", "");
-        row(false, b"/", onelevel);
-        row(false, b"/", normalize);
-        row(false, b"/", "--allow-onelevel --normalize");
-        row(true, b"foo/bar/baz", "");
-        row(true, b"foo/bar/baz", normalize);
-        row(false, b"refs///heads/foo", "");
-        row(true, b"refs///heads/foo", normalize);
-        row(false, b"heads/foo/", "");
-        row(false, b"/heads/foo", "");
-        row(true, b"/heads/foo", normalize);
-        row(false, b"///heads/foo", "");
-        row(true, b"///heads/foo", normalize);
-        row(false, b"./foo", "");
-        row(false, b"./foo/bar", "");
-        row(false, b"foo/./bar", "");
-        row(false, b"foo/bar/.", "");
-        row(false, b".refs/foo", "");
-        row(false, b"refs/heads/foo.", "");
-        for c in ["?", "~", "^", ":", "*", "[", " ", "\\", ".."] {
-            row(false, format!("heads/foo{c}bar").as_bytes(), "");
-        }
-        row(true, b"foo./bar", "");
-        row(false, b"heads/foo.lock", "");
-        row(false, b"heads///foo.lock", "");
-        row(false, b"foo.lock/bar", "");
-        row(false, b"foo.lock///bar", "");
-        row(true, b"heads/foo@bar", "");
-        row(true, b"refs/@", "");
-        row(false, b"@", onelevel);
-        row(false, b"heads/v@{ation", "");
-        row(false, b"heads/foo\t", "");
-        row(false, b"heads/foo\x7f", "");
-        row(true, b"heads/fu\xc3\x9f", "");
-        row(true, b"heads/*foo/bar", pattern);
-        row(true, b"heads/foo*/bar", pattern);
-        row(true, b"heads/f*o/bar", pattern);
-        row(false, b"heads/f*o*/bar", pattern);
-        row(false, b"heads/foo*/bar*", pattern);
-
-        row(false, b"foo", "");
-        row(true, b"foo", onelevel);
-        row(false, b"foo", pattern);
-        row(true, b"foo", both);
-        row(false, b"foo", normalize);
-        row(true, b"foo", "--allow-onelevel --normalize");
-
-        row(true, b"foo/bar", "");
-        row(true, b"foo/bar", onelevel);
-        row(true, b"foo/bar", pattern);
-        row(true, b"foo/bar", both);
-        row(true, b"foo/bar", normalize);
-
-        row(false, b"foo/*", "");
-        row(false, b"foo/*", onelevel);
-        row(true, b"foo/*", pattern);
-        row(true, b"foo/*", both);
-
-        row(false, b"*/foo", "");
-        row(false, b"*/foo", onelevel);
-        row(true, b"*/foo", pattern);
-        row(true, b"*/foo", both);
-        row(false, b"*/foo", normalize);
-        row(true, b"*/foo", "--refspec-pattern --normalize");
-
-        row(false, b"foo/*/bar", "");
-        row(false, b"foo/*/bar", onelevel);
-        row(true, b"foo/*/bar", pattern);
-        row(true, b"foo/*/bar", both);
-
-        row(false, b"*", "");
-        row(false, b"*", onelevel);
-        row(false, b"*", pattern);
-        row(true, b"*", both);
-
-        row(false, b"foo/*/*", pattern);
-        row(false, b"foo/*/*", both);
-
-        row(false, b"*/foo/*", pattern);
-        row(false, b"*/foo/*", both);
-
-        row(false, b"*/*/foo", pattern);
-        row(false, b"*/*/foo", both);
-
-        row(false, b"/foo", "");
-        row(false, b"/foo", onelevel);
-        row(false, b"/foo", pattern);
-        row(false, b"/foo", both);
-        row(false, b"/foo", normalize);
-        row(true, b"/foo", "--allow-onelevel --normalize");
-        row(false, b"/foo", "--refspec-pattern --normalize");
-        row(
-            true,
-            b"/foo",
-            "--refspec-pattern --allow-onelevel --normalize",
-        );
-
-        assert_eq!(rows.len(), 89);
-        for (valid, name, options) in &rows {
-            assert_eq!(
-                check_ref_format(name, options),
-                *valid,
-                "{:?} {options}",
-                String::from_utf8_lossy(name)
-            );
-        }
-
-        for (name, normalized) in [
-            ("heads/foo", "heads/foo"),
-            ("refs///heads/foo", "refs/heads/foo"),
-            ("/heads/foo", "heads/foo"),
-            ("///heads/foo", "heads/foo"),
-        ] {
-            assert_eq!(collapse_slashes(name.as_bytes()), normalized.as_bytes());
-            assert!(check_ref_format(name.as_bytes(), normalize), "{name}");
-        }
-        for name in [
-            "foo",
-            "/foo",
-            "heads/foo/../bar",
-            "heads/./foo",
-            "heads\\foo",
-            "heads/foo.lock",
-            "heads///foo.lock",
-            "foo.lock/bar",
-            "foo.lock///bar",
-        ] {
-            assert!(!check_ref_format(name.as_bytes(), normalize), "{name}");
-        }
+    fn a_nul_cannot_end_a_ref_name_early() {
         // A NUL can't end a name early, as it would in C.
         assert!(!is_valid_ref_name(b"refs/heads/a\0"));
+    }
+
+    #[test]
+    fn ref_names_follow_each_rule() {
+        let cases: &[(&[u8], bool)] = &[
+            // No level starts with a dot or ends with `.lock`.
+            (b"refs/heads/.hidden", false),
+            (b".refs/heads/a", false),
+            (b"refs/.x/a", false),
+            (b"refs/heads/a.lock", false),
+            (b"refs/heads/a.lock/b", false),
+            (b"refs/heads/a.locked", true),
+            (b"refs/heads/lock", true),
+            (b"refs/heads/a.b", true),
+            // Two levels at least.
+            (b"main", false),
+            (b"HEAD", false),
+            (b"a/b", true),
+            (b"refs/heads/HEAD", true),
+            // No `..` anywhere.
+            (b"refs/heads/a..b", false),
+            (b"refs/heads/..", false),
+            (b"refs/heads/a.b.c", true),
+            // No control character, space, `~`, `^` or `:`; bytes past ASCII are fine.
+            (b"refs/heads/a\x01", false),
+            (b"refs/heads/a\x1fb", false),
+            (b"refs/heads/a\x7f", false),
+            (b"refs/heads/a\tb", false),
+            (b"refs/heads/a b", false),
+            (b"refs/heads/a~1", false),
+            (b"refs/heads/a^", false),
+            (b"refs/heads/a:b", false),
+            (b"refs/heads/caf\xc3\xa9", true),
+            (b"refs/heads/\xff\x80", true),
+            // No `?`, `*` or `[`; other brackets are fine.
+            (b"refs/heads/a?", false),
+            (b"refs/heads/*", false),
+            (b"refs/heads/a[1", false),
+            (b"refs/heads/a]{}", true),
+            // No slash first, last or doubled.
+            (b"/refs/heads/a", false),
+            (b"refs/heads/a/", false),
+            (b"refs//heads/a", false),
+            // Not ending with a dot.
+            (b"refs/heads/a.", false),
+            (b"refs/heads./a", true),
+            // No `@{`, though `@` and `{` apart are fine.
+            (b"refs/heads/a@{1}", false),
+            (b"refs/heads/@{", false),
+            (b"refs/heads/a@b", true),
+            (b"refs/heads/a{@", true),
+            (b"refs/heads/@", true),
+            // Not `@` alone.
+            (b"@", false),
+            // No backslash.
+            (b"refs/heads/a\\b", false),
+            (b"", false),
+        ];
+        for &(name, valid) in cases {
+            assert_eq!(is_valid_ref_name(name), valid, "{}", name.escape_ascii());
+        }
+    }
+
+    /// Random names built from the pieces Git's rules turn on, the same on every run.
+    fn random_ref_names(count: usize) -> Vec<String> {
+        const PIECES: &[&str] = &[
+            "a", "b9", "a-b", "_", "\u{e9}", "\u{65e5}", "/", "/", "/", ".", ".", "..", "@", "@{",
+            "{", "}", "*", "?", "[", "]", "\\", "~", "^", ":", " ", "\t", "\x01", "\x1f", "\x7f",
+            ".lock", "lock", "HEAD",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        (0..count)
+            .map(|_| {
+                // Half start as a branch would, so that plenty are valid.
+                let mut name = String::from(["", "refs/heads/"][next(2)]);
+                for _ in 0..=next(6) {
+                    name.push_str(PIECES[next(PIECES.len())]);
+                }
+                name
+            })
+            .collect()
+    }
+
+    /// Bolt takes the names `git check-ref-format` takes with no options, and only those.
+    #[test]
+    fn ref_names_are_checked_as_git_checks_them() {
+        use std::process::{Command, Stdio};
+        if !Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            eprintln!("note: git isn't installed, so ref names aren't compared with it");
+            return;
+        }
+        // An empty folder: no repository around, and nothing for a `*` to match.
+        let dir = tempfile::tempdir().unwrap();
+        let mut names = random_ref_names(3000);
+        names.extend(
+            [
+                "HEAD",
+                "@",
+                "a",
+                "refs/heads/main",
+                "/a/b",
+                "a/b/",
+                "a/b.",
+                "a./b",
+                "a/@",
+            ]
+            .map(String::from),
+        );
+        // Many at a time: one `git` after another would take a minute.
+        for batch in names.chunks(32) {
+            let running: Vec<_> = batch
+                .iter()
+                .map(|name| {
+                    let child = Command::new("git")
+                        .args(["check-ref-format", name])
+                        .current_dir(dir.path())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap();
+                    (name, child)
+                })
+                .collect();
+            for (name, mut child) in running {
+                let git_takes = match child.wait().unwrap().code() {
+                    Some(0) => true,
+                    Some(1) => false,
+                    other => panic!("git check-ref-format {name:?} exited with {other:?}"),
+                };
+                assert_eq!(is_valid_ref_name(name.as_bytes()), git_takes, "{name:?}");
+            }
+        }
     }
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -674,8 +637,7 @@ mod tests {
         }
     }
 
-    /// Git's `parse_loose_ref_contents`, after the `strbuf_rtrim` of `read_ref_internal`
-    /// (refs/files-backend.c, v2.56.0).
+    /// Ref files as Git reads them: whitespace at the end dropped, then a symbolic ref or an ID.
     #[test]
     fn ref_files_are_read_as_git_reads_them() {
         fn sha1(text: &str) -> Option<Contents<'_>> {

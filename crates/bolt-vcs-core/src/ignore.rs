@@ -1,1795 +1,890 @@
-//! Git's ignore rules, ported from its `dir.c` and `wildmatch.c` quirks and all, so that Bolt
-//! keeps out exactly the files Git keeps out.
+//! Git's ignore rules, so that Bolt keeps out exactly the files Git keeps out.
+//!
+//! A rule file is read into lines, each a compiled pattern. Matching is on bytes and never
+//! backtracks: a pattern runs as a set of positions stepped once per byte of the path.
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
-use std::mem;
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use unicode_normalization::{UnicodeNormalization, is_nfc};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::drive::Drive;
 
-/// Git's `wildmatch` with `WM_PATHNAME`, and `WM_CASEFOLD` when `casefold`: whether `pattern`
-/// matches the whole of `text`. Git's recurses at each `*`; this reads the text once and keeps
-/// the set of pattern beginnings that match it so far, so its time is at most the pattern's
-/// length times the text's.
-pub fn wildmatch(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
-    let mut pieces = Pieces {
-        rest: until_nul(pattern),
-        before: None,
-        casefold,
-        read: Vec::new(),
-    };
-    let mut row = Vec::new();
-    let mut matched = advance(&mut pieces, &[], &mut row, None);
-    let mut next = Vec::new();
-    for &byte in until_nul(text) {
-        if row.is_empty() {
-            return false;
-        }
-        matched = advance(&mut pieces, &row, &mut next, Some(byte));
-        mem::swap(&mut row, &mut next);
-    }
-    matched
-}
-
-/// The bytes before the first NUL, where Git's C strings end.
-fn until_nul(bytes: &[u8]) -> &[u8] {
-    bytes.split(|&b| b == 0).next().unwrap_or(bytes)
-}
-
-/// A byte as `wildmatch` compares it: ASCII capitals lowered where letter case is ignored.
-fn fold(b: u8, casefold: bool) -> u8 {
-    if casefold { b.to_ascii_lowercase() } else { b }
-}
-
-/// One piece of a pattern.
-#[derive(Clone, Copy)]
-enum Token<'p> {
-    /// One byte, lowered where letter case is ignored unless a `\` escaped it: Git leaves an
-    /// escaped capital alone, so then it matches nothing.
-    Byte(u8),
-    /// `?`: any byte but `/`.
-    Any,
-    /// `[…]`: the bytes after its `[`, through its `]`.
-    Class(&'p [u8]),
-    /// `*`: any bytes but `/`.
-    Star,
-    /// `**` as a whole folder name: any bytes.
-    Stars,
-    /// The `/` after such a `**`, which may be skipped with it: `a/**/b` matches `a/b`.
-    StarsSlash,
-    /// A `\` at the end, or a `[` that never closes or names an unknown class: nothing matches
-    /// past it, as in Git.
-    Never,
-}
-
-/// A pattern's pieces, read as Git's `dowild` meets them, and only as far as they are needed.
-struct Pieces<'p> {
-    rest: &'p [u8],
-    /// The byte before `rest`: a `**` is a whole folder name only after a `/` or at the start.
-    before: Option<u8>,
-    casefold: bool,
-    read: Vec<Token<'p>>,
-}
-
-impl<'p> Pieces<'p> {
-    /// Piece `j`, or `None` past the pattern's end. Pieces are asked for in order.
-    fn get(&mut self, j: usize) -> Option<Token<'p>> {
-        if let Some(&token) = self.read.get(j) {
-            return Some(token);
-        }
-        let token = self.next_piece()?;
-        self.read.push(token);
-        Some(token)
-    }
-
-    fn next_piece(&mut self) -> Option<Token<'p>> {
-        let (&c, rest) = self.rest.split_first()?;
-        let (token, rest, last) = match c {
-            b'\\' => match rest.split_first() {
-                Some((&escaped, rest)) => (Token::Byte(escaped), rest, escaped),
-                None => (Token::Never, rest, c),
-            },
-            b'?' => (Token::Any, rest, c),
-            b'[' => match class(rest, 0, false).and_then(|(_, len)| rest.split_at_checked(len)) {
-                Some((body, rest)) => (Token::Class(body), rest, b']'),
-                None => (Token::Never, rest, c),
-            },
-            b'*' => {
-                let more = rest.iter().take_while(|&&b| b == b'*').count();
-                let rest = rest.get(more..).unwrap_or_default();
-                let whole_name = more > 0
-                    && matches!(self.before, None | Some(b'/'))
-                    && (rest.is_empty() || rest.starts_with(b"/") || rest.starts_with(b"\\/"));
-                let token = if whole_name {
-                    Token::Stars
-                } else {
-                    Token::Star
-                };
-                (token, rest, c)
-            }
-            b'/' if matches!(self.read.last(), Some(Token::Stars)) => (Token::StarsSlash, rest, c),
-            _ => (Token::Byte(fold(c, self.casefold)), rest, c),
-        };
-        self.rest = if matches!(token, Token::Never) {
-            &[]
-        } else {
-            rest
-        };
-        self.before = Some(last);
-        Some(token)
-    }
-}
-
-// The cells `advance` fills on this thread, so a test can bound `wildmatch`'s work without a clock.
-#[cfg(test)]
-thread_local! {
-    static CELLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// One row of `wildmatch`'s table: `row[j]` says whether the pattern's first `j` pieces match the
-/// text read so far. Fills `new` from `old`, the row before `byte` (for `None`, the row of the
-/// empty text), cut after its last true cell, and returns whether the whole pattern matches.
-fn advance(pieces: &mut Pieces<'_>, old: &[bool], new: &mut Vec<bool>, byte: Option<u8>) -> bool {
-    let casefold = pieces.casefold;
-    let t = byte.map(|b| fold(b, casefold));
-    new.clear();
-    let (mut left2, mut left) = (false, byte.is_none());
-    new.push(left);
-    // `old[j]` and `old[j + 1]`, for piece `j`.
-    let mut ups = old.iter().skip(1);
-    let mut diag = old.first() == Some(&true);
-    let mut j = 0usize;
-    let matched = loop {
-        let up = ups.next() == Some(&true);
-        // Past `old`'s last true cell, only a `*` can carry a true cell further.
-        if !(diag || up || left || left2) && j >= old.len() {
-            break false;
-        }
-        let Some(token) = pieces.get(j) else {
-            break left;
-        };
-        let cell = match (token, t) {
-            (Token::Star | Token::Stars, None) => left,
-            (Token::StarsSlash, None) => left2,
-            (_, None) | (Token::Never, Some(_)) => false,
-            (Token::Byte(_) | Token::Any | Token::Class(_), Some(t)) => {
-                diag && takes(token, t, casefold)
-            }
-            (Token::Star, Some(t)) => left || (up && t != b'/'),
-            (Token::Stars, Some(_)) => left || up,
-            (Token::StarsSlash, Some(t)) => left2 || (diag && t == b'/'),
-        };
-        new.push(cell);
-        #[cfg(test)]
-        CELLS.with(|cells| cells.set(cells.get().saturating_add(1)));
-        (left2, left, diag) = (left, cell, up);
-        j = j.saturating_add(1);
-    };
-    while new.last() == Some(&false) {
-        new.pop();
-    }
-    matched
-}
-
-/// Whether a piece that takes one byte takes `t`, a text byte already folded where letter case is
-/// ignored.
-fn takes(token: Token<'_>, t: u8, casefold: bool) -> bool {
-    match token {
-        Token::Byte(p) => t == p,
-        Token::Any => t != b'/',
-        Token::Class(body) => class(body, t, casefold).is_some_and(|c| c.0),
-        Token::Star | Token::Stars | Token::StarsSlash | Token::Never => false,
-    }
-}
-
-/// Git's `[…]`: whether it takes `t`, a text byte already folded where letter case is ignored,
-/// and its length after the `[`, through the `]`. `None` if it never closes or names a
-/// `[:class:]` Git doesn't know.
-fn class(after: &[u8], t: u8, casefold: bool) -> Option<(bool, usize)> {
-    let negated = matches!(after.first(), Some(b'!' | b'^'));
-    let mut i = usize::from(negated);
-    // The member before, which a `-` makes a range's start; none after a range or a class.
-    let mut prev = 0u8;
-    let mut hit = false;
-    // Where the last search for a `[:`'s `]` ended, so a run of `[:` reads each byte once.
-    let mut close = 0usize;
-    loop {
-        let mut c = *after.get(i)?;
-        let next = i.checked_add(1)?;
-        if c == b'\\' {
-            i = next;
-            c = *after.get(i)?;
-            hit |= t == c;
-        } else if c == b'-' && prev != 0 && after.get(next).is_some_and(|&b| b != b']') {
-            i = next;
-            let mut last = *after.get(i)?;
-            if last == b'\\' {
-                i = i.checked_add(1)?;
-                last = *after.get(i)?;
-            }
-            let range = prev..=last;
-            hit |= range.contains(&t)
-                || (casefold && t.is_ascii_lowercase() && range.contains(&t.to_ascii_uppercase()));
-            c = 0;
-        } else if c == b'[' && after.get(next) == Some(&b':') {
-            let from = next.checked_add(1)?;
-            if close < from {
-                let ahead = after.get(from..)?.iter().position(|&b| b == b']')?;
-                close = from.checked_add(ahead)?;
-            }
-            match after
-                .get(from..close)
-                .and_then(|name| name.strip_suffix(b":"))
-            {
-                Some(name) => {
-                    hit |= named_class(name, t, casefold)?;
-                    i = close;
-                    c = 0;
-                }
-                // No class name after all: the `[` is a member, and so is the `:`.
-                None => hit |= t == b'[',
-            }
-        } else {
-            hit |= t == c;
-        }
-        prev = c;
-        i = i.checked_add(1)?;
-        if after.get(i) == Some(&b']') {
-            return Some((hit != negated && t != b'/', i.checked_add(1)?));
-        }
-    }
-}
-
-/// Git's `[:name:]` classes, ASCII only as in its `sane-ctype.h`; `None` for a name it doesn't
-/// know.
-fn named_class(name: &[u8], t: u8, casefold: bool) -> Option<bool> {
-    Some(match name {
-        b"alnum" => t.is_ascii_alphanumeric(),
-        b"alpha" => t.is_ascii_alphabetic(),
-        b"blank" => matches!(t, b' ' | b'\t'),
-        b"cntrl" => t.is_ascii_control(),
-        b"digit" => t.is_ascii_digit(),
-        b"graph" => t.is_ascii_graphic(),
-        b"lower" => t.is_ascii_lowercase(),
-        b"print" => matches!(t, b' '..=b'~'),
-        b"punct" => t.is_ascii_punctuation(),
-        // Git's own table leaves out \v and \f.
-        b"space" => matches!(t, b'\t' | b'\n' | b'\r' | b' '),
-        b"upper" => t.is_ascii_uppercase() || (casefold && t.is_ascii_lowercase()),
-        b"xdigit" => t.is_ascii_hexdigit(),
-        _ => return None,
-    })
-}
-
-/// One line of an ignore file, as Git's `parse_path_pattern` leaves it.
-struct Pattern {
-    /// Without its `!` and its final `/`.
-    text: Box<[u8]>,
-    negative: bool,
-    /// It ended in `/`: only folders match.
-    dir_only: bool,
-    /// It has no `/` left: it matches a name at any depth.
-    any_depth: bool,
-    /// `*` and then no wildcard: Git compares the ends of names.
-    ends_with: bool,
-    /// The bytes before its first wildcard.
-    literal: usize,
-    /// Set for a name pattern of one-byte pieces around a single `*`, which needs no table.
-    ends: Option<Ends>,
-}
-
-/// A line of one-byte pieces around a single `*`: where the pieces before the `*` end and
-/// those after it start in `text`, and how many bytes of a name each side takes.
-struct Ends {
-    head: usize,       // text[..head] holds the pieces before the `*`
-    tail: usize,       // text[tail..] holds the pieces after it
-    head_width: usize, // pieces before the `*`, one byte of a name each
-    tail_width: usize, // pieces after it
-}
-
-impl Ends {
-    /// The shape of `text`, read as `wildmatch` reads it; `None` unless it is one-byte pieces,
-    /// one `*`, then one-byte pieces.
-    fn of(text: &[u8]) -> Option<Ends> {
-        // `wildmatch` would stop at a NUL; such a pattern is left to it.
-        if text.contains(&0) {
-            return None;
-        }
-        let mut pieces = Pieces {
-            rest: text,
-            before: None,
-            casefold: false,
-            read: Vec::new(),
-        };
-        let (mut star, mut width) = (None, 0usize);
-        loop {
-            let at = text.len().checked_sub(pieces.rest.len())?;
-            match pieces.next_piece() {
-                None => break,
-                Some(Token::Byte(_) | Token::Any | Token::Class(_)) => {
-                    width = width.checked_add(1)?
-                }
-                Some(Token::Star) if star.is_none() => {
-                    let tail = text.len().checked_sub(pieces.rest.len())?;
-                    star = Some((at, tail, width));
-                    width = 0;
-                }
-                Some(_) => return None,
-            }
-        }
-        let (head, tail, head_width) = star?;
-        Some(Ends {
-            head,
-            tail,
-            head_width,
-            tail_width: width,
-        })
-    }
-
-    /// Whether `name` matches `text`, the pattern this was read from, as `wildmatch` would say.
-    fn take(&self, text: &[u8], name: &[u8], casefold: bool) -> bool {
-        let name = until_nul(name);
-        let Some((front, back)) = name
-            .len()
-            .checked_sub(self.tail_width)
-            .and_then(|at| name.split_at_checked(at))
-        else {
-            return false;
-        };
-        let Some((head, middle)) = front.split_at_checked(self.head_width) else {
-            return false;
-        };
-        let (Some(head_text), Some(tail_text)) = (text.get(..self.head), text.get(self.tail..))
-        else {
-            return false;
-        };
-        pieces_take(head_text, head, casefold)
-            && pieces_take(tail_text, back, casefold)
-            && !middle.contains(&b'/')
-    }
-}
-
-/// Whether the one-byte pieces of `pattern` take the bytes of `text`, one each.
-fn pieces_take(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
-    let mut pieces = Pieces {
-        rest: pattern,
-        before: None,
-        casefold,
-        read: Vec::new(),
-    };
-    let taken = text.iter().all(|&b| {
-        pieces
-            .next_piece()
-            .is_some_and(|token| takes(token, fold(b, casefold), casefold))
-    });
-    // `Ends` cut the text to as many bytes as there are pieces.
-    debug_assert!(!taken || pieces.next_piece().is_none());
-    taken
-}
-
-impl Pattern {
-    fn parse(line: &[u8]) -> Pattern {
-        let (negative, line) = match line.strip_prefix(b"!") {
-            Some(rest) => (true, rest),
-            None => (false, line),
-        };
-        let (dir_only, text) = match line.strip_suffix(b"/") {
-            Some(rest) => (true, rest),
-            None => (false, line),
-        };
-        let any_depth = !text.contains(&b'/');
-        let ends_with = line
-            .split_first()
-            .is_some_and(|(&c, rest)| c == b'*' && literal_len(rest) == rest.len());
-        let literal = literal_len(text);
-        let ends = if any_depth && !ends_with && literal != text.len() {
-            Ends::of(text)
-        } else {
-            None
-        };
-        Pattern {
-            negative,
-            dir_only,
-            any_depth,
-            ends_with,
-            literal,
-            ends,
-            text: text.into(),
-        }
-    }
-}
-
-/// Git's `simple_length`: the bytes before the first `*`, `?`, `[` or `\`.
-fn literal_len(s: &[u8]) -> usize {
-    s.iter()
-        .position(|b| matches!(b, b'*' | b'?' | b'[' | b'\\'))
-        .unwrap_or(s.len())
-}
-
-/// Git's `trim_trailing_spaces`: the spaces at the end go unless a `\` escapes them, and after a
-/// `\` that ends the line nothing goes.
-fn trim_trailing_spaces(line: &[u8]) -> &[u8] {
-    let (mut cut, mut escaped) = (None, false);
-    for (i, &b) in line.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            cut = None;
-        } else if b == b'\\' {
-            escaped = true;
-        } else if b == b' ' {
-            cut.get_or_insert(i);
-        } else {
-            cut = None;
-        }
-    }
-    match cut {
-        Some(at) if !escaped => line.get(..at).unwrap_or(line),
-        _ => line,
-    }
-}
-
-/// Git's `fspathncmp`: equal bytes, with ASCII letter case folded where the drive ignores it.
-fn same(a: &[u8], b: &[u8], casefold: bool) -> bool {
-    if casefold {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
-}
-
-/// Git's `match_basename`, for a pattern without `/`.
-fn match_basename(name: &[u8], p: &Pattern, casefold: bool) -> bool {
-    if p.literal == p.text.len() {
-        same(&p.text, name, casefold)
-    } else if p.ends_with {
-        let tail = p.text.get(1..).unwrap_or_default();
-        name.len()
-            .checked_sub(tail.len())
-            .and_then(|at| name.get(at..))
-            .is_some_and(|end| same(tail, end, casefold))
-    } else if let Some(ends) = &p.ends {
-        ends.take(&p.text, name, casefold)
-    } else {
-        wildmatch(&p.text, name, casefold)
-    }
-}
-
-/// Git's `match_pathname`, for a pattern with a `/`: it matches `path` below `folder`.
-fn match_pathname(path: &[u8], folder: &[u8], p: &Pattern, casefold: bool) -> bool {
-    let (pattern, literal) = match p.text.strip_prefix(b"/") {
-        Some(rest) => (rest, p.literal.saturating_sub(1)),
-        None => (&p.text[..], p.literal),
-    };
-    let Some(name) = below(path, folder, casefold) else {
-        return false;
-    };
-    if literal == 0 {
-        return wildmatch(pattern, name, casefold);
-    }
-    let (Some(lit), Some(head)) = (pattern.get(..literal), name.get(..literal)) else {
-        return false;
-    };
-    if !same(lit, head, casefold) {
-        return false;
-    }
-    if pattern.len() == literal && name.len() == literal {
-        return true;
-    }
-    // One byte of the literal part stays, so `wildmatch` sees where a folder name starts.
-    let keep = literal.saturating_sub(1);
-    match (pattern.get(keep..), name.get(keep..)) {
-        (Some(pattern), Some(name)) => wildmatch(pattern, name, casefold),
-        _ => false,
-    }
-}
-
-/// `path` with `folder` and a `/` taken off its front, as `match_pathname` compares it; `None`
-/// if `path` isn't below `folder`.
-fn below<'a>(path: &'a [u8], folder: &[u8], casefold: bool) -> Option<&'a [u8]> {
-    if folder.is_empty() {
-        return (!path.is_empty()).then_some(path);
-    }
-    let (head, rest) = path.split_at_checked(folder.len())?;
-    if !same(head, folder, casefold) {
-        return None;
-    }
-    rest.strip_prefix(b"/")
-}
-
-/// FNV-1a over the lowered bytes: cheap, and the same for any process, so a lookup needs only the
-/// bytes; letter case is left to `same`.
-fn folded_hash(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
-        (hash ^ u64::from(b.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-// The lines `Rules::last_match` tries on this thread, so a test can see the lookup skip the rest.
-#[cfg(test)]
-thread_local! {
-    static FITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// One ignore file's lines, for the folder it sits in.
-pub struct Rules {
-    /// The folder's project path, without a final `/`; empty for the top folder.
-    folder: String,
-    patterns: Vec<Pattern>,
-    /// The lines without wildcard or `/`, by `folded_hash` of their text, and their positions.
-    names: Vec<(u64, u32)>,
-    /// The lines without wildcard but with a `/`, by `folded_hash` of their text past one leading
-    /// `/`, and their positions.
-    paths: Vec<(u64, u32)>,
-    /// The other lines' positions, in order.
-    rest: Vec<usize>,
-    /// The file's size, which counts against Bolt's limits while its rules are in force.
-    bytes: u64,
-    /// Whether the file is a `.gitignore`, whose lines Git reads too, or a `.boltignore`.
-    gitignore: bool,
-}
-
-impl Rules {
-    /// Reads `text` as Git reads an ignore file: a UTF-8 byte order mark at the start is skipped,
-    /// lines end at LF with one CR before it dropped, a line starting with `#` is a comment, and
-    /// a line ends at a NUL. No line is refused; one Git can't use simply matches nothing.
-    /// `gitignore` says whether the file is a `.gitignore`.
-    pub fn parse(text: &[u8], folder: &str, gitignore: bool) -> Rules {
-        let body = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
-        let patterns: Vec<Pattern> = body
-            .split(|&b| b == b'\n')
-            .filter(|line| line.first().is_some_and(|&b| b != b'#'))
-            .map(|line| {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                Pattern::parse(trim_trailing_spaces(until_nul(line)))
-            })
-            .collect();
-        let (mut names, mut paths, mut rest) = (Vec::new(), Vec::new(), Vec::new());
-        for (i, p) in patterns.iter().enumerate() {
-            match u32::try_from(i) {
-                Ok(at) if p.literal == p.text.len() && p.any_depth => {
-                    names.push((folded_hash(&p.text), at));
-                }
-                Ok(at) if p.literal == p.text.len() => {
-                    let text = p.text.strip_prefix(b"/").unwrap_or(&p.text);
-                    paths.push((folded_hash(text), at));
-                }
-                _ => rest.push(i),
-            }
-        }
-        names.sort_unstable();
-        paths.sort_unstable();
-        Rules {
-            folder: folder.to_owned(),
-            patterns,
-            names,
-            paths,
-            rest,
-            bytes: u64::try_from(text.len()).unwrap_or(u64::MAX),
-            gitignore,
-        }
-    }
-
-    /// The last line that matches, as Git's `last_matching_pattern_from_list` finds it. `name` is
-    /// the last part of `path`.
-    fn last_match(
-        &self,
-        path: &[u8],
-        name: &[u8],
-        is_dir: bool,
-        casefold: bool,
-    ) -> Option<&Pattern> {
-        let folder = self.folder.as_bytes();
-        let fits = |i: usize| {
-            #[cfg(test)]
-            FITS.with(|n| n.set(n.get().saturating_add(1)));
-            self.patterns.get(i).is_some_and(|p| {
-                (is_dir || !p.dir_only)
-                    && if p.any_depth {
-                        match_basename(name, p, casefold)
-                    } else {
-                        match_pathname(path, folder, p, casefold)
-                    }
-            })
-        };
-        // A line without wildcard fits only bytes that are its own, letter case aside, so only
-        // the lines hashed as `name` (or the path below the folder) can.
-        let in_names = last_fit(&self.names, name, &fits);
-        // `wildmatch` stops at a NUL, so the path is looked up only that far.
-        let in_paths = below(path, folder, casefold)
-            .and_then(|below| last_fit(&self.paths, until_nul(below), &fits));
-        let best = in_names.max(in_paths);
-        let in_rest = self
-            .rest
-            .iter()
-            .rev()
-            .take_while(|&&i| best.is_none_or(|b| i > b))
-            .copied()
-            .find(|&i| fits(i));
-        in_rest.or(best).and_then(|i| self.patterns.get(i))
-    }
-}
-
-/// The last of `index`'s lines hashed as `key` that fits.
-fn last_fit(index: &[(u64, u32)], key: &[u8], fits: &impl Fn(usize) -> bool) -> Option<usize> {
-    if index.is_empty() {
-        return None;
-    }
-    let hash = folded_hash(key);
-    let start = index.partition_point(|&(h, _)| h < hash);
-    let end = index.partition_point(|&(h, _)| h <= hash);
-    index
-        .get(start..end)?
-        .iter()
-        .rev()
-        .filter_map(|&(_, at)| usize::try_from(at).ok())
-        .find(|&i| fits(i))
-}
-
-/// What the rules in force say about a path.
+/// What the rules say of one path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// The last line that matches ignores it.
+    /// The last line that matches keeps it out.
     Ignored,
-    /// The last line that matches starts with `!`, which takes it back.
+    /// The last line that matches is a `!` line.
     Kept,
     /// No line matches.
     NoRule,
 }
 
-/// What the rules in force say about a path: Bolt's verdict, from the lines of every ignore file,
-/// and Git's, from the lines of the `.gitignore` files alone. They differ only where a
-/// `.boltignore` line decides.
+/// Bolt's verdict, from every rule, and Git's, from Git's rules alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub bolt: Decision,
     pub git: Decision,
 }
 
-/// The rules of the folders a walk is in, the nearest last.
-pub struct Matcher {
-    drive: Drive,
-    levels: Vec<(String, Arc<[Rules]>)>,
+/// Whether `pattern` matches the whole of `text`, `/` matched only by `/` and by a `**` that is
+/// a whole folder name. With `casefold`, ASCII letters match without regard to case, as Git does
+/// with `core.ignoreCase`. A NUL ends the pattern and the text, as in Git.
+#[must_use]
+pub fn glob_match(pattern: &[u8], text: &[u8], casefold: bool) -> bool {
+    compile(to_nul(pattern)).is_some_and(|p| p.matches(to_nul(text), casefold))
 }
 
-/// The rules a `Matcher` had in force at one moment, kept to be asked later: the same rules,
-/// shared, so they give the verdicts it gave then.
-#[derive(Clone)]
+fn to_nul(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&c| c == 0).next().unwrap_or_default()
+}
+
+/// One piece of a pattern.
+#[derive(Debug)]
+enum Tok {
+    /// This byte; `true` if a `\` made it a letter that keeps its case.
+    Byte(u8, bool),
+    /// `?`: one byte but `/`.
+    One,
+    /// `[…]`: one byte of the set.
+    Set(Box<Set>),
+    /// `*`: any run of bytes but `/`.
+    Star,
+    /// `**` at the end: any run of bytes.
+    All,
+    /// `**/`: nothing, or any run of bytes that ends in `/`.
+    Dirs,
+}
+
+/// The bytes a `[…]` takes, `/` never among them: as written, and for a path whose letters were
+/// lowered to ignore their case.
+#[derive(Debug)]
+struct Set {
+    exact: Bits,
+    folded: Bits,
+}
+
+impl Set {
+    fn has(&self, b: u8, fold: bool) -> bool {
+        if fold {
+            self.folded.has(b.to_ascii_lowercase())
+        } else {
+            self.exact.has(b)
+        }
+    }
+}
+
+/// A set of bytes, one bit each.
+#[derive(Clone, Copy, Debug, Default)]
+struct Bits([u64; 4]);
+
+impl Bits {
+    /// Adds the bytes from `lo` to `hi`; none if `hi` comes before `lo`.
+    fn add(&mut self, lo: u8, hi: u8) {
+        let (lo, hi) = (u32::from(lo), u32::from(hi));
+        if hi < lo {
+            return;
+        }
+        for (word, start) in self.0.iter_mut().zip([0u32, 64, 128, 192]) {
+            let end = start.saturating_add(63);
+            if hi < start || lo > end {
+                continue;
+            }
+            let from = lo.saturating_sub(start);
+            let to = hi.min(end).saturating_sub(start);
+            let below_to = u64::MAX.checked_shr(63u32.saturating_sub(to)).unwrap_or(0);
+            let from_up = u64::MAX.checked_shl(from).unwrap_or(0);
+            *word |= below_to & from_up;
+        }
+    }
+
+    fn has(&self, b: u8) -> bool {
+        let (word, bit) = (usize::from(b) / 64, u32::from(b) % 64);
+        self.0
+            .get(word)
+            .is_some_and(|w| w.checked_shr(bit).unwrap_or(0) & 1 == 1)
+    }
+
+    fn or(self, other: Bits) -> Bits {
+        let mut both = self;
+        for (w, o) in both.0.iter_mut().zip(other.0) {
+            *w |= o;
+        }
+        both
+    }
+
+    /// The set as a `[…]` takes it: turned over if negated, and never `/`.
+    fn taken(self, negated: bool) -> Bits {
+        let mut out = Bits::default();
+        for (w, o) in out.0.iter_mut().zip(self.0) {
+            *w = if negated { !o } else { o };
+        }
+        let mut slash = Bits::default();
+        slash.add(b'/', b'/');
+        for (w, s) in out.0.iter_mut().zip(slash.0) {
+            *w &= !s;
+        }
+        out
+    }
+
+    const ALL: Bits = Bits([u64::MAX; 4]);
+
+    /// The bytes of `text`, each in both letter cases where case is ignored.
+    fn held_by(text: &[u8], fold: bool) -> Bits {
+        let mut held = Bits::default();
+        for &b in text {
+            put(&mut held.0, usize::from(b));
+            if fold {
+                put(&mut held.0, usize::from(b.to_ascii_lowercase()));
+                put(&mut held.0, usize::from(b.to_ascii_uppercase()));
+            }
+        }
+        held
+    }
+
+    /// The set with every letter in it in both cases.
+    fn either_case(mut self) -> Bits {
+        for low in b'a'..=b'z' {
+            let up = low.to_ascii_uppercase();
+            if self.has(low) || self.has(up) {
+                self.add(low, low);
+                self.add(up, up);
+            }
+        }
+        self
+    }
+
+    fn within(&self, other: &Bits) -> bool {
+        self.0.iter().zip(other.0).all(|(a, b)| a & !b == 0)
+    }
+}
+
+/// A quick test of a line against a path before its pieces are stepped through: the bytes its
+/// first byte can be, and the bytes every match holds. It never turns away a path the line
+/// matches, and turns away most others without reading the pieces.
+#[derive(Debug)]
+struct Sieve {
+    first: Bits,
+    needs: Bits,
+}
+
+impl Sieve {
+    fn of(pat: &Pat) -> Sieve {
+        let Pat::Glob(toks) = pat else {
+            return Sieve {
+                first: Bits::ALL,
+                needs: Bits::default(),
+            };
+        };
+        let mut needs = Bits::default();
+        for tok in toks.iter() {
+            if let Tok::Byte(b, _) = tok {
+                needs.add(*b, *b);
+            }
+        }
+        let first = match toks.first() {
+            Some(Tok::Byte(b, _)) => {
+                let mut one = Bits::default();
+                one.add(*b, *b);
+                one.either_case()
+            }
+            Some(Tok::Set(s)) => s.exact.or(s.folded).either_case(),
+            _ => Bits::ALL,
+        };
+        Sieve { first, needs }
+    }
+
+    /// Whether the line may match `text`, whose path holds the bytes `held`.
+    fn passes(&self, text: &[u8], held: &Bits) -> bool {
+        self.needs.within(held) && text.first().is_none_or(|&c| self.first.has(c))
+    }
+}
+
+/// A compiled pattern. The first two are the everyday shapes, matched without stepping.
+#[derive(Debug)]
+enum Pat {
+    /// Bytes compared whole.
+    Plain(Box<[u8]>),
+    /// Plain bytes around one `*`.
+    Star {
+        head: Box<[u8]>,
+        tail: Box<[u8]>,
+    },
+    Glob(Box<[Tok]>),
+}
+
+fn same(a: &[u8], b: &[u8], fold: bool) -> bool {
+    if fold {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+impl Pat {
+    fn matches(&self, text: &[u8], fold: bool) -> bool {
+        match self {
+            Pat::Plain(p) => same(p, text, fold),
+            Pat::Star { head, tail } => {
+                let Some((start, rest)) = text.split_at_checked(head.len()) else {
+                    return false;
+                };
+                let Some((mid, end)) = rest
+                    .len()
+                    .checked_sub(tail.len())
+                    .and_then(|at| rest.split_at_checked(at))
+                else {
+                    return false;
+                };
+                same(head, start, fold) && same(tail, end, fold) && !mid.contains(&b'/')
+            }
+            Pat::Glob(toks) => run(toks, text, fold),
+        }
+    }
+}
+
+/// Steps every position the pattern can be at through `text`, so the time is at most the
+/// pattern's length times the text's.
+fn run(toks: &[Tok], text: &[u8], fold: bool) -> bool {
+    // One bit per position, positions 0 to `toks.len()`.
+    let words = (toks.len() / 64).saturating_add(1);
+    if words == 1 {
+        return run_in(&mut [0; 4], 1, toks, text, fold);
+    }
+    // Longer patterns step in space kept for the thread, so matching never allocates once warm.
+    thread_local! {
+        static SPACE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+    let size = words.saturating_mul(4);
+    SPACE.with(|space| match space.try_borrow_mut() {
+        Ok(mut space) => {
+            space.clear();
+            space.resize(size, 0);
+            run_in(&mut space, words, toks, text, fold)
+        }
+        Err(_) => run_in(&mut vec![0; size], words, toks, text, fold),
+    })
+}
+
+/// `run` in `space`, four sets of `words` words each, all clear.
+fn run_in(space: &mut [u64], words: usize, toks: &[Tok], text: &[u8], fold: bool) -> bool {
+    // `at`: before piece `i` (at `toks.len()`: the whole pattern matched). `inside`: within the
+    // run of the `**/` at `i`, which may end only after a `/`.
+    let Some((mut at, rest)) = space.split_at_mut_checked(words) else {
+        return false;
+    };
+    let Some((mut inside, rest)) = rest.split_at_mut_checked(words) else {
+        return false;
+    };
+    let Some((mut next_at, mut next_inside)) = rest.split_at_mut_checked(words) else {
+        return false;
+    };
+    reach(at, toks, 0);
+    for &c in text {
+        next_at.fill(0);
+        next_inside.fill(0);
+        let mut alive = false;
+        for (w, (&a, &d)) in at.iter().zip(inside.iter()).enumerate() {
+            let mut bits = a | d;
+            while bits != 0 {
+                let low = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
+                bits &= bits.wrapping_sub(1);
+                let i = w.saturating_mul(64).saturating_add(low);
+                let Some(tok) = toks.get(i) else {
+                    continue;
+                };
+                alive = true;
+                let after = i.saturating_add(1);
+                if has(inside, i) {
+                    put(next_inside, i);
+                    if c == b'/' {
+                        reach(next_at, toks, after);
+                    }
+                }
+                if !has(at, i) {
+                    continue;
+                }
+                match tok {
+                    Tok::Byte(p, keep) => {
+                        let hit = if fold {
+                            c.to_ascii_lowercase()
+                                == if *keep { *p } else { p.to_ascii_lowercase() }
+                        } else {
+                            c == *p
+                        };
+                        if hit {
+                            reach(next_at, toks, after);
+                        }
+                    }
+                    Tok::One if c != b'/' => reach(next_at, toks, after),
+                    Tok::Set(s) if s.has(c, fold) => reach(next_at, toks, after),
+                    Tok::Star if c != b'/' => reach(next_at, toks, i),
+                    Tok::All => reach(next_at, toks, i),
+                    Tok::Dirs => {
+                        put(next_inside, i);
+                        if c == b'/' {
+                            reach(next_at, toks, after);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !alive {
+            return false;
+        }
+        std::mem::swap(&mut at, &mut next_at);
+        std::mem::swap(&mut inside, &mut next_inside);
+    }
+    has(at, toks.len())
+}
+
+fn has(states: &[u64], i: usize) -> bool {
+    states.get(i / 64).is_some_and(|w| {
+        w.checked_shr(u32::try_from(i % 64).unwrap_or(0))
+            .unwrap_or(0)
+            & 1
+            == 1
+    })
+}
+
+fn put(states: &mut [u64], i: usize) {
+    if let Some(w) = states.get_mut(i / 64) {
+        *w |= 1u64
+            .checked_shl(u32::try_from(i % 64).unwrap_or(0))
+            .unwrap_or(0);
+    }
+}
+
+/// Puts position `i` in force, and those after it that a run of nothing reaches.
+fn reach(states: &mut [u64], toks: &[Tok], mut i: usize) {
+    loop {
+        if i > toks.len() || has(states, i) {
+            return;
+        }
+        put(states, i);
+        match toks.get(i) {
+            Some(Tok::Star | Tok::All | Tok::Dirs) => i = i.saturating_add(1),
+            _ => return,
+        }
+    }
+}
+
+/// Compiles a pattern, or `None` if it can match nothing: a lone `\` at the end, a `[` that
+/// never closes, or a class Git doesn't know.
+fn compile(pattern: &[u8]) -> Option<Pat> {
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut rest = pattern;
+    while let Some((&c, after)) = rest.split_first() {
+        rest = after;
+        match c {
+            b'\\' => {
+                let (&e, after) = rest.split_first()?;
+                rest = after;
+                toks.push(Tok::Byte(e, e.is_ascii_alphabetic()));
+            }
+            b'?' => toks.push(Tok::One),
+            b'[' => {
+                let (s, after) = set_of(rest)?;
+                rest = after;
+                toks.push(Tok::Set(Box::new(s)));
+            }
+            b'*' => {
+                let more = rest.iter().take_while(|&&b| b == b'*').count();
+                rest = rest.get(more..).unwrap_or_default();
+                let starts_name =
+                    matches!(toks.last(), None | Some(Tok::Byte(b'/', _) | Tok::Dirs));
+                if more == 0 || !starts_name {
+                    toks.push(Tok::Star);
+                } else if let Some(after) = rest.strip_prefix(b"/") {
+                    rest = after;
+                    toks.push(Tok::Dirs);
+                } else if rest.is_empty() || rest.starts_with(b"\\/") {
+                    // Before an escaped `/` it takes any run, and the `/` must follow.
+                    toks.push(Tok::All);
+                } else {
+                    toks.push(Tok::Star);
+                }
+            }
+            _ => toks.push(Tok::Byte(c, false)),
+        }
+    }
+    Some(simplest(toks))
+}
+
+/// The pattern as `Plain` or `Star` where it has that shape.
+fn simplest(toks: Vec<Tok>) -> Pat {
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    let mut stars = 0u8;
+    for tok in &toks {
+        match tok {
+            Tok::Byte(b, false) => {
+                if stars == 0 {
+                    head.push(*b);
+                } else {
+                    tail.push(*b);
+                }
+            }
+            Tok::Star if stars == 0 => stars = 1,
+            _ => return Pat::Glob(toks.into_boxed_slice()),
+        }
+    }
+    if stars == 0 {
+        Pat::Plain(head.into_boxed_slice())
+    } else {
+        Pat::Star {
+            head: head.into_boxed_slice(),
+            tail: tail.into_boxed_slice(),
+        }
+    }
+}
+
+type Class = fn(&u8) -> bool;
+
+fn class_named(name: &[u8]) -> Option<Class> {
+    Some(match name {
+        b"alnum" => u8::is_ascii_alphanumeric,
+        b"alpha" => u8::is_ascii_alphabetic,
+        b"blank" => |b| matches!(*b, b' ' | b'\t'),
+        b"cntrl" => u8::is_ascii_control,
+        b"digit" => u8::is_ascii_digit,
+        b"graph" => u8::is_ascii_graphic,
+        b"lower" => u8::is_ascii_lowercase,
+        b"print" => |b| *b == b' ' || b.is_ascii_graphic(),
+        b"punct" => u8::is_ascii_punctuation,
+        b"space" => |b| matches!(*b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'),
+        b"upper" => u8::is_ascii_uppercase,
+        b"xdigit" => u8::is_ascii_hexdigit,
+        _ => return None,
+    })
+}
+
+/// One member of a `[…]`.
+enum Member {
+    Byte(u8),
+    Range(u8, u8),
+    Class(Class),
+}
+
+/// One byte as a `[…]` holds it, `\` making the next one plain, and what follows.
+fn member_byte(text: &[u8]) -> Option<(u8, &[u8])> {
+    match text.split_first()? {
+        (b'\\', after) => after.split_first().map(|(&b, rest)| (b, rest)),
+        (&b, after) => Some((b, after)),
+    }
+}
+
+/// A `[:name:]` at the start of `text`, whose first `]` is at `close`: its name and what
+/// follows. The name runs to that `]`, and it is a class only if a `:` comes just before it.
+fn class_at(text: &[u8], close: usize) -> Option<(&[u8], &[u8])> {
+    let inside = text.get(..close)?.strip_prefix(b"[:")?;
+    Some((
+        inside.strip_suffix(b":")?,
+        text.get(close.checked_add(1)?..)?,
+    ))
+}
+
+/// The members of a `[…]` whose `[` is already read: whether `!` or `^` turns it over, the
+/// members, and what follows its `]`. A `]` first is a member, and a `-` makes a range only
+/// between the byte before it and the byte after it, unless that is the closing `]`.
+fn members(text: &[u8]) -> Option<(bool, Vec<Member>, &[u8])> {
+    let (negated, mut rest) = match text.split_first() {
+        Some((b'!' | b'^', after)) => (true, after),
+        _ => (false, text),
+    };
+    let mut found = Vec::new();
+    // How much of the text is left at the next `]`, found again only once it is passed, so
+    // that no byte is searched twice.
+    let mut left_at_close = 0;
+    loop {
+        if left_at_close == 0 || rest.len() < left_at_close {
+            // With no `]` left the bracket can never close.
+            let at = rest.iter().position(|&b| b == b']')?;
+            left_at_close = rest.len().saturating_sub(at);
+        }
+        if !found.is_empty()
+            && let Some(after) = rest.strip_prefix(b"]")
+        {
+            return Some((negated, found, after));
+        }
+        let close = rest.len().saturating_sub(left_at_close);
+        if let Some((name, after)) = class_at(rest, close) {
+            found.push(Member::Class(class_named(name)?));
+            rest = after;
+            continue;
+        }
+        let (lo, after) = member_byte(rest)?;
+        rest = after;
+        match rest.strip_prefix(b"-") {
+            Some(tail) if tail.first().is_some_and(|&b| b != b']') => {
+                let (hi, after) = member_byte(tail)?;
+                found.push(Member::Range(lo, hi));
+                rest = after;
+            }
+            _ => found.push(Member::Byte(lo)),
+        }
+    }
+}
+
+/// Reads a `[…]` whose `[` is already read: its set and what follows it, or `None` if the line
+/// can match nothing.
+fn set_of(text: &[u8]) -> Option<(Set, &[u8])> {
+    let (negated, found, rest) = members(text)?;
+    let mut alone = Bits::default();
+    let mut wide = Bits::default();
+    for member in found {
+        match member {
+            Member::Byte(b) => alone.add(b, b),
+            // A range's first byte counts on its own too, so a backwards range keeps it.
+            Member::Range(lo, hi) => {
+                alone.add(lo, lo);
+                wide.add(lo, hi);
+            }
+            Member::Class(class) => (0..=0x7f_u8).filter(class).for_each(|b| wide.add(b, b)),
+        }
+    }
+    let exact = alone.or(wide);
+    // Where letter case is ignored the path's letters come lowered: a range or class takes a
+    // letter in either case, a byte written alone only as written.
+    let mut folded = exact;
+    for up in (b'A'..=b'Z').filter(|&up| wide.has(up)) {
+        let low = up.to_ascii_lowercase();
+        folded.add(low, low);
+    }
+    let set = Set {
+        exact: exact.taken(negated),
+        folded: folded.taken(negated),
+    };
+    Some((set, rest))
+}
+
+/// One line of a rule file that can match something.
+#[derive(Debug)]
+struct Line {
+    pat: Pat,
+    sieve: Sieve,
+    /// `!` at the start.
+    negated: bool,
+    /// `/` at the end.
+    dir_only: bool,
+    /// No other `/`: it matches a name at any depth.
+    basename: bool,
+}
+
+impl Line {
+    /// Reads one line, without its LF, or `None` if it matches nothing.
+    fn read(raw: &[u8]) -> Option<Line> {
+        let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+        let raw = raw.split(|&b| b == 0).next().unwrap_or_default();
+        if raw.is_empty() || raw.starts_with(b"#") {
+            return None;
+        }
+        let text = without_trailing_spaces(raw);
+        let (negated, text) = strip(text, b"!", true);
+        let (dir_only, text) = strip(text, b"/", false);
+        let (anchored, text) = strip(text, b"/", true);
+        if text.is_empty() {
+            return None;
+        }
+        let pat = compile(text)?;
+        Some(Line {
+            sieve: Sieve::of(&pat),
+            pat,
+            negated,
+            dir_only,
+            basename: !anchored && !text.contains(&b'/'),
+        })
+    }
+
+    fn decision(&self) -> Decision {
+        if self.negated {
+            Decision::Kept
+        } else {
+            Decision::Ignored
+        }
+    }
+}
+
+fn strip<'a>(text: &'a [u8], what: &[u8], front: bool) -> (bool, &'a [u8]) {
+    let cut = if front {
+        text.strip_prefix(what)
+    } else {
+        text.strip_suffix(what)
+    };
+    match cut {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    }
+}
+
+/// Drops the spaces at the end of a line but one that a `\` escapes: the first of them, when an
+/// odd number of `\` comes just before.
+fn without_trailing_spaces(raw: &[u8]) -> &[u8] {
+    let spaces = raw.iter().rev().take_while(|&&b| b == b' ').count();
+    let before = raw.len().saturating_sub(spaces);
+    let text = raw.get(..before).unwrap_or(raw);
+    let slashes = text.iter().rev().take_while(|&&b| b == b'\\').count();
+    let keep = if spaces > 0 && slashes % 2 == 1 {
+        before.saturating_add(1)
+    } else {
+        before
+    };
+    raw.get(..keep).unwrap_or(raw)
+}
+
+/// A name's key in a rule file's index of plain names, the same in either letter case.
+fn name_key(name: &[u8]) -> u64 {
+    name.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ u64::from(b.to_ascii_lowercase())).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
+/// The rules of one rule file.
+#[derive(Debug)]
+pub struct Rules {
+    /// The folder the file is in, as the path is compared.
+    folder: String,
+    /// Git's rules (a `.gitignore` or a personal list), not a `.boltignore`.
+    gits: bool,
+    /// The file's size.
+    size: u64,
+    lines: Vec<Line>,
+    /// The lines with no special character, by `name_key` of their pattern, so that they are
+    /// found without trying them one by one.
+    plain: HashMap<u64, Vec<usize>>,
+    /// Every other line, in order.
+    others: Vec<usize>,
+}
+
+impl Rules {
+    /// Reads one rule file's `text`; `folder` is the folder it sits in (`""` at the top) and
+    /// `gitignore` says whether its rules are Git's. A line that can't be used matches nothing.
+    #[must_use]
+    pub fn parse(text: &[u8], folder: &str, gitignore: bool) -> Rules {
+        let body = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
+        let mut rules = Rules {
+            folder: folder.to_owned(),
+            gits: gitignore,
+            size: u64::try_from(text.len()).unwrap_or(u64::MAX),
+            lines: Vec::new(),
+            plain: HashMap::new(),
+            others: Vec::new(),
+        };
+        for line in body.split(|&b| b == b'\n').filter_map(Line::read) {
+            let at = rules.lines.len();
+            match &line.pat {
+                Pat::Plain(name) => rules.plain.entry(name_key(name)).or_default().push(at),
+                _ => rules.others.push(at),
+            }
+            rules.lines.push(line);
+        }
+        rules
+    }
+
+    /// The last line that matches: `rel` is the path from the file's folder, `base` its name.
+    fn last(&self, rel: &[u8], base: &[u8], is_dir: bool, fold: bool) -> Option<&Line> {
+        // Plain lines' quick test takes any path, so only the other lines need the path's bytes.
+        let holds = if self.others.is_empty() {
+            Bits::ALL
+        } else {
+            Bits::held_by(rel, fold)
+        };
+        let fits = |&at: &usize| {
+            self.lines.get(at).is_some_and(|line| {
+                let text = if line.basename { base } else { rel };
+                (is_dir || !line.dir_only)
+                    && line.sieve.passes(text, &holds)
+                    && line.pat.matches(text, fold)
+            })
+        };
+        // A plain line matches the whole name or the whole path from the folder.
+        let plain = |key| {
+            self.plain
+                .get(&key)
+                .and_then(|lines| lines.iter().rev().copied().find(fits))
+        };
+        let (by_name, by_path) = (name_key(base), name_key(rel));
+        let named = plain(by_name).max(if by_path == by_name {
+            None
+        } else {
+            plain(by_path)
+        });
+        let other = self
+            .others
+            .iter()
+            .rev()
+            .copied()
+            .take_while(|&at| named.is_none_or(|n| at > n))
+            .find(fits);
+        other.or(named).and_then(|at| self.lines.get(at))
+    }
+}
+
+/// The rule files of one folder, and those of the folders above it.
+#[derive(Debug)]
+struct Level {
+    folder: String,
+    rules: Vec<Rules>,
+    /// The size of these files and of those above.
+    bytes: u64,
+    up: Option<Arc<Level>>,
+}
+
+/// The rules in force at one point of a walk. Cloning it is cheap, and it keeps giving the
+/// answers it gave then.
+#[derive(Clone, Debug)]
 pub(crate) struct InForce {
     drive: Drive,
-    levels: Vec<Arc<[Rules]>>,
+    top: Option<Arc<Level>>,
 }
 
 impl InForce {
-    /// What these rules say about `path`, as `Matcher::verdict` said it then.
+    /// Both verdicts for a project path (`a/b/c`): the last line that matches decides, the
+    /// nearest folder's files counting last.
     pub(crate) fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
-        let levels = self.levels.iter().map(|rules| &**rules);
-        verdict_in(self.drive, levels, path.as_ref(), is_dir)
+        let path = self.composed(path.as_ref());
+        let fold = self.drive.ignores_case;
+        let base = path.rsplit(|&b| b == b'/').next().unwrap_or_default();
+        let (mut bolt, mut git) = (None, None);
+        let mut level = self.top.as_deref();
+        while let Some(here) = level {
+            for rules in here.rules.iter().rev() {
+                if bolt.is_some() && (git.is_some() || !rules.gits) {
+                    continue;
+                }
+                let Some(rel) = below(&path, rules.folder.as_bytes(), fold) else {
+                    continue;
+                };
+                if let Some(line) = rules.last(rel, base, is_dir, fold) {
+                    bolt.get_or_insert(line.decision());
+                    if rules.gits {
+                        git.get_or_insert(line.decision());
+                    }
+                }
+            }
+            if bolt.is_some() && git.is_some() {
+                break;
+            }
+            level = here.up.as_deref();
+        }
+        Verdict {
+            bolt: bolt.unwrap_or(Decision::NoRule),
+            git: git.unwrap_or(Decision::NoRule),
+        }
     }
+
+    /// The path as this drive compares names: composed where it composes them.
+    fn composed<'a>(&self, path: &'a [u8]) -> Cow<'a, [u8]> {
+        if !self.drive.composes_unicode || path.is_ascii() {
+            return Cow::Borrowed(path);
+        }
+        match std::str::from_utf8(path).map(|s| self.composed_name(s)) {
+            Ok(Cow::Owned(s)) => Cow::Owned(s.into_bytes()),
+            _ => Cow::Borrowed(path),
+        }
+    }
+
+    /// A folder or path name as this drive compares names.
+    fn composed_name<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        if self.drive.composes_unicode && !name.is_ascii() && !unicode_normalization::is_nfc(name) {
+            Cow::Owned(name.nfc().collect())
+        } else {
+            Cow::Borrowed(name)
+        }
+    }
+}
+
+/// The part of `path` below `folder`, if it is below it.
+fn below<'a>(path: &'a [u8], folder: &[u8], fold: bool) -> Option<&'a [u8]> {
+    let rest = if folder.is_empty() {
+        path
+    } else {
+        let (start, rest) = path.split_at_checked(folder.len())?;
+        if !same(start, folder, fold) {
+            return None;
+        }
+        rest.strip_prefix(b"/")?
+    };
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// The rules in force as a walk goes down and back up the project's folders.
+#[derive(Debug)]
+pub struct Matcher {
+    now: InForce,
 }
 
 impl Matcher {
-    /// No rules yet. `drive` says how Git compares names there: its `core.ignorecase` and
-    /// `core.precomposeunicode`.
+    #[must_use]
     pub fn new(drive: Drive) -> Matcher {
         Matcher {
-            drive,
-            levels: Vec::new(),
+            now: InForce { drive, top: None },
         }
     }
 
-    /// Puts the rules of `folder` in force, in the order they are read: a later line wins.
+    /// The walk enters `folder` and gives the rule files read there, in order: at the top Git's
+    /// personal lists, then `.gitignore`, then `.boltignore`.
     pub fn enter(&mut self, folder: &str, mut rules: Vec<Rules>) {
-        // Paths are compared composed there, so the folders they are matched below are too.
-        if self.drive.composes_unicode {
-            for r in &mut rules {
-                if !is_nfc(&r.folder) {
-                    r.folder = r.folder.nfc().collect();
-                }
+        for r in &mut rules {
+            if let Cow::Owned(name) = self.now.composed_name(&r.folder) {
+                r.folder = name;
             }
         }
-        self.levels.push((folder.to_owned(), rules.into()));
-    }
-
-    /// The rules in force now, to be asked later.
-    pub(crate) fn in_force(&self) -> InForce {
-        InForce {
-            drive: self.drive,
-            levels: self.levels.iter().map(|(_, r)| Arc::clone(r)).collect(),
-        }
-    }
-
-    /// Ends the rules of the folders that don't hold `folder`.
-    pub fn leave_to(&mut self, folder: &str) {
-        let holds = |outer: &str| {
-            outer.is_empty()
-                || folder
-                    .strip_prefix(outer)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-        };
-        while self.levels.last().is_some_and(|(outer, _)| !holds(outer)) {
-            self.levels.pop();
-        }
-    }
-
-    /// The size of the ignore files whose rules are in force.
-    pub fn in_force_bytes(&self) -> u64 {
-        self.levels
+        let below = self.in_force_bytes();
+        let bytes = rules
             .iter()
-            .flat_map(|(_, rules)| rules.iter())
-            .fold(0, |sum, r| sum.saturating_add(r.bytes))
+            .fold(below, |sum, r| sum.saturating_add(r.size));
+        self.now.top = Some(Arc::new(Level {
+            folder: folder.to_owned(),
+            rules,
+            bytes,
+            up: self.now.top.take(),
+        }));
     }
 
-    /// Bolt's verdict on `path`, as `verdict` gives it.
+    /// The walk goes back up to `folder`: the rules of folders that don't hold it stop applying.
+    pub fn leave_to(&mut self, folder: &str) {
+        while let Some(level) = &self.now.top {
+            let f = level.folder.as_str();
+            let holds = f.is_empty()
+                || folder
+                    .strip_prefix(f)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'));
+            if holds {
+                return;
+            }
+            self.now.top = level.up.clone();
+        }
+    }
+
+    /// The total size of the rule files in force now.
+    #[must_use]
+    pub fn in_force_bytes(&self) -> u64 {
+        self.now.top.as_ref().map_or(0, |level| level.bytes)
+    }
+
+    /// Bolt's verdict for a project path (`a/b/c`) under the rules in force.
+    #[must_use]
     pub fn decide(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Decision {
-        self.verdict(path, is_dir).bolt
+        self.now.verdict(path, is_dir).bolt
     }
 
-    /// What the rules in force say about `path`, a project path with `/` between names, as Git's
-    /// `last_matching_pattern` decides it: the nearest folder's rules first, and in them the last
-    /// line that matches. Git's verdict is looked for again, among the `.gitignore` lines, only
-    /// when a `.boltignore` line decides Bolt's. Call `leave_to` with the folder that holds `path`
-    /// first.
+    /// Bolt's verdict and Git's.
+    #[must_use]
     pub fn verdict(&self, path: impl AsRef<[u8]>, is_dir: bool) -> Verdict {
-        let levels = self.levels.iter().map(|(_, rules)| &**rules);
-        verdict_in(self.drive, levels, path.as_ref(), is_dir)
+        self.now.verdict(path, is_dir)
     }
-}
 
-/// `Matcher::verdict` on `path` with the rules of `levels`, the nearest last, on `drive`.
-fn verdict_in<'a, L>(drive: Drive, levels: L, path: &[u8], is_dir: bool) -> Verdict
-where
-    L: DoubleEndedIterator<Item = &'a [Rules]> + Clone,
-{
-    // Where the drive composes Unicode, Git reads names composed (`core.precomposeunicode`).
-    let composed: Option<String> = match std::str::from_utf8(path) {
-        Ok(s) if drive.composes_unicode && !is_nfc(s) => Some(s.nfc().collect()),
-        _ => None,
-    };
-    let path = composed.as_ref().map_or(path, String::as_bytes);
-    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
-    let casefold = drive.ignores_case;
-    let bolt = last_match(levels.clone(), path, name, is_dir, casefold, false);
-    let git = match bolt {
-        Some((_, false)) => last_match(levels, path, name, is_dir, casefold, true),
-        decided => decided,
-    };
-    let decision = |found: Option<(&Pattern, bool)>| match found {
-        Some((p, _)) if p.negative => Decision::Kept,
-        Some(_) => Decision::Ignored,
-        None => Decision::NoRule,
-    };
-    Verdict {
-        bolt: decision(bolt),
-        git: decision(git),
+    /// A snapshot of the rules in force, to judge a path later with the same answer.
+    pub(crate) fn in_force(&self) -> InForce {
+        self.now.clone()
     }
-}
-
-/// The line of `levels` that decides `path`, and whether a `.gitignore` holds it: among the lines
-/// of every ignore file in force, or of the `.gitignore` files alone.
-fn last_match<'a, L>(
-    levels: L,
-    path: &[u8],
-    name: &[u8],
-    is_dir: bool,
-    casefold: bool,
-    gitignore_only: bool,
-) -> Option<(&'a Pattern, bool)>
-where
-    L: DoubleEndedIterator<Item = &'a [Rules]>,
-{
-    levels
-        .rev()
-        .flat_map(|rules| rules.iter().rev())
-        .filter(|rules| rules.gitignore || !gitignore_only)
-        .find_map(|rules| {
-            let line = rules.last_match(path, name, is_dir, casefold)?;
-            Some((line, rules.gitignore))
-        })
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects
-    )]
-    use super::*;
-    use proptest::prelude::*;
-
-    /// Every row of Git's `t/t3070-wildmatch.sh`: whether `wildmatch` and then `iwildmatch` match
-    /// (Git's test tool runs both with `WM_PATHNAME`), the text, and the pattern.
-    const WILDMATCH_CASES: &[(bool, bool, &[u8], &[u8])] = &[
-        (true, true, b"foo", b"foo"),
-        (false, false, b"foo", b"bar"),
-        (true, true, b"", b""),
-        (true, true, b"foo", b"???"),
-        (false, false, b"foo", b"??"),
-        (true, true, b"foo", b"*"),
-        (true, true, b"foo", b"f*"),
-        (false, false, b"foo", b"*f"),
-        (true, true, b"foo", b"*foo*"),
-        (true, true, b"foobar", b"*ob*a*r*"),
-        (true, true, b"aaaaaaabababab", b"*ab"),
-        (true, true, b"foo*", b"foo\\*"),
-        (false, false, b"foobar", b"foo\\*bar"),
-        (true, true, b"f\\oo", b"f\\\\oo"),
-        (false, false, b"foo\\", b"foo\\"),
-        (true, true, b"ball", b"*[al]?"),
-        (false, false, b"ten", b"[ten]"),
-        (true, true, b"ten", b"**[!te]"),
-        (false, false, b"ten", b"**[!ten]"),
-        (true, true, b"ten", b"t[a-g]n"),
-        (false, false, b"ten", b"t[!a-g]n"),
-        (true, true, b"ton", b"t[!a-g]n"),
-        (true, true, b"ton", b"t[^a-g]n"),
-        (true, true, b"a]b", b"a[]]b"),
-        (true, true, b"a-b", b"a[]-]b"),
-        (true, true, b"a]b", b"a[]-]b"),
-        (false, false, b"aab", b"a[]-]b"),
-        (true, true, b"aab", b"a[]a-]b"),
-        (true, true, b"]", b"]"),
-        (false, false, b"foo/baz/bar", b"foo*bar"),
-        (false, false, b"foo/baz/bar", b"foo**bar"),
-        (true, true, b"foobazbar", b"foo**bar"),
-        (true, true, b"foo/baz/bar", b"foo/**/bar"),
-        (true, true, b"foo/baz/bar", b"foo/**/**/bar"),
-        (true, true, b"foo/b/a/z/bar", b"foo/**/bar"),
-        (true, true, b"foo/b/a/z/bar", b"foo/**/**/bar"),
-        (true, true, b"foo/bar", b"foo/**/bar"),
-        (true, true, b"foo/bar", b"foo/**/**/bar"),
-        (false, false, b"foo/bar", b"foo?bar"),
-        (false, false, b"foo/bar", b"foo[/]bar"),
-        (false, false, b"foo/bar", b"foo[^a-z]bar"),
-        (false, false, b"foo/bar", b"f[^eiu][^eiu][^eiu][^eiu][^eiu]r"),
-        (true, true, b"foo-bar", b"f[^eiu][^eiu][^eiu][^eiu][^eiu]r"),
-        (true, true, b"foo", b"**/foo"),
-        (true, true, b"XXX/foo", b"**/foo"),
-        (true, true, b"bar/baz/foo", b"**/foo"),
-        (false, false, b"bar/baz/foo", b"*/foo"),
-        (false, false, b"foo/bar/baz", b"**/bar*"),
-        (true, true, b"deep/foo/bar/baz", b"**/bar/*"),
-        (false, false, b"deep/foo/bar/baz/", b"**/bar/*"),
-        (true, true, b"deep/foo/bar/baz/", b"**/bar/**"),
-        (false, false, b"deep/foo/bar", b"**/bar/*"),
-        (true, true, b"deep/foo/bar/", b"**/bar/**"),
-        (false, false, b"foo/bar/baz", b"**/bar**"),
-        (true, true, b"foo/bar/baz/x", b"*/bar/**"),
-        (false, false, b"deep/foo/bar/baz/x", b"*/bar/**"),
-        (true, true, b"deep/foo/bar/baz/x", b"**/bar/*/*"),
-        (false, false, b"acrt", b"a[c-c]st"),
-        (true, true, b"acrt", b"a[c-c]rt"),
-        (false, false, b"]", b"[!]-]"),
-        (true, true, b"a", b"[!]-]"),
-        (false, false, b"", b"\\"),
-        (false, false, b"\\", b"\\"),
-        (false, false, b"XXX/\\", b"*/\\"),
-        (true, true, b"XXX/\\", b"*/\\\\"),
-        (true, true, b"foo", b"foo"),
-        (true, true, b"@foo", b"@foo"),
-        (false, false, b"foo", b"@foo"),
-        (true, true, b"[ab]", b"\\[ab]"),
-        (true, true, b"[ab]", b"[[]ab]"),
-        (true, true, b"[ab]", b"[[:]ab]"),
-        (false, false, b"[ab]", b"[[::]ab]"),
-        (true, true, b"[ab]", b"[[:digit]ab]"),
-        (true, true, b"[ab]", b"[\\[:]ab]"),
-        (true, true, b"?a?b", b"\\??\\?b"),
-        (true, true, b"abc", b"\\a\\b\\c"),
-        (false, false, b"foo", b""),
-        (true, true, b"foo/bar/baz/to", b"**/t[o]"),
-        (true, true, b"a1B", b"[[:alpha:]][[:digit:]][[:upper:]]"),
-        (false, true, b"a", b"[[:digit:][:upper:][:space:]]"),
-        (true, true, b"A", b"[[:digit:][:upper:][:space:]]"),
-        (true, true, b"1", b"[[:digit:][:upper:][:space:]]"),
-        (false, false, b"1", b"[[:digit:][:upper:][:spaci:]]"),
-        (true, true, b" ", b"[[:digit:][:upper:][:space:]]"),
-        (false, false, b".", b"[[:digit:][:upper:][:space:]]"),
-        (true, true, b".", b"[[:digit:][:punct:][:space:]]"),
-        (true, true, b"5", b"[[:xdigit:]]"),
-        (true, true, b"f", b"[[:xdigit:]]"),
-        (true, true, b"D", b"[[:xdigit:]]"),
-        (
-            true,
-            true,
-            b"_",
-            b"[[:alnum:][:alpha:][:blank:][:cntrl:][:digit:][:graph:][:lower:][:print:][:punct:][:space:][:upper:][:xdigit:]]",
-        ),
-        (
-            true,
-            true,
-            b".",
-            b"[^[:alnum:][:alpha:][:blank:][:cntrl:][:digit:][:lower:][:space:][:upper:][:xdigit:]]",
-        ),
-        (true, true, b"5", b"[a-c[:digit:]x-z]"),
-        (true, true, b"b", b"[a-c[:digit:]x-z]"),
-        (true, true, b"y", b"[a-c[:digit:]x-z]"),
-        (false, false, b"q", b"[a-c[:digit:]x-z]"),
-        (true, true, b"]", b"[\\\\-^]"),
-        (false, false, b"[", b"[\\\\-^]"),
-        (true, true, b"-", b"[\\-_]"),
-        (true, true, b"]", b"[\\]]"),
-        (false, false, b"\\]", b"[\\]]"),
-        (false, false, b"\\", b"[\\]]"),
-        (false, false, b"ab", b"a[]b"),
-        (false, false, b"a[]b", b"a[]b"),
-        (false, false, b"ab[", b"ab["),
-        (false, false, b"ab", b"[!"),
-        (false, false, b"ab", b"[-"),
-        (true, true, b"-", b"[-]"),
-        (false, false, b"-", b"[a-"),
-        (false, false, b"-", b"[!a-"),
-        (true, true, b"-", b"[--A]"),
-        (true, true, b"5", b"[--A]"),
-        (true, true, b" ", b"[ --]"),
-        (true, true, b"$", b"[ --]"),
-        (true, true, b"-", b"[ --]"),
-        (false, false, b"0", b"[ --]"),
-        (true, true, b"-", b"[---]"),
-        (true, true, b"-", b"[------]"),
-        (false, false, b"j", b"[a-e-n]"),
-        (true, true, b"-", b"[a-e-n]"),
-        (true, true, b"a", b"[!------]"),
-        (false, false, b"[", b"[]-a]"),
-        (true, true, b"^", b"[]-a]"),
-        (false, false, b"^", b"[!]-a]"),
-        (true, true, b"[", b"[!]-a]"),
-        (true, true, b"^", b"[a^bc]"),
-        (true, true, b"-b]", b"[a-]b]"),
-        (false, false, b"\\", b"[\\]"),
-        (true, true, b"\\", b"[\\\\]"),
-        (false, false, b"\\", b"[!\\\\]"),
-        (true, true, b"G", b"[A-\\\\]"),
-        (false, false, b"aaabbb", b"b*a"),
-        (false, false, b"aabcaa", b"*ba*"),
-        (true, true, b",", b"[,]"),
-        (true, true, b",", b"[\\\\,]"),
-        (true, true, b"\\", b"[\\\\,]"),
-        (true, true, b"-", b"[,-.]"),
-        (false, false, b"+", b"[,-.]"),
-        (false, false, b"-.]", b"[,-.]"),
-        (true, true, b"2", b"[\\1-\\3]"),
-        (true, true, b"3", b"[\\1-\\3]"),
-        (false, false, b"4", b"[\\1-\\3]"),
-        (true, true, b"\\", b"[[-\\]]"),
-        (true, true, b"[", b"[[-\\]]"),
-        (true, true, b"]", b"[[-\\]]"),
-        (false, false, b"-", b"[[-\\]]"),
-        (
-            true,
-            true,
-            b"-adobe-courier-bold-o-normal--12-120-75-75-m-70-iso8859-1",
-            b"-*-*-*-*-*-*-12-*-*-*-m-*-*-*",
-        ),
-        (
-            false,
-            false,
-            b"-adobe-courier-bold-o-normal--12-120-75-75-X-70-iso8859-1",
-            b"-*-*-*-*-*-*-12-*-*-*-m-*-*-*",
-        ),
-        (
-            false,
-            false,
-            b"-adobe-courier-bold-o-normal--12-120-75-75-/-70-iso8859-1",
-            b"-*-*-*-*-*-*-12-*-*-*-m-*-*-*",
-        ),
-        (
-            true,
-            true,
-            b"XXX/adobe/courier/bold/o/normal//12/120/75/75/m/70/iso8859/1",
-            b"XXX/*/*/*/*/*/*/12/*/*/*/m/*/*/*",
-        ),
-        (
-            false,
-            false,
-            b"XXX/adobe/courier/bold/o/normal//12/120/75/75/X/70/iso8859/1",
-            b"XXX/*/*/*/*/*/*/12/*/*/*/m/*/*/*",
-        ),
-        (
-            true,
-            true,
-            b"abcd/abcdefg/abcdefghijk/abcdefghijklmnop.txt",
-            b"**/*a*b*g*n*t",
-        ),
-        (
-            false,
-            false,
-            b"abcd/abcdefg/abcdefghijk/abcdefghijklmnop.txtz",
-            b"**/*a*b*g*n*t",
-        ),
-        (false, false, b"foo", b"*/*/*"),
-        (false, false, b"foo/bar", b"*/*/*"),
-        (true, true, b"foo/bba/arr", b"*/*/*"),
-        (false, false, b"foo/bb/aa/rr", b"*/*/*"),
-        (true, true, b"foo/bb/aa/rr", b"**/**/**"),
-        (true, true, b"abcXdefXghi", b"*X*i"),
-        (false, false, b"ab/cXd/efXg/hi", b"*X*i"),
-        (true, true, b"ab/cXd/efXg/hi", b"*/*X*/*/*i"),
-        (true, true, b"ab/cXd/efXg/hi", b"**/*X*/**/*i"),
-        (false, false, b"foo", b"fo"),
-        (true, true, b"foo/bar", b"foo/bar"),
-        (true, true, b"foo/bar", b"foo/*"),
-        (false, false, b"foo/bba/arr", b"foo/*"),
-        (true, true, b"foo/bba/arr", b"foo/**"),
-        (false, false, b"foo/bba/arr", b"foo*"),
-        (false, false, b"foo/bba/arr", b"foo**"),
-        (false, false, b"foo/bba/arr", b"foo/*arr"),
-        (false, false, b"foo/bba/arr", b"foo/**arr"),
-        (false, false, b"foo/bba/arr", b"foo/*z"),
-        (false, false, b"foo/bba/arr", b"foo/**z"),
-        (false, false, b"foo/bar", b"foo?bar"),
-        (false, false, b"foo/bar", b"foo[/]bar"),
-        (false, false, b"foo/bar", b"foo[^a-z]bar"),
-        (false, false, b"ab/cXd/efXg/hi", b"*Xg*i"),
-        (false, true, b"a", b"[A-Z]"),
-        (true, true, b"A", b"[A-Z]"),
-        (false, true, b"A", b"[a-z]"),
-        (true, true, b"a", b"[a-z]"),
-        (false, true, b"a", b"[[:upper:]]"),
-        (true, true, b"A", b"[[:upper:]]"),
-        (false, true, b"A", b"[[:lower:]]"),
-        (true, true, b"a", b"[[:lower:]]"),
-        (false, true, b"A", b"[B-Za]"),
-        (true, true, b"a", b"[B-Za]"),
-        (false, true, b"A", b"[B-a]"),
-        (true, true, b"a", b"[B-a]"),
-        (false, true, b"z", b"[Z-y]"),
-        (true, true, b"Z", b"[Z-y]"),
-    ];
-
-    fn shown(bytes: &[u8]) -> String {
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-
-    #[test]
-    fn gits_wildmatch_table_passes() {
-        assert_eq!(WILDMATCH_CASES.len(), 190);
-        for &(wm, iwm, text, pattern) in WILDMATCH_CASES {
-            let (t, p) = (shown(text), shown(pattern));
-            assert_eq!(wildmatch(pattern, text, false), wm, "{t:?} {p:?}");
-            assert_eq!(
-                wildmatch(pattern, text, true),
-                iwm,
-                "{t:?} {p:?} (casefold)"
-            );
-        }
-    }
-
-    #[test]
-    fn gits_table_passes_through_match_basename() {
-        // A `*` and then plain text is compared by the name's end, as Git does, and that differs
-        // from `wildmatch` only on a text with a `/`, which Git never hands it; no such row has one.
-        for &(wm, iwm, text, pattern) in WILDMATCH_CASES {
-            if pattern.contains(&b'/') {
-                continue;
-            }
-            let (t, p) = (shown(text), shown(pattern));
-            let line = Pattern::parse(pattern);
-            assert_eq!(match_basename(text, &line, false), wm, "{t:?} {p:?}");
-            assert_eq!(
-                match_basename(text, &line, true),
-                iwm,
-                "{t:?} {p:?} (casefold)"
-            );
-        }
-    }
-
-    const STAR_PIECES: &[&[u8]] = &[
-        b"a",
-        b"b",
-        b"A",
-        b"B",
-        b".",
-        b"-",
-        b"_",
-        b"\xff",
-        b"?",
-        b"*",
-        b"**",
-        b"[ab]",
-        b"[!ab]",
-        b"[^a]",
-        b"[a-c]",
-        b"[]a]",
-        b"[[:digit:]]",
-        b"[[:upper:]]",
-        b"[A-C]",
-        b"\\a",
-        b"\\A",
-        b"\\*",
-        b"\\?",
-        b"\\[",
-        b"\\\\",
-        b"[",
-        b"\\",
-    ];
-    const NAME_BYTES: &[u8] = b"abcABC.-_1*?[]\\/\0\xff";
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 5_000, ..ProptestConfig::default() })]
-        #[test]
-        fn a_line_with_one_star_matches_as_wildmatch_does(
-            pieces in prop::collection::vec(prop::sample::select(STAR_PIECES), 0..8),
-            name in prop::collection::vec(prop::sample::select(NAME_BYTES), 0..13),
-            casefold: bool,
-        ) {
-            let line = pieces.concat();
-            prop_assume!(!line.contains(&b'/'));
-            let p = Pattern::parse(&line);
-            // The plain matcher: the whole name, a literal tail, or wildmatch.
-            let plain = if p.literal == p.text.len() {
-                same(&p.text, &name, casefold)
-            } else if p.ends_with {
-                let tail = &p.text[1..];
-                name.len() >= tail.len() && same(tail, &name[name.len() - tail.len()..], casefold)
-            } else {
-                wildmatch(&p.text, &name, casefold)
-            };
-            prop_assert_eq!(
-                match_basename(&name, &p, casefold),
-                plain,
-                "{:?} {:?}", shown(&line), shown(&name)
-            );
-        }
-    }
-
-    #[test]
-    fn git_and_godot_lines_take_the_two_ends() {
-        let ends = |line: &str| {
-            Pattern::parse(line.as_bytes())
-                .ends
-                .map(|e| (e.head, e.tail, e.head_width, e.tail_width))
-        };
-        for (line, want) in [
-            ("*.py[co]", (0, 1, 0, 4)),
-            ("*.[aos]", (0, 1, 0, 2)),
-            ("*.[1-8]", (0, 1, 0, 2)),
-            ("cmds-*.adoc", (5, 6, 5, 5)),
-            ("mergetools-*.adoc", (11, 12, 11, 5)),
-            ("mono_crash.*.json", (11, 12, 11, 5)),
-            ("data_*", (5, 6, 5, 0)),
-            ("?*", (1, 2, 1, 0)),
-            ("a?*[bc]", (2, 3, 2, 1)),
-            // A run of stars inside a name is one `*`.
-            ("a**b", (1, 3, 1, 1)),
-        ] {
-            assert_eq!(ends(line), Some(want), "{line:?}");
-        }
-        for line in ["*a*", "**", "***", "[a", "a\\", "a/*b", "abc", "*", "*.o"] {
-            assert_eq!(ends(line), None, "{line:?}");
-        }
-    }
-
-    #[test]
-    fn the_two_ends_fill_no_table() {
-        let rules = Rules::parse(b"*.py[co]\n*.[aos]\n", "", true);
-        CELLS.with(|cells| cells.set(0));
-        let mut hits = 0;
-        for i in 0..1_000 {
-            let ext = ["pyc", "pyo", "py", "a", "o", "s", "txt", "PYC"][i % 8];
-            let name = format!("file{i}.{ext}");
-            let casefold = i % 3 == 0;
-            if rules
-                .last_match(name.as_bytes(), name.as_bytes(), false, casefold)
-                .is_some()
-            {
-                hits += 1;
-            }
-        }
-        assert!(hits > 500, "{hits}");
-        assert_eq!(CELLS.with(std::cell::Cell::get), 0);
-    }
-
-    #[test]
-    fn matching_takes_time_proportional_to_its_input() {
-        // Git's recursion takes exponential time on these; each `**/` doubles it.
-        for (pattern, text) in [
-            ("*a".repeat(2000) + "b", "a".repeat(4000)),
-            ("**/".repeat(1000) + "x", "a/".repeat(1000)),
-        ] {
-            CELLS.with(|cells| cells.set(0));
-            assert!(!wildmatch(pattern.as_bytes(), text.as_bytes(), false));
-            // At most a cell for each piece of the pattern, in a row for each byte and one before;
-            // and at least one a byte, as no row here empties.
-            let cells = CELLS.with(std::cell::Cell::get);
-            assert!(cells <= (pattern.len() + 1) * (text.len() + 1), "{cells}");
-            assert!(cells >= text.len(), "{cells}");
-        }
-    }
-
-    const MATCH: i32 = 0;
-    const NOMATCH: i32 = 1;
-    const ABORT_ALL: i32 = -1;
-    const ABORT_TO_STARSTAR: i32 = -2;
-
-    /// The byte at `i`, or the NUL that ends a C string.
-    fn at(s: &[u8], i: usize) -> u8 {
-        s.get(i).copied().unwrap_or(0)
-    }
-
-    /// `dowild` from Git's wildmatch.c, line for line, recursion and all.
-    fn dowild(pat: &[u8], mut p: usize, text: &[u8], mut t: usize, casefold: bool) -> i32 {
-        let pattern = p;
-        let fold = |c: u8| {
-            if casefold { c.to_ascii_lowercase() } else { c }
-        };
-        loop {
-            let mut p_ch = at(pat, p);
-            if p_ch == 0 {
-                break;
-            }
-            let mut t_ch = at(text, t);
-            if t_ch == 0 && p_ch != b'*' {
-                return ABORT_ALL;
-            }
-            t_ch = fold(t_ch);
-            p_ch = fold(p_ch);
-            match p_ch {
-                b'\\' => {
-                    p += 1;
-                    if t_ch != at(pat, p) {
-                        return NOMATCH;
-                    }
-                }
-                b'?' => {
-                    if t_ch == b'/' {
-                        return NOMATCH;
-                    }
-                }
-                b'*' => {
-                    let mut match_slash = false;
-                    p += 1;
-                    if at(pat, p) == b'*' {
-                        let prev_p = p;
-                        p += 1;
-                        while at(pat, p) == b'*' {
-                            p += 1;
-                        }
-                        if (prev_p - pattern < 2 || at(pat, prev_p - 2) == b'/')
-                            && (at(pat, p) == 0
-                                || at(pat, p) == b'/'
-                                || (at(pat, p) == b'\\' && at(pat, p + 1) == b'/'))
-                        {
-                            if at(pat, p) == b'/' && dowild(pat, p + 1, text, t, casefold) == MATCH
-                            {
-                                return MATCH;
-                            }
-                            match_slash = true;
-                        }
-                    }
-                    if at(pat, p) == 0 {
-                        if !match_slash && text[t..].contains(&b'/') {
-                            return ABORT_TO_STARSTAR;
-                        }
-                        return MATCH;
-                    } else if !match_slash && at(pat, p) == b'/' {
-                        let Some(slash) = text[t..].iter().position(|&b| b == b'/') else {
-                            return ABORT_ALL;
-                        };
-                        // The step below takes the slash.
-                        t += slash;
-                    } else {
-                        loop {
-                            if t_ch == 0 {
-                                break;
-                            }
-                            if !matches!(at(pat, p), b'*' | b'?' | b'[' | b'\\') {
-                                let want = fold(at(pat, p));
-                                loop {
-                                    t_ch = at(text, t);
-                                    if t_ch == 0 || (!match_slash && t_ch == b'/') {
-                                        break;
-                                    }
-                                    t_ch = fold(t_ch);
-                                    if t_ch == want {
-                                        break;
-                                    }
-                                    t += 1;
-                                }
-                                if t_ch != want {
-                                    return if match_slash {
-                                        ABORT_ALL
-                                    } else {
-                                        ABORT_TO_STARSTAR
-                                    };
-                                }
-                            }
-                            let matched = dowild(pat, p, text, t, casefold);
-                            if matched != NOMATCH {
-                                if !match_slash || matched != ABORT_TO_STARSTAR {
-                                    return matched;
-                                }
-                            } else if !match_slash && t_ch == b'/' {
-                                return ABORT_TO_STARSTAR;
-                            }
-                            t += 1;
-                            t_ch = at(text, t);
-                        }
-                        return ABORT_ALL;
-                    }
-                }
-                b'[' => {
-                    p += 1;
-                    p_ch = at(pat, p);
-                    if p_ch == b'^' {
-                        p_ch = b'!';
-                    }
-                    let negated = p_ch == b'!';
-                    if negated {
-                        p += 1;
-                        p_ch = at(pat, p);
-                    }
-                    let mut prev_ch = 0u8;
-                    let mut matched = false;
-                    loop {
-                        if p_ch == 0 {
-                            return ABORT_ALL;
-                        }
-                        if p_ch == b'\\' {
-                            p += 1;
-                            p_ch = at(pat, p);
-                            if p_ch == 0 {
-                                return ABORT_ALL;
-                            }
-                            matched |= t_ch == p_ch;
-                        } else if p_ch == b'-'
-                            && prev_ch != 0
-                            && at(pat, p + 1) != 0
-                            && at(pat, p + 1) != b']'
-                        {
-                            p += 1;
-                            p_ch = at(pat, p);
-                            if p_ch == b'\\' {
-                                p += 1;
-                                p_ch = at(pat, p);
-                                if p_ch == 0 {
-                                    return ABORT_ALL;
-                                }
-                            }
-                            if t_ch <= p_ch && t_ch >= prev_ch {
-                                matched = true;
-                            } else if casefold && t_ch.is_ascii_lowercase() {
-                                let upper = t_ch.to_ascii_uppercase();
-                                matched |= upper <= p_ch && upper >= prev_ch;
-                            }
-                            p_ch = 0;
-                        } else if p_ch == b'[' && at(pat, p + 1) == b':' {
-                            p += 2;
-                            let s = p;
-                            while at(pat, p) != 0 && at(pat, p) != b']' {
-                                p += 1;
-                            }
-                            if at(pat, p) == 0 {
-                                return ABORT_ALL;
-                            }
-                            if p == s || at(pat, p - 1) != b':' {
-                                p = s - 2;
-                                p_ch = b'[';
-                                matched |= t_ch == p_ch;
-                            } else {
-                                match named_class(&pat[s..p - 1], t_ch, casefold) {
-                                    Some(hit) => matched |= hit,
-                                    None => return ABORT_ALL,
-                                }
-                                p_ch = 0;
-                            }
-                        } else {
-                            matched |= t_ch == p_ch;
-                        }
-                        prev_ch = p_ch;
-                        p += 1;
-                        p_ch = at(pat, p);
-                        if p_ch == b']' {
-                            break;
-                        }
-                    }
-                    if matched == negated || t_ch == b'/' {
-                        return NOMATCH;
-                    }
-                }
-                _ => {
-                    if t_ch != p_ch {
-                        return NOMATCH;
-                    }
-                }
-            }
-            t += 1;
-            p += 1;
-        }
-        if at(text, t) == 0 { MATCH } else { NOMATCH }
-    }
-
-    #[test]
-    fn the_reference_passes_gits_table_too() {
-        for &(wm, iwm, text, pattern) in WILDMATCH_CASES {
-            assert_eq!(dowild(pattern, 0, text, 0, false) == MATCH, wm);
-            assert_eq!(dowild(pattern, 0, text, 0, true) == MATCH, iwm);
-        }
-    }
-
-    const PIECES: &[&str] = &[
-        "a",
-        "A",
-        "b",
-        "/",
-        "*",
-        "**",
-        "?",
-        "[",
-        "]",
-        "!",
-        "^",
-        "-",
-        "\\",
-        ":",
-        "\\/",
-        "[:alpha:]",
-        "[:upper:]",
-        "[:lower:]",
-        "[:bogus:]",
-    ];
-    const TEXT: &[&str] = &["a", "A", "b", "B", "/", "[", "]", "-", ":", "\\", "^"];
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 20_000, ..ProptestConfig::default() })]
-        #[test]
-        fn the_loop_agrees_with_gits_recursion(
-            pattern in prop::collection::vec(prop::sample::select(PIECES), 0..10),
-            text in prop::collection::vec(prop::sample::select(TEXT), 0..8),
-            casefold: bool,
-        ) {
-            let (pattern, text) = (pattern.concat(), text.concat());
-            let git = dowild(pattern.as_bytes(), 0, text.as_bytes(), 0, casefold) == MATCH;
-            prop_assert_eq!(
-                wildmatch(pattern.as_bytes(), text.as_bytes(), casefold),
-                git,
-                "{:?} {:?}", pattern, text
-            );
-        }
-    }
-
-    const PLAIN: Drive = Drive {
-        ignores_case: false,
-        composes_unicode: false,
-    };
-
-    fn matcher(drive: Drive, files: &[(&str, &str)]) -> Matcher {
-        let mut m = Matcher::new(drive);
-        for &(folder, text) in files {
-            m.enter(folder, vec![Rules::parse(text.as_bytes(), folder, true)]);
-        }
-        m
-    }
-
-    #[test]
-    fn rules_kept_in_force_give_the_verdicts_they_gave_then() {
-        let mut m = matcher(PLAIN, &[("", "*.x\n!keep.x\n"), ("sub", "!*.x\n*.y\n")]);
-        let paths = ["a.x", "keep.x", "sub/a.x", "sub/a.y", "sub/b.z"];
-        let then: Vec<Verdict> = paths.iter().map(|p| m.verdict(p, false)).collect();
-        let kept = m.in_force();
-        m.leave_to("");
-        m.enter("other", vec![Rules::parse(b"*\n", "other", false)]);
-        let later: Vec<Verdict> = paths.iter().map(|p| kept.verdict(p, false)).collect();
-        assert_eq!(later, then);
-        assert_eq!(then[2].bolt, Decision::Kept);
-    }
-
-    #[test]
-    fn gits_verdict_comes_from_the_gitignore_lines_alone() {
-        use Decision::*;
-        let both = |bolt, git| Verdict { bolt, git };
-        let mut m = Matcher::new(PLAIN);
-        m.enter(
-            "",
-            vec![
-                Rules::parse(b".env\n*.pem\nlogs/\n", "", true),
-                Rules::parse(b"!.env\n!*.pem\n*.tmp\n!logs/\n", "", false),
-            ],
-        );
-        // A .boltignore line takes back what a .gitignore keeps out.
-        assert_eq!(m.verdict(".env", false), both(Kept, Ignored));
-        assert_eq!(m.verdict("logs", true), both(Kept, Ignored));
-        // It can keep out more; where nothing matches, both say so.
-        assert_eq!(m.verdict("a.tmp", false), both(Ignored, NoRule));
-        assert_eq!(m.verdict("a.txt", false), both(NoRule, NoRule));
-        // Where a .gitignore line decides, Git's verdict is Bolt's.
-        m.enter("sub", vec![Rules::parse(b"!*.tmp\n", "sub", true)]);
-        assert_eq!(m.verdict("sub/a.tmp", false), both(Kept, Kept));
-        assert_eq!(m.verdict("sub/key.pem", false), both(Kept, Ignored));
-    }
-
-    #[test]
-    fn lines_are_read_as_git_reads_them() {
-        let text = b"\xef\xbb\xbf*.log\r\n#comment\n\\#notes\n\nfoo  \nbar\\ \nbaz\\\\ \n x\r\r\nnul\0after\n";
-        let m = matcher(PLAIN, &[("", std::str::from_utf8(text).unwrap())]);
-        use Decision::*;
-        for (path, want) in [
-            ("a.log", Ignored),
-            ("#comment", NoRule),
-            ("#notes", Ignored),
-            ("foo", Ignored),
-            ("foo  ", NoRule),
-            ("bar ", Ignored),
-            ("baz\\", Ignored),
-            (" x\r", Ignored),
-            ("nul", Ignored),
-            ("nulafter", NoRule),
-        ] {
-            assert_eq!(m.decide(path, false), want, "{path:?}");
-        }
-        // A `\` that ends the line keeps the spaces before it.
-        let m = matcher(PLAIN, &[("", "a  \\")]);
-        assert_eq!(m.decide("a  ", false), NoRule);
-        assert_eq!(m.decide("a", false), NoRule);
-        // Only one byte order mark goes, and only one CR before each LF.
-        let m = matcher(PLAIN, &[("", "\u{feff}\u{feff}a\r\nb\r\r\n")]);
-        assert_eq!(m.decide("\u{feff}a", false), Ignored);
-        assert_eq!(m.decide("b\r", false), Ignored);
-    }
-
-    #[test]
-    fn trailing_spaces_go_as_git_trims_them() {
-        for (line, want) in [
-            ("foo  ", "foo"),
-            ("foo\\ ", "foo\\ "),
-            ("foo\\\\ ", "foo\\\\"),
-            ("foo\\  ", "foo\\ "),
-            ("foo \\ ", "foo \\ "),
-            ("trail\\", "trail\\"),
-            ("foo\t ", "foo\t"),
-            ("   ", ""),
-        ] {
-            assert_eq!(
-                trim_trailing_spaces(line.as_bytes()),
-                want.as_bytes(),
-                "{line:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_nearest_folder_and_its_last_line_decide() {
-        use Decision::*;
-        let mut m = matcher(
-            PLAIN,
-            &[
-                ("", "*.log\n!keep.log\nbuild/\n"),
-                ("sub", "!debug.log\n/top.txt\n"),
-            ],
-        );
-        assert_eq!(m.decide("sub/debug.log", false), Kept);
-        assert_eq!(m.decide("sub/other.log", false), Ignored);
-        assert_eq!(m.decide("sub/keep.log", false), Kept);
-        assert_eq!(m.decide("sub/top.txt", false), Ignored);
-        assert_eq!(m.decide("sub/x/top.txt", false), NoRule);
-        assert_eq!(m.decide("sub/build", false), NoRule);
-        assert_eq!(m.decide("sub/build", true), Ignored);
-        // Back in the top folder, `sub`'s rules are over.
-        m.leave_to("");
-        assert_eq!(m.decide("debug.log", false), Ignored);
-        assert_eq!(m.decide("top.txt", false), NoRule);
-    }
-
-    #[test]
-    fn letter_case_follows_the_drive_with_gits_quirks() {
-        use Decision::*;
-        let text = "*.ENV\n\\B.txt\n[C].txt\n[A-Z].md\n";
-        let plain = matcher(PLAIN, &[("", text)]);
-        let folding = matcher(
-            Drive {
-                ignores_case: true,
-                composes_unicode: false,
-            },
-            &[("", text)],
-        );
-        for (path, exact, folded) in [
-            ("prod.env", NoRule, Ignored),
-            ("PROD.ENV", Ignored, Ignored),
-            ("B.txt", Ignored, NoRule),
-            ("b.txt", NoRule, NoRule),
-            ("C.txt", Ignored, NoRule),
-            ("x.md", NoRule, Ignored),
-            ("X.md", Ignored, Ignored),
-        ] {
-            assert_eq!(plain.decide(path, false), exact, "{path}");
-            assert_eq!(
-                folding.decide(path, false),
-                folded,
-                "{path} (letter case ignored)"
-            );
-        }
-    }
-
-    #[test]
-    fn names_are_compared_composed_where_the_drive_composes_them() {
-        use Decision::*;
-        let (nfc, nfd) = ("caf\u{e9}", "cafe\u{301}");
-        let text = format!("/{nfc}.txt\n{nfd}.md\n");
-        let composing = Drive {
-            ignores_case: false,
-            composes_unicode: true,
-        };
-        for folder in [nfc, nfd] {
-            let m = matcher(composing, &[(folder, &text)]);
-            // Git reads names composed there, and patterns as they are written.
-            for name in [nfc, nfd] {
-                let path = format!("{folder}/{name}");
-                assert_eq!(m.decide(format!("{path}.txt"), false), Ignored, "{path}");
-                assert_eq!(m.decide(format!("{path}.md"), false), NoRule, "{path}");
-            }
-            let m = matcher(PLAIN, &[(folder, &text)]);
-            assert_eq!(m.decide(format!("{folder}/{nfc}.txt"), false), Ignored);
-            assert_eq!(m.decide(format!("{folder}/{nfd}.txt"), false), NoRule);
-            assert_eq!(m.decide(format!("{folder}/{nfd}.md"), false), Ignored);
-        }
-    }
-
-    /// The plain `Rules::last_match`: every line tried, the last first.
-    fn last_match_by_scan<'r>(
-        rules: &'r Rules,
-        path: &[u8],
-        name: &[u8],
-        is_dir: bool,
-        casefold: bool,
-    ) -> Option<&'r Pattern> {
-        rules.patterns.iter().rev().find(|p| {
-            (is_dir || !p.dir_only)
-                && if p.any_depth {
-                    match_basename(name, p, casefold)
-                } else {
-                    match_pathname(path, rules.folder.as_bytes(), p, casefold)
-                }
-        })
-    }
-
-    const LINE_BODIES: &[&[u8]] = &[
-        b"",
-        b"a",
-        b"A",
-        b"ab",
-        b"Ab",
-        b"aB",
-        b"\xc3\xa9",
-        b"\xc3\x89",
-        b"\xff",
-        b"/",
-        b"/a",
-        b"/A",
-        b"/ab",
-        b"a/b",
-        b"A/B",
-        b"/a/b",
-        b"/a/B",
-        b"b/ab",
-        b"a/b/ab",
-        b"*.b",
-        b"*b",
-        b"a*b",
-        b"[ab]b",
-        b"[ab]",
-        b"*",
-        b"a/*",
-        b"/a/[ab]",
-        b"a\\*",
-        b"a?",
-        b"a\\ ",
-    ];
-    const PATH_NAMES: &[&[u8]] = &[
-        b"",
-        b"a",
-        b"A",
-        b"b",
-        b"ab",
-        b"Ab",
-        b"AB",
-        b"\xc3\xa9",
-        b"\xff",
-        b"x.b",
-        b"ab\0x",
-    ];
-
-    proptest! {
-        #![proptest_config(ProptestConfig { cases: 5_000, ..ProptestConfig::default() })]
-        #[test]
-        fn the_index_finds_the_line_a_scan_finds(
-            lines in prop::collection::vec(
-                (any::<bool>(), prop::sample::select(LINE_BODIES), any::<bool>()),
-                0..12,
-            ),
-            folder in prop::sample::select(&["", "a", "a/b"][..]),
-            names in prop::collection::vec(prop::sample::select(PATH_NAMES), 1..4),
-            is_dir: bool,
-            casefold: bool,
-        ) {
-            let mut text = Vec::new();
-            for (negative, body, dir) in &lines {
-                if *negative {
-                    text.push(b'!');
-                }
-                text.extend_from_slice(body);
-                if *dir {
-                    text.push(b'/');
-                }
-                text.push(b'\n');
-            }
-            let rules = Rules::parse(&text, folder, true);
-            let path = names.join(&b'/');
-            let name = *names.last().unwrap();
-            let found = rules.last_match(&path, name, is_dir, casefold);
-            let scanned = last_match_by_scan(&rules, &path, name, is_dir, casefold);
-            let same_line = match (found, scanned) {
-                (Some(a), Some(b)) => std::ptr::eq(a, b),
-                (None, None) => true,
-                _ => false,
-            };
-            prop_assert!(same_line, "{:?} {:?} {:?}", shown(&text), folder, shown(&path));
-        }
-    }
-
-    #[test]
-    fn plain_lines_are_not_tried_one_by_one() {
-        let mut text = String::new();
-        for i in 0..5_000 {
-            text.push_str(&format!("name{i}\n"));
-        }
-        text.push_str("*.x\na*b\n[ab]c\n");
-        let rules = Rules::parse(text.as_bytes(), "", true);
-        FITS.with(|n| n.set(0));
-        assert!(
-            rules
-                .last_match(b"d/other", b"other", false, false)
-                .is_none()
-        );
-        let tried = FITS.with(std::cell::Cell::get);
-        assert!(tried <= 3, "{tried}");
-    }
-
-    #[test]
-    fn the_last_line_wins_whether_plain_or_not() {
-        use Decision::*;
-        let folding = Drive {
-            ignores_case: true,
-            composes_unicode: false,
-        };
-        for (folder, text, path, is_dir, exact, folded) in [
-            ("", "a.log\n!*.log\n", "a.log", false, Kept, Kept),
-            ("", "!*.log\na.log\n", "a.log", false, Ignored, Ignored),
-            ("", "*.tmp\n!keep.tmp\n", "keep.tmp", false, Kept, Kept),
-            ("", "*.tmp\n!keep.tmp\n", "x.tmp", false, Ignored, Ignored),
-            ("", "build/\n", "build", false, NoRule, NoRule),
-            ("", "build/\n", "build", true, Ignored, Ignored),
-            ("sub", "/a/b\n", "sub/a/b", false, Ignored, Ignored),
-            ("sub", "/a/b\n", "a/b", false, NoRule, NoRule),
-            ("sub", "/a/b\n", "sub/x/a/b", false, NoRule, NoRule),
-            ("sub", "/a/b\n", "SUB/A/B", false, NoRule, Ignored),
-            ("", "Makefile\n", "MAKEFILE", false, NoRule, Ignored),
-            ("", "Makefile\n", "Makefile", false, Ignored, Ignored),
-        ] {
-            let what = format!("{text:?} {path:?}");
-            assert_eq!(
-                matcher(PLAIN, &[(folder, text)]).decide(path, is_dir),
-                exact,
-                "{what}"
-            );
-            assert_eq!(
-                matcher(folding, &[(folder, text)]).decide(path, is_dir),
-                folded,
-                "{what} (letter case ignored)"
-            );
-        }
-    }
-
-    #[test]
-    fn bytes_in_force_are_the_files_of_the_folders_entered() {
-        let mut m = matcher(PLAIN, &[("", "abc\n"), ("a", "x\n"), ("a/b", "yz\n")]);
-        assert_eq!(m.in_force_bytes(), 9);
-        m.leave_to("a/c");
-        assert_eq!(m.in_force_bytes(), 6);
-        m.leave_to("");
-        assert_eq!(m.in_force_bytes(), 4);
-    }
-}
+mod tests;

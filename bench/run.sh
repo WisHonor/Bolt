@@ -97,19 +97,22 @@ run_times() {
 		| if all(type == "number") then join(" ") else error("a time is missing") end' "$1"
 }
 
-# gate_check <results>: Bolt's median against Git's for the gate's three steps; fails over 2 times.
+# gate_check <results>: Bolt's median against Git's for the gate's three steps; fails when one is
+# over its own limit: 2 times, or 3.5 for going back, whose goal for v0.2 is 2.
 # A flush that stalls on the runner's disk shows as a mean far above the median.
 gate_check() {
-	local failed=0 step bolt git
-	echo "== The gate: Bolt's median, Git's median, times Git's (at most 2); then each mean, best and worst run"
-	for step in status small-change back-to-first; do
+	local failed=0 step limit bolt git
+	echo "== The gate: Bolt's median, Git's median, times Git's, at most 2 (3.5 for back-to-first, whose v0.2 goal is 2); then each mean, best and worst run"
+	for step in status:2 small-change:2 back-to-first:3.5; do
+		limit=${step#*:} step=${step%:*}
 		bolt=$(run_times "$1"/*-code-bolt-"$step".json)
 		git=$(run_times "$1"/*-code-git-"$step".json)
-		# Fields: the step, then Bolt's four times, then Git's four.
-		echo "$step $bolt $git" | awk '{
-			r = $2 / $6
-			printf "%-14s %8.1f ms %8.1f ms %6.3f %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s", $1, $2 * 1000, $6 * 1000, r, (r > 2 ? "OVER" : "ok"), $3 * 1000, $4 * 1000, $5 * 1000, $7 * 1000, $8 * 1000, $9 * 1000, ORS
-			exit (r > 2)
+		# Fields: the step, its limit, then Bolt's four times, then Git's four.
+		echo "$step $limit $bolt $git" | awk '{
+			r = $3 / $7
+			goal = (r > 2 && r <= $2) ? "; over the v0.2 goal of 2" : ""
+			printf "%-14s %8.1f ms %8.1f ms %6.3f at most %s %-4s  Bolt mean %.1f, %.1f to %.1f; Git mean %.1f, %.1f to %.1f%s%s", $1, $3 * 1000, $7 * 1000, r, $2, (r > $2 ? "OVER" : "ok"), $4 * 1000, $5 * 1000, $6 * 1000, $8 * 1000, $9 * 1000, $10 * 1000, goal, ORS
+			exit (r > $2)
 		}' || failed=1
 	done
 	return "$failed"

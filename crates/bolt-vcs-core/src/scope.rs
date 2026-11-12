@@ -4,7 +4,7 @@
 use std::iter;
 
 use crate::drive::Drive;
-use crate::ignore::wildmatch;
+use crate::ignore::glob_match;
 use crate::names::{Given, fold};
 
 /// The paths and patterns a command was given, as the drive compares names: a path matches
@@ -90,7 +90,7 @@ impl Scope {
                 if !within(&self.drive.compared(path), below) {
                     return false;
                 }
-                // Letter case is left to wildmatch, which folds it as Git does.
+                // Letter case is left to glob_match, which folds it as Git does.
                 let path = fold(path, self.drive.composes_unicode, false);
                 let rest = match names.checked_sub(1) {
                     None => Some(path.as_str()),
@@ -104,7 +104,7 @@ impl Scope {
                 };
                 ancestors(rest)
                     .chain(iter::once(rest))
-                    .any(|p| wildmatch(glob, p.as_bytes(), self.drive.ignores_case))
+                    .any(|p| glob_match(glob, p.as_bytes(), self.drive.ignores_case))
             }
         }
     }
@@ -158,7 +158,7 @@ mod tests {
         // A folder a pattern matches takes everything in it.
         let folder = Scope::new(&[pattern("", "s?b")], exact);
         assert!(folder.holds("sub/x/y.txt") && !folder.holds("sbb2/y.txt"));
-        // As Git's WM_CASEFOLD has it, a class of capitals takes small letters too.
+        // As Git folds case, a class of capitals takes small letters too.
         let upper = Scope::new(&[pattern("", "[[:upper:]]*.txt")], folding);
         assert!(upper.holds("A.txt") && upper.holds("a.TXT"));
         assert!(!Scope::new(&[pattern("", "[[:upper:]]*")], exact).holds("a"));

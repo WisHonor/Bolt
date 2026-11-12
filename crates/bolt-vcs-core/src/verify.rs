@@ -13,7 +13,7 @@ use crate::diary::{DiaryEntry, ServerLines, TagList};
 use crate::encoding::DecodeError;
 use crate::id::Id;
 use crate::link::ProjectLink;
-use crate::listing::{EntryKind, Listing, SaveLimits};
+use crate::listing::{EntryKind, Listing, Measure, SaveLimits};
 use crate::pack::{ENTRY_HEADER_LEN, IndexEntry, ObjectKind, PackError, PackReader};
 use crate::repo::{RepoError, Repository, head_entry};
 use crate::save::Save;
@@ -853,16 +853,6 @@ fn look_at(
     Ok(Ok((found, Box::new(look))))
 }
 
-/// How big the part of a save below one listing is, counted by path.
-#[derive(Clone, Copy, Default)]
-struct Measure {
-    entries: u64,
-    /// Levels of folders below it.
-    depth: usize,
-    /// Its longest path, from below it.
-    longest: usize,
-}
-
 /// Each save `noted` read that passes a limit every reader keeps, with which, in the readers'
 /// words. Each listing is measured once, however many paths reach it, and a listing that
 /// couldn't be read counts as empty.
@@ -897,14 +887,7 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
             // A folder named by several entries counts once for each of them.
             for &(folder, times, name) in &shape.folders {
                 let below = measured.get(&folder).copied().unwrap_or_default();
-                let all = below.entries.saturating_mul(times);
-                m.entries = m.entries.saturating_add(all);
-                m.depth = m.depth.max(below.depth.saturating_add(1));
-                let path = match below.longest {
-                    0 => name,
-                    longest => name.saturating_add(1).saturating_add(longest),
-                };
-                m.longest = m.longest.max(path);
+                m.add_folder(below, times, name);
             }
             measured.insert(id, m);
         }

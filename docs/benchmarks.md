@@ -1,14 +1,14 @@
 # Bolt Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Bolt against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together, on the code v0.1 is made from. Every speed or size claim Bolt makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Bolt against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn. Every speed or size claim Bolt makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Bolt promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Bolt must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Bolt beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
 ## 1. The speed gates
 
 - **Memory:** saving a 10 GiB file of incompressible bytes peaks at no more than 500,000,000 bytes of memory.
-- **Status:** `bolt status` on an unchanged 100,000-file project takes under 2 s.
-- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Bolt at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians.
+- **Status:** `bolt status` on an unchanged 100,000-file project takes under 2 s. From v0.1 the nightly job fails at 2 s or more ([decision 129](decisions/129-gotos-limit-until-v0.2-and-the-status-gate-enforced.md)).
+- **Against Git** ([decision 099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): on Git's source at `v2.56.0` (§2's code set), `status` with nothing changed, a small change saved, and going back to the first version each take Bolt at most twice Git's time, on GitHub's Linux runner and on its Windows runner. It is measured as §2 measures, with 10 timed runs of each step, by `bench/run.sh gate`, which compares the medians and fails when a step is over ([decision 108](decisions/108-the-third-gate-compares-medians.md): a flush now and then stalls for 60 ms or more on GitHub's Linux runner, and Git never flushes); each step's mean, best and worst run are printed beside the medians. **For v0.1** ([decision 128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md)) `status` and the small save keep the limit of twice Git's time, and going back to the first version is held to three and a half times ([decision 132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md), picked from the eleven runs on record, whose worst was 3.01): twice is its goal for v0.2, and the job says when it is over the goal.
 
 Before milestone 6's speed work the third gate fails five of its six checks (§2's tables, 2026-11-09):
 
@@ -31,7 +31,7 @@ How they are measured:
 - **Peak memory** is the most memory the `bolt save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
 - **Time** is wall-clock time from start to exit, with warm caches: the file was just written, and part of it may still be in the system's cache.
 - **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `bolt status` twice ([testing.md](testing.md) §5).
-- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, the memory gate fails its job above the limit, while the status time is printed and read, not enforced, until v0.1.
+- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, both fail their jobs over their limits: the memory gate always, the status gate from v0.1 on (decision 129).
 
 ### GitHub's Linux runner, 2026-11-09
 
@@ -927,3 +927,50 @@ git/git, imported three times by each `bolt` in turn on one runner (the same run
 | Both halves (`922a31f`) | 114.4–114.7 s | 449,916–450,748 KiB (440 MiB) | 0.32–0.41 s |
 
 The two are the same within what one runner varies. (§8's 141 s for the same import was another runner.)
+
+## 10. v0.1: the gate's new rule, ten runs, and the rewritten code
+
+**In plain words.** Before v0.1, the code that followed Git's code was written again (the code audit, decision 131), every walk over a save learned to refuse a planted deep tree at once (decision 130), and the owner ruled that v0.1 ships with `status` and a small save held to twice Git's time and going back to another version held to three and a half times, twice being its goal for v0.2 (decisions 128 and 132). On one runner, turn by turn, the finished code takes what `main` took before this work, on both systems. The gate passed ten runs in ten on both systems. `goto` on Linux still takes about twice Git's time, sometimes more.
+
+Everything here was measured on 2026-11-11. The finished code is `193c017` (the commits after it change documents only).
+
+### Before and after on one runner
+
+`main` (`c4bd989`) and the finished code, each built in its own target folder, run in six rounds on one runner per system, the order swapped each round; each number is the median of the six rounds' medians (the gate's steps: 10 timed runs each; `changes --save`: 15) ([run 43130318294](https://github.com/WisHonor/Bolt/actions/runs/43130318294), a throwaway workflow on a branch since deleted).
+
+| Step, on Git's source | Linux: `main`, finished | Windows: `main`, finished |
+|---|---|---|
+| `status`, nothing changed | 21.6 ms, 21.5 ms | 81.6 ms, 81.1 ms |
+| A small change, saved | 27.9 ms, 28.2 ms | 90.7 ms, 90.9 ms |
+| Back to the first version | 30.8 ms, 30.8 ms | 97.9 ms, 98.1 ms |
+| `changes --save` of the first save (every file listed) | 2,265 ms, 2,253 ms | 5,595 ms, 5,629 ms |
+
+- **What the deep-tree refusal costs an honest `goto` and `changes --save`:** nothing that one runner's variation doesn't hide. A walk now keeps the set of listings it has entered, and measures only one it meets a second time.
+- **An earlier build of the rewritten matcher** made `status` 2 to 4% slower on Linux in two such runs ([43109435588](https://github.com/WisHonor/Bolt/actions/runs/43109435588), [43122221523](https://github.com/WisHonor/Bolt/actions/runs/43122221523)); the red team's finding RT14-3 (below) had the same cause, the matcher making new working space for every line it tried, and its fix brought `status` back level.
+- **A hostile ignore file** (RT14-3): 2,000 files under a `.gitignore` of many glob lines took `status` 14.3 s against Git's 1.1 s before the fix, and 0.23 s against Git's 1.23 s after it (release build).
+
+### The gate, ten times
+
+`bench/run.sh gate` by the `Speed gate` workflow, started ten times by hand on `193c017`; each cell is Bolt's median, Git's median and the ratio, as the job prints them. Limits: `status` and the small save 2, `goto` 3.5.
+
+| Run | Linux | Windows |
+|---|---|---|
+| [43136827254](https://github.com/WisHonor/Bolt/actions/runs/43136827254) | `status` 17.7 ms, 10.5 ms, 1.683; small save 22.7 ms, 24.1 ms, 0.944; `goto` 25.1 ms, 13.0 ms, 1.923 | `status` 47.1 ms, 30.9 ms, 1.522; small save 53.4 ms, 84.4 ms, 0.632; `goto` 60.3 ms, 39.9 ms, 1.512 |
+| [43136829893](https://github.com/WisHonor/Bolt/actions/runs/43136829893) | `status` 23.5 ms, 14.8 ms, 1.582; small save 31.7 ms, 32.1 ms, 0.986; `goto` 34.0 ms, 17.8 ms, 1.914 | `status` 79.4 ms, 45.1 ms, 1.760; small save 90.1 ms, 124.0 ms, 0.726; `goto` 96.5 ms, 54.2 ms, 1.782 |
+| [43136833169](https://github.com/WisHonor/Bolt/actions/runs/43136833169) | `status` 21.9 ms, 11.8 ms, 1.857; small save 28.3 ms, 27.1 ms, 1.044; `goto` 32.0 ms, 15.2 ms, 2.104 | `status` 66.4 ms, 44.4 ms, 1.494; small save 77.0 ms, 121.8 ms, 0.632; `goto` 81.2 ms, 51.0 ms, 1.593 |
+| [43136837715](https://github.com/WisHonor/Bolt/actions/runs/43136837715) | `status` 18.5 ms, 10.8 ms, 1.701; small save 24.6 ms, 25.1 ms, 0.982; `goto` 27.1 ms, 11.8 ms, 2.291 | `status` 79.4 ms, 46.0 ms, 1.727; small save 89.2 ms, 128.2 ms, 0.696; `goto` 94.4 ms, 57.1 ms, 1.654 |
+| [43136841927](https://github.com/WisHonor/Bolt/actions/runs/43136841927) | `status` 21.3 ms, 11.5 ms, 1.856; small save 28.2 ms, 25.9 ms, 1.087; `goto` 31.2 ms, 14.3 ms, 2.187 | `status` 79.8 ms, 46.3 ms, 1.724; small save 92.0 ms, 131.1 ms, 0.702; `goto` 96.7 ms, 56.0 ms, 1.725 |
+| [43136845326](https://github.com/WisHonor/Bolt/actions/runs/43136845326) | `status` 13.5 ms, 7.9 ms, 1.722; small save 18.3 ms, 17.0 ms, 1.073; `goto` 20.2 ms, 8.6 ms, 2.352 | `status` 67.4 ms, 44.9 ms, 1.503; small save 76.7 ms, 152.7 ms, 0.502; `goto` 82.3 ms, 53.5 ms, 1.538 |
+| [43136849374](https://github.com/WisHonor/Bolt/actions/runs/43136849374) | `status` 21.7 ms, 11.6 ms, 1.867; small save 28.1 ms, 27.0 ms, 1.043; `goto` 31.8 ms, 11.8 ms, 2.696 | `status` 64.2 ms, 36.3 ms, 1.769; small save 68.1 ms, 104.6 ms, 0.651; `goto` 75.5 ms, 45.9 ms, 1.645 |
+| [43136853538](https://github.com/WisHonor/Bolt/actions/runs/43136853538) | `status` 14.0 ms, 8.2 ms, 1.711; small save 18.1 ms, 18.0 ms, 1.007; `goto` 20.9 ms, 9.7 ms, 2.151 | `status` 65.4 ms, 36.8 ms, 1.775; small save 71.0 ms, 103.5 ms, 0.686; `goto` 77.6 ms, 44.8 ms, 1.731 |
+| [43136857565](https://github.com/WisHonor/Bolt/actions/runs/43136857565) | `status` 16.6 ms, 9.9 ms, 1.671; small save 22.3 ms, 22.2 ms, 1.006; `goto` 24.3 ms, 12.4 ms, 1.970 | `status` 62.2 ms, 34.7 ms, 1.795; small save 68.4 ms, 100.2 ms, 0.682; `goto` 73.7 ms, 43.9 ms, 1.680 |
+| [43136867102](https://github.com/WisHonor/Bolt/actions/runs/43136867102) | `status` 17.4 ms, 9.7 ms, 1.791; small save 23.7 ms, 24.7 ms, 0.959; `goto` 25.3 ms, 10.4 ms, 2.438 | `status` 59.7 ms, 36.4 ms, 1.642; small save 69.9 ms, 101.5 ms, 0.689; `goto` 72.3 ms, 43.1 ms, 1.679 |
+
+- **Every enforced step passed in all ten runs on both systems.** Linux: `status` 1.58 to 1.87 times Git's time, the small save 0.94 to 1.09, `goto` 1.91 to 2.70. Windows: `status` 1.49 to 1.80, the small save 0.50 to 0.73, `goto` 1.51 to 1.78.
+- **`goto` on Linux** is over its v0.2 goal of twice Git's time in seven runs of ten (eight of the ten runs before this work).
+- **The Nightly workflow** started by hand on the same commit ([run 43136870629](https://github.com/WisHonor/Bolt/actions/runs/43136870629)) passed every job: saving 10 GiB peaked at 44,118,016 bytes in 26.2 s; `status` on the unchanged 100,000-file project took 0.15 s twice (limit 2 s, now enforced); its gate run gave Linux 1.755, 1.027 and 2.041, Windows 1.772, 0.684 and 1.665; git/git imported and matched Git (86,226 commits in 142.2 s, 441 MiB).
+
+### The runs that decided the rule
+
+- **The starting point:** the Nightly workflow on `main` before this work ([run 42966403404](https://github.com/WisHonor/Bolt/actions/runs/42966403404)) passed every job but Linux's gate under decision 099, where `goto` took 2.651 times Git's time (31.3 ms against 11.8), the worst of the ten runs then on record. Decision 129 picked a limit of 3 from those ten.
+- **The first run under the new rule** ([run 42970694870](https://github.com/WisHonor/Bolt/actions/runs/42970694870), on `f888f2a`, whose engine is `main`'s) failed on Linux: `status` 2.207 times Git's time (17.0 ms against 7.7) and `goto` 3.012 (25.8 ms against 8.6). Bolt's times were ordinary for that runner type; Git's were the quickest on record, on a runner quick at what Git spends its time on, while a `goto`'s ten flushes don't get quicker with the processor. Decision 132 raised `goto`'s limit to 3.5 from the eleven runs then on record, before the ten runs above. The `status` limit is the owner's and stays; the follow-ups list records that a runner whose Git is unusually quick can push `status` past it with Bolt's own time unchanged.

@@ -46,7 +46,7 @@ fn base_child(e: &Entry, rel: String, kept: bool) -> Child {
 /// Narrows what the walk found, `folders`, whose base save's listings are `old`, to what `scope`
 /// takes, the base save's entries standing in for everything else. Folders gone from disk with
 /// something named below them are read from `store` into `old`; `rebuilt` keeps only the
-/// listings still used.
+/// listings still used. The gone folders read count against `limits`.
 pub(super) fn narrow(
     scope: &Scope,
     given: &[Given],
@@ -54,6 +54,7 @@ pub(super) fn narrow(
     folders: &mut Folders,
     old: &mut HashMap<String, Option<Listing>>,
     rebuilt: &mut Vec<Listing>,
+    mut limits: SaveLimits,
 ) -> Result<Narrowed, SaveError> {
     let too_large = |detail| SaveError::from(StoreError::SaveTooLarge { detail });
     // The whole project always matches, even with nothing in it.
@@ -61,13 +62,15 @@ pub(super) fn narrow(
         .iter()
         .map(|g| *g == Given::Path(String::new()))
         .collect();
-    let mut limits = SaveLimits::default();
     let mut out = Folders::new();
     let mut gone = HashSet::new();
+    // Those gone folders whose listings were counted whole already, with all they hold.
+    let mut whole = HashSet::new();
     let mut blocked = Vec::new();
     let mut todo = vec![String::new()];
     while let Some(rel) = todo.pop() {
         let is_gone = gone.contains(&rel);
+        let in_whole = whole.contains(&rel);
         let before = old.get(&rel).and_then(Option::as_ref);
         let mut kept = Vec::new();
         let mut met = HashSet::new();
@@ -127,11 +130,19 @@ pub(super) fn narrow(
                 // The walk took care of what is named in a folder it found.
                 let into = e.kind == EntryKind::Folder && reaches && (is_gone || !inside);
                 if into {
-                    limits
-                        .check_depth(path.split('/').count())
-                        .map_err(too_large)?;
+                    let depth = path.split('/').count();
+                    limits.check_depth(depth).map_err(too_large)?;
+                    // Met as it is read, a folder met again is counted whole before it is walked.
+                    let again = in_whole
+                        || limits
+                            .enter(e.id, depth, path.len(), |id| store.listing(id))?
+                            .map_err(too_large)?;
                     let (listing, _) = without_git_names(store.listing(&e.id)?)?;
-                    limits.add(listing.entries().len()).map_err(too_large)?;
+                    if again {
+                        whole.insert(path.clone());
+                    } else {
+                        limits.add(listing.entries().len()).map_err(too_large)?;
+                    }
                     read.push((path.clone(), listing));
                     kept.push(Child {
                         name: e.name.clone(),
@@ -261,4 +272,81 @@ pub(super) fn check_matched(
         return Err(SaveError::LeftOut { path: path.clone() });
     }
     Err(SaveError::NoMatch { given: g.shown() })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::listing::MAX_SAVE_DEPTH;
+    use crate::snapshot::tests::{project, this_drive, walk_project, write};
+    use crate::test_support::{add_listing, plant_root};
+
+    fn entry(name: &str, kind: EntryKind, id: Id) -> Entry {
+        Entry {
+            name: name.into(),
+            kind,
+            id,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn gone_folders_with_the_same_contents_count_every_path() {
+        let (dir, mut repo) = project();
+        // `a` and `b`, gone from disk, are one listing holding `x.txt` and the folder `in`.
+        plant_root(&mut repo, |packs| {
+            let empty = packs.add_content(b"").unwrap();
+            let inner = add_listing(packs, vec![entry("y.txt", EntryKind::File, empty)]).0;
+            let both = vec![
+                entry("in", EntryKind::Folder, inner),
+                entry("x.txt", EntryKind::File, empty),
+            ];
+            let shared = add_listing(packs, both).0;
+            let top = ["a", "b"].map(|n| entry(n, EntryKind::Folder, shared));
+            add_listing(packs, top.to_vec()).0
+        });
+        write(dir.path(), "new.txt", b"x");
+        // A pattern that reaches into both and matches nothing there: they stay as they were.
+        let given = [Given::Pattern {
+            below: String::new(),
+            glob: "**/z.txt".into(),
+        }];
+        let narrowed = |entries| {
+            let scan = walk_project(&repo, SaveLimits::default()).unwrap();
+            let (mut folders, mut old, mut rebuilt) = (scan.folders, scan.old, scan.rebuilt);
+            let scope = Scope::new(&given, this_drive());
+            let limits = SaveLimits::new(MAX_SAVE_DEPTH, entries);
+            let store = repo.store();
+            narrow(
+                &scope,
+                &given,
+                store,
+                &mut folders,
+                &mut old,
+                &mut rebuilt,
+                limits,
+            )
+            .map(|_| folders)
+        };
+        // Each folder read holds 2 entries, and its `in` 1: 2 * (2 + 1).
+        const PATHS: u64 = 2 * (2 + 1);
+        let folders = narrowed(PATHS).unwrap();
+        let names = |rel: &str| -> Vec<&str> {
+            let children = folders.get(rel).map(Vec::as_slice).unwrap_or_default();
+            children.iter().map(|c| c.name.as_str()).collect()
+        };
+        for top in ["a", "b"] {
+            assert_eq!(names(top), ["in", "x.txt"], "{top}");
+            assert_eq!(names(&format!("{top}/in")), ["y.txt"], "{top}");
+        }
+        let Err(err) = narrowed(PATHS - 1) else {
+            panic!("{PATHS} paths were read under a limit of {}", PATHS - 1);
+        };
+        let said = err.to_string();
+        assert!(
+            said.contains("more than 5 files and folders in total"),
+            "{said}"
+        );
+    }
 }

@@ -1,5 +1,5 @@
 //! Bolt's ignore rules against Git itself: the files a save keeps, and the verdict on each path,
-//! for rule files drawn at random, and the cases of Git's own `t/t0008-ignores.sh`.
+//! for rule files drawn at random.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -182,7 +182,7 @@ fn git_version() -> (u32, u32) {
     })
 }
 
-/// Whether Git 2.52 changed what `line` means: its `match_pathname` keeps one byte of a
+/// Whether Git 2.52 changed what `line` means: its matcher keeps one byte of a
 /// pattern's literal start since, so a `**` right after it is no longer a whole folder name.
 /// Errs towards yes.
 fn changed_in_git_2_52(line: &str) -> bool {
@@ -413,12 +413,30 @@ fn walk_verdict(
     path: &str,
     is_dir: bool,
 ) -> Decision {
+    walk_verdict_with(&[], rules, drive, path, is_dir)
+}
+
+/// `walk_verdict`, with Git's personal `lists` before the top folder's `.gitignore`.
+fn walk_verdict_with(
+    lists: &[&[u8]],
+    rules: &BTreeMap<String, Vec<u8>>,
+    drive: Drive,
+    path: &str,
+    is_dir: bool,
+) -> Decision {
     let mut matcher = Matcher::new(drive);
     let mut folder = String::new();
     let parts: Vec<&str> = path.split('/').collect();
     for (i, part) in parts.iter().enumerate() {
+        let mut level = Vec::new();
+        if folder.is_empty() {
+            level.extend(lists.iter().map(|text| Rules::parse(text, "", true)));
+        }
         if let Some(text) = rules.get(&folder) {
-            matcher.enter(&folder, vec![Rules::parse(text, &folder, true)]);
+            level.push(Rules::parse(text, &folder, true));
+        }
+        if !level.is_empty() {
+            matcher.enter(&folder, level);
         }
         let here = join(&folder, part);
         if i + 1 == parts.len() {
@@ -470,15 +488,28 @@ fn git_only_verdict(
 /// What Git's `check-ignore` says of each of `paths` in the repository at `root`, and the file,
 /// line and pattern that say it.
 fn check_ignore(root: &Path, drive: Drive, paths: &[(String, bool)]) -> Vec<(Decision, String)> {
+    check_ignore_with(root, drive, None, paths)
+}
+
+/// `check_ignore`, with `own` as the user's own ignore list.
+fn check_ignore_with(
+    root: &Path,
+    drive: Drive,
+    own: Option<&Path>,
+    paths: &[(String, bool)],
+) -> Vec<(Decision, String)> {
     let mut input = Vec::new();
     for (path, _) in paths {
         input.extend(as_git_reads(path, drive).into_bytes());
         input.push(0);
     }
-    let args = git_args(
+    let mut args = git_args(
         drive,
         &["check-ignore", "--no-index", "-v", "-n", "-z", "--stdin"],
     );
+    if let Some(own) = own {
+        args[1] = format!("core.excludesFile={}", own.display());
+    }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = git_with_input(root, &args, &input);
     assert!(
@@ -587,152 +618,6 @@ proptest! {
     }
 }
 
-/// Paths, whether each is a folder, and what Git says of it.
-type Verdicts<'a> = &'a [(&'a str, bool, Decision)];
-
-/// Rules by folder, as t0008 writes them.
-fn rules_of(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
-    files
-        .iter()
-        .map(|&(folder, text)| (folder.to_owned(), text.as_bytes().to_vec()))
-        .collect()
-}
-
-#[test]
-fn gits_own_ignore_cases_match() {
-    use Decision::*;
-    let drive = Drive {
-        ignores_case: false,
-        composes_unicode: false,
-    };
-    // t0008's set-up, without the user's own lists, which Bolt never reads.
-    let setup = rules_of(&[
-        ("", "one\nignored-*\ntop-level-dir/\n"),
-        ("a", "two*\n*three\n"),
-        (
-            "a/b",
-            "four\nfive\n# this comment should affect the line numbers\nsix\nignored-dir/\n\
-             # and so should this blank line:\n\n!on*\n!two\n",
-        ),
-        ("a/b/ignored-dir", "seven\n"),
-    ]);
-    let rule_cases: &[(&BTreeMap<String, Vec<u8>>, Verdicts)] = &[
-        (
-            &setup,
-            &[
-                ("non-existent", false, NoRule),
-                ("a/non-existent", false, NoRule),
-                ("one", false, Ignored),
-                ("a/one", false, Ignored),
-                ("not-ignored", false, NoRule),
-                ("a/not-ignored", false, NoRule),
-                // With --no-index, a file in the index is judged like any other.
-                ("ignored-but-in-index", false, Ignored),
-                ("a/ignored-but-in-index", false, Ignored),
-                ("ignored-and-untracked", false, Ignored),
-                ("a/ignored-and-untracked", false, Ignored),
-                ("a/3-three", false, Ignored),
-                ("a/three-not-this-one", false, NoRule),
-                ("a/b/one", false, Kept),
-                ("a/b/ignored-dir", true, Ignored),
-                ("a/b/ignored-dir/foo", false, Ignored),
-                ("a/b/ignored-dir/twoooo", false, Ignored),
-                ("a/b/ignored-dir/seven", false, Ignored),
-                ("a/b/on", false, Kept),
-                ("a/b/one one", false, Kept),
-                ("a/b/one two", false, Kept),
-                ("a/b/one\"three", false, Kept),
-                ("a/b/not-ignored", false, NoRule),
-                ("a/b/two", false, Kept),
-                ("a/b/twooo", false, Ignored),
-                ("globaltwo", false, NoRule),
-                ("a/globaltwo", false, NoRule),
-                ("a/b/globaltwo", false, NoRule),
-                ("b/globaltwo", false, NoRule),
-                ("c/not-ignored", false, NoRule),
-                ("top-level-dir", true, Ignored),
-            ],
-        ),
-        // "exact prefix matching", with root and without.
-        (
-            &rules_of(&[("a", "/git/\n")]),
-            &[
-                ("a/git", true, Ignored),
-                ("a/git/foo", false, Ignored),
-                ("a/git-foo", true, NoRule),
-                ("a/git-foo/bar", false, NoRule),
-            ],
-        ),
-        (
-            &rules_of(&[("a", "git/\n")]),
-            &[
-                ("a/git", true, Ignored),
-                ("a/git/foo", false, Ignored),
-                ("a/git-foo", true, NoRule),
-                ("a/git-foo/bar", false, NoRule),
-            ],
-        ),
-        // "directories and ** matches"
-        (
-            &rules_of(&[("", "data/**\n!data/**/\n!data/**/*.txt\n")]),
-            &[
-                ("file", false, NoRule),
-                ("data/file", false, Ignored),
-                ("data/data1/file1", false, Ignored),
-                ("data/data1/file1.txt", false, Kept),
-                ("data/data2/file2", false, Ignored),
-                ("data/data2/file2.txt", false, Kept),
-            ],
-        ),
-        // "** not confused by matching leading prefix"
-        (
-            &rules_of(&[("", "foo**/bar\n")]),
-            &[("foobar", false, NoRule), ("foo/bar", false, Ignored)],
-        ),
-        // "trailing whitespace is ignored", and "quoting allows trailing whitespace"
-        (
-            &rules_of(&[("", "whitespace/trailing   \n")]),
-            &[
-                ("whitespace/trailing", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-        (
-            &rules_of(&[("", "whitespace/trailing\\ \\ \n")]),
-            &[
-                ("whitespace/trailing  ", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-        // "correct handling of backslashes"
-        (
-            &rules_of(&[(
-                "",
-                "whitespace/trailing 1 \\    \n\
-                 whitespace/trailing 2 \\\\\\\\\n\
-                 whitespace/trailing 3 \\\\\\\\ \n\
-                 whitespace/trailing 4   \\\\\\    \n\
-                 whitespace/trailing 5 \\\\ \\\\\\   \n\
-                 whitespace/trailing 6 \\\\a\\\\\n",
-            )]),
-            &[
-                ("whitespace/trailing 1  ", false, Ignored),
-                ("whitespace/trailing 2 \\\\", false, Ignored),
-                ("whitespace/trailing 3 \\\\", false, Ignored),
-                ("whitespace/trailing 4   \\ ", false, Ignored),
-                ("whitespace/trailing 5 \\ \\ ", false, Ignored),
-                ("whitespace/trailing 6 \\a\\", false, Ignored),
-                ("whitespace/untracked", false, NoRule),
-            ],
-        ),
-    ];
-    for (rules, cases) in rule_cases {
-        for &(path, is_dir, want) in *cases {
-            assert_eq!(walk_verdict(rules, drive, path, is_dir), want, "{path:?}");
-        }
-    }
-}
-
 /// Git's personal lists (decision 047): the user's own list and `.git/info/exclude` keep out what
 /// they keep out in Git, and the project's own rules win over them.
 #[test]
@@ -796,4 +681,323 @@ fn gits_personal_lists_keep_out_what_git_keeps_out() {
     assert_eq!(got, want);
     // So that both sides can't agree on nothing.
     assert_eq!(want, [".gitignore", "c.log", "src/main.rs"]);
+}
+
+/// Single patterns made of the characters that matter, each in its own folder's `.gitignore`.
+const PATTERNS: &[&str] = &[
+    "a",
+    "A",
+    "*",
+    "?",
+    "a?",
+    "?b",
+    "*.txt",
+    "*.TXT",
+    "a*",
+    "*b",
+    "a*b",
+    "*a*",
+    "[ab]",
+    "[!a]",
+    "[^a]",
+    "[a-c]",
+    "[A-C]",
+    "[c-a]",
+    "[]a]",
+    "[!]a]",
+    "[a-]",
+    "[-a]",
+    "[a\\-c]",
+    "[\\a-\\c]",
+    "[a-c-e]*",
+    "[[:alpha:]]",
+    "[[:upper:]]",
+    "[[:lower:]]*",
+    "[[:digit:]]",
+    "[[:punct:]]",
+    "[[:alnum:]]*",
+    "[[:space:]]*",
+    "[[:foo:]]",
+    "[[:alpha]",
+    "[[:]a",
+    "[a",
+    "a]",
+    "[B]",
+    "[b]",
+    "[Z-a]",
+    "\\a",
+    "\\A",
+    "\\B",
+    "\\[a]",
+    "[\\]]",
+    "\\!a",
+    "!a",
+    "\\#a",
+    "#a",
+    "{a,b}",
+    "a\\",
+    "a[/]b",
+    "a\\/b",
+    "**",
+    "**/a",
+    "**/b",
+    "a/**",
+    "x/**",
+    "x/**/b",
+    "a/**/b",
+    "**/x/**",
+    "x/*/b",
+    "x/*",
+    "/a",
+    "/x/y",
+    "x/y",
+    "x/y/",
+    "a/",
+    "x/",
+    "*/",
+    "**/",
+    "/*",
+    "x**",
+    "**x",
+    "a/**b",
+    "x/**y/z",
+    "***",
+    "a/***/b",
+    "a/**/**/b",
+    "*/**/b",
+    "abc/**",
+    "a/b/",
+    "Foo/",
+    "foo/*.TXT",
+    "**\\/b",
+    "x\\/**\\/y",
+    "a/**\\x",
+    "\u{e9}",
+    "e\u{301}",
+    "[\u{e9}]",
+    "a b",
+    "a\\ ",
+    "a  ",
+    "!*.log",
+    "?/?",
+];
+
+/// Files below each pattern's folder, with names that patterns treat specially.
+const PATTERN_FILES: &[&str] = &[
+    "a",
+    "b",
+    "B",
+    "ab",
+    "aB",
+    "Ab.txt",
+    "x.log",
+    "-",
+    "_",
+    "]",
+    "[a]",
+    "a]",
+    "!a",
+    "#a",
+    "{a,b}",
+    "a b",
+    "1",
+    "\u{e9}",
+    "e\u{301}",
+    "ax/b",
+    "x/a",
+    "x/y/b",
+    "a/b",
+    "a/x/b",
+    "a/x/y/b",
+    "abc/d",
+    "abc/x/y",
+    "Foo/bar.txt",
+    "x/ay/z",
+    "x/y/z",
+    "c/a b",
+];
+
+#[test]
+fn single_patterns_match_check_ignore() {
+    let old_git = git_version() < (2, 52);
+    let mut raw = Vec::new();
+    let mut rules = BTreeMap::new();
+    for (i, pattern) in PATTERNS.iter().enumerate() {
+        if old_git && changed_in_git_2_52(pattern) {
+            continue;
+        }
+        let folder = format!("p{i}");
+        rules.insert(folder.clone(), format!("{pattern}\n").into_bytes());
+        for file in PATTERN_FILES {
+            let mut parts: Vec<&str> = file.split('/').collect();
+            let name = parts.pop().unwrap();
+            parts.insert(0, "");
+            raw.push((parts, name));
+        }
+    }
+    // Every pattern's files, in its own folder.
+    let mut files = Vec::new();
+    for folder in rules.keys() {
+        let these: Vec<(Vec<&str>, &str)> = raw
+            .iter()
+            .take(PATTERN_FILES.len())
+            .map(|(parts, name)| {
+                let mut parts = parts.clone();
+                parts[0] = folder.as_str();
+                (parts, *name)
+            })
+            .collect();
+        files.extend(tidy(these));
+    }
+    let tree = Tree { files, rules };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_for_git(root, &tree);
+    git(root, &["init", "-q"]);
+    let drive = this_drive();
+    let paths = every_path(&tree);
+    let says = check_ignore(root, drive, &paths);
+    let mut wrong = Vec::new();
+    for ((path, is_dir), (git_says, why)) in paths.iter().zip(says) {
+        let bolt_says = walk_verdict(&tree.rules, drive, path, *is_dir);
+        if bolt_says != git_says {
+            let folder = path.split('/').next().unwrap();
+            let pattern = String::from_utf8_lossy(&tree.rules[folder]).into_owned();
+            wrong.push(format!(
+                "{pattern:?} on {path:?}: Bolt {bolt_says:?}, Git {why}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A project for `scenarios_match_check_ignore`: Git's two personal lists, the `.gitignore`
+/// text of each folder that has one, and the files.
+struct Scenario {
+    own: &'static str,
+    exclude: &'static str,
+    rules: &'static [(&'static str, &'static str)],
+    files: &'static [&'static str],
+}
+
+const SCENARIOS: &[Scenario] = &[
+    // Negations across nested folders, and lines tied to their folder.
+    Scenario {
+        own: "",
+        exclude: "",
+        rules: &[
+            ("", "*.log\n!keep.log\nbuild/\n/top.txt\n"),
+            ("sub", "!debug.log\nkeep.log\n*.tmp\n!/x.tmp\n"),
+            ("sub/deep", "!*.tmp\nbuild\n!top.txt\n"),
+        ],
+        files: &[
+            "a.log",
+            "keep.log",
+            "debug.log",
+            "top.txt",
+            "build/out.o",
+            "sub/a.log",
+            "sub/debug.log",
+            "sub/keep.log",
+            "sub/top.txt",
+            "sub/a.tmp",
+            "sub/x.tmp",
+            "sub/build/o",
+            "sub/deep/x.tmp",
+            "sub/deep/top.txt",
+            "sub/deep/build",
+            "sub/deep/q/build/o",
+        ],
+    },
+    // The personal lists come first, the user's own before `.git/info/exclude`.
+    Scenario {
+        own: "*.bak\n!important.bak\nsecret/\n!*.swp\n",
+        exclude: "important.bak\n*.swp\n!x.bak\n",
+        rules: &[("", "!keep.swp\n!secret/\n"), ("src", "*.bak\n")],
+        files: &[
+            "a.bak",
+            "x.bak",
+            "important.bak",
+            "x.swp",
+            "keep.swp",
+            "secret/a",
+            "src/c.bak",
+            "src/x.bak",
+            "src/important.bak",
+            "src/secret/b",
+        ],
+    },
+    // Folder-only lines, and `**` in each place.
+    Scenario {
+        own: "",
+        exclude: "",
+        rules: &[
+            ("", "/a/b/\n**/c/\nd/**\n!d/e\ne/**/f\n"),
+            ("x", "a/b/\nc\n!/c/\n"),
+        ],
+        files: &[
+            "a/b/x", "x/a/b/y", "c/z", "x/c/z", "x/q/c", "y/c/z", "d/e", "d/f/g", "e/q/r/f",
+            "e/f/g",
+        ],
+    },
+    // Nothing takes back a name inside an ignored folder; `dir/*` leaves the folder open.
+    Scenario {
+        own: "",
+        exclude: "",
+        rules: &[
+            ("", "dir/\n!dir/keep\ndir2/*\n!dir2/keep\n"),
+            ("dir", "!*\n"),
+            ("dir2", "other\n"),
+        ],
+        files: &["dir/keep", "dir/other", "dir2/keep", "dir2/other", "dir2/x"],
+    },
+    // Letter case, which counts only where the drive heeds it.
+    Scenario {
+        own: "*.TMP\n",
+        exclude: "",
+        rules: &[("", "*.LOG\nBuild/\n!b.log\n"), ("Sub", "/X.txt\n!*.tmp\n")],
+        files: &[
+            "a.log",
+            "B.LOG",
+            "build/x",
+            "BUILD2/y",
+            "Sub/x.txt",
+            "Sub/q.tmp",
+            "c.tmp",
+        ],
+    },
+];
+
+#[test]
+fn scenarios_match_check_ignore() {
+    let drive = this_drive();
+    for (n, scenario) in SCENARIOS.iter().enumerate() {
+        let tree = Tree {
+            files: scenario.files.iter().map(|&f| f.to_owned()).collect(),
+            rules: scenario
+                .rules
+                .iter()
+                .map(|&(folder, text)| (folder.to_owned(), text.as_bytes().to_vec()))
+                .collect(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        write_for_git(root, &tree);
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/exclude"), scenario.exclude).unwrap();
+        let own = tempfile::tempdir().unwrap();
+        let list = own.path().join("ignore");
+        std::fs::write(&list, scenario.own).unwrap();
+        let paths = every_path(&tree);
+        let says = check_ignore_with(root, drive, Some(&list), &paths);
+        let lists = [scenario.own.as_bytes(), scenario.exclude.as_bytes()];
+        for ((path, is_dir), (git_says, why)) in paths.iter().zip(says) {
+            assert_eq!(
+                walk_verdict_with(&lists, &tree.rules, drive, path, *is_dir),
+                git_says,
+                "scenario {n}, {path:?}: {why}"
+            );
+        }
+    }
 }

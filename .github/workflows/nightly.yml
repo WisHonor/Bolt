@@ -120,8 +120,8 @@ jobs:
           cargo test --release -p bolt-vcs --test model 2>&1 | tee model.txt
           grep -q "test result: ok. 1 passed" model.txt
 
-  # Decision 023's gate: status on an unchanged 100,000-file project. The test prints the time;
-  # the gate is checked against it before v0.1. Nightly and by hand, not on pushes.
+  # The status gate: status on an unchanged 100,000-file project. The test prints both times and
+  # fails when either takes 2 s or more. Nightly and by hand, not on pushes.
   speed:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
@@ -137,6 +137,9 @@ jobs:
           cargo test --release -p bolt-vcs --test speed -- --ignored --nocapture --exact status_on_an_unchanged_100_000_file_project 2>&1 | tee speed.txt
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" speed.txt
+          # A hostile ignore file costs Bolt's matcher at most twice Git's time (timed in a release build only).
+          cargo test --release -p bolt-vcs --test redteam14 -- --nocapture --exact hostile_glob_ignore_lines_cost_bolt_no_more_than_twice_git 2>&1 | tee globs.txt
+          grep -q "test result: ok. 1 passed" globs.txt
 
   # Saving a 10 GiB file of incompressible bytes may peak at 500,000,000 bytes of memory at most.
   # Nightly and by hand, not on pushes.
@@ -144,8 +147,8 @@ jobs:
     if: github.event_name != 'push'
     uses: ./.github/workflows/memory-gate.yml
 
-  # Bolt's status, small save and goto on Git's source, at most twice Git's time.
-  # Nightly and by hand, not on pushes.
+  # Bolt's status and small save on Git's source, at most twice Git's time, and goto at most
+  # three and a half times, twice being its goal for v0.2. Nightly and by hand, not on pushes.
   speed-gate:
     if: github.event_name != 'push'
     uses: ./.github/workflows/speed-gate.yml
