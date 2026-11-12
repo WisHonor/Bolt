@@ -565,9 +565,10 @@ jobs:
           python3 -m http.server --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" 8000 > "$RUNNER_TEMP/http.log" 2>&1 &
           server=$!
           trap 'kill $server; cat "$RUNNER_TEMP/http.log"' EXIT
+          # Up to 10 s for the server to start.
+          for i in $(seq 50); do curl --silent --output /dev/null http://127.0.0.1:8000/ && break; sleep 0.2; done
           for f in "$ARCHIVE" SHA256SUMS USER-AGREEMENT.md docs/releases/download-page.md docs/releases/reporting-a-problem.md; do
-            curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 \
-              --output "$got/${f##*/}" "http://127.0.0.1:8000/$f"
+            curl --fail --silent --show-error --output "$got/${f##*/}" "http://127.0.0.1:8000/$f"
           done
           ls -l "$got"
       - name: Serve the website, and download from it
@@ -614,12 +615,18 @@ jobs:
           mount="$RUNNER_TEMP/first-run"
           mkdir "$mount"
           cp -R "$RUNNER_TEMP/fetched" .github/release/first-run.sh "$mount/"
+          # Every image is tried, then the step fails naming those that failed.
+          failed=""
           for image in $CONTAINERS; do
             echo "::group::$image"
             docker run --rm -e GITHUB_ACTIONS=true -v "$mount:/w:ro" "$image" \
-              bash /w/first-run.sh /w/fetched "$VERSION" "$TARGET"
+              bash /w/first-run.sh /w/fetched "$VERSION" "$TARGET" || failed="$failed ${image%%@*}"
             echo "::endgroup::"
           done
+          if [ -n "$failed" ]; then
+            echo "::error::The first run failed in:$failed"
+            exit 1
+          fi
       - name: The first run in bare containers
         if: matrix.containers && runner.os == 'Windows'
         shell: powershell

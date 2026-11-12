@@ -77,8 +77,16 @@ run "mkdir -p ~/.local/bin"
 run "mv opalro ~/.local/bin/"
 
 step "the guide: add ~/.local/bin to the PATH in ~/$rc"
-# Not found before, so the guide's line is what puts it there.
-if new_shell "command -v opalro"; then echo "opalro is found before the PATH line is added" >&2; false; fi
+# Not found before, so the guide's line is what puts it there; unless the system's own start-up
+# files already put ~/.local/bin on the PATH (AlmaLinux 9's do), which the log then says.
+case ":$(new_shell 'printf %s "$PATH"'):" in
+  *":$HOME/.local/bin:"*)
+    already=yes
+    echo "::notice::This system's shell already has ~/.local/bin on its PATH; the guide's line adds it again, which does no harm" ;;
+  *)
+    already=no
+    if new_shell "command -v opalro"; then echo "opalro is found before the PATH line is added" >&2; false; fi ;;
+esac
 line="echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
 in_doc "$guide" "$line"
 in_doc "$guide" "on Linux, write \`~/.bashrc\` in its place"
@@ -189,7 +197,8 @@ fi
 step "in a new terminal, opalro is no longer found"
 newpath=$(new_shell 'printf %s "$PATH"')
 echo "PATH: $newpath"
-if [ "$gone" = yes ]; then
+# Where the system itself puts ~/.local/bin on the PATH, it stays there.
+if [ "$gone" = yes ] && [ "$already" = no ]; then
   case ":$newpath:" in *":$HOME/.local/bin:"*) echo "~/.local/bin is still on the PATH" >&2; false ;; esac
 fi
 if new_shell "command -v opalro"; then false; fi
