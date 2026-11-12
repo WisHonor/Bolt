@@ -110,7 +110,7 @@ fn import_refuses_a_boolean_extension_git_refuses() {
 /// RT14-3: an ignore file of glob lines costs Bolt many times Git's time. 47,368 lines like
 /// `[!a-z]17*[xy]?` (under 1 MiB) against 2,000 paths that none matches: in a release build
 /// `bolt status` takes 14.3 s where `git status` takes 1.1 s, and for `**/z1/**/q*` lines 26 s
-/// against 3.6 s. Each line tried allocates the matcher's state afresh. Run with --release.
+/// against 3.6 s. Each line tried allocates the matcher's state afresh.
 #[test]
 fn hostile_glob_ignore_lines_cost_bolt_no_more_than_twice_git() {
     let mut text = String::new();

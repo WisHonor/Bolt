@@ -13,7 +13,8 @@ use support::{Env, main_tip, run_limited, text};
 
 const FILES: usize = 100_000;
 const PER_FOLDER: usize = 100;
-// The status gate: each status on them takes less than this, in seconds.
+// The status gate: each of the two runs of `status` on the 100,000 files takes less than this,
+// in seconds.
 const UNDER_SECS: f64 = 2.0;
 
 // The memory gate's file, and the most memory saving it may take.

@@ -1,4 +1,4 @@
-# 133 — Red team before v0.1: two findings fixed, and a planted save inside the limits stays a known cost
+# 133 — Red team before v0.1: one finding fixed, a boolean Git reads two ways by system stays as it was, and a planted save inside the limits stays a known cost
 
 - **Status:** Accepted
 - **Date:** 2026-11-11

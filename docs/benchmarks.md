@@ -31,7 +31,7 @@ How they are measured:
 - **Peak memory** is the most memory the `bolt save` process held at once: `VmHWM` on Linux, read from `/proc` every 20 ms, and the peak working set on Windows, read by PowerShell every 200 ms. Both are high-water marks, so only a peak in the last 20 or 200 ms before the process ended could be missed.
 - **Time** is wall-clock time from start to exit, with warm caches: the file was just written, and part of it may still be in the system's cache.
 - **Status:** the test `status_on_an_unchanged_100_000_file_project` builds 100,000 small files, 100 to a folder, an hour old, saves them, and times `bolt status` twice ([testing.md](testing.md) §5).
-- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, the memory gate fails its job above the limit, while the status time is printed and read, not enforced, until v0.1.
+- Each number is from one run. GitHub's machines are shared, so their numbers vary from run to run; the nightly jobs run both gates again. There, both fail their jobs over their limits: the memory gate always, the status gate from v0.1 on (decision 129).
 
 ### GitHub's Linux runner, 2026-11-09
 
@@ -967,7 +967,7 @@ Everything here was measured on 2026-11-11. The finished code is `193c017` (the 
 | [43136867102](https://github.com/WisHonor/Bolt/actions/runs/43136867102) | `status` 17.4 ms, 9.7 ms, 1.791; small save 23.7 ms, 24.7 ms, 0.959; `goto` 25.3 ms, 10.4 ms, 2.438 | `status` 59.7 ms, 36.4 ms, 1.642; small save 69.9 ms, 101.5 ms, 0.689; `goto` 72.3 ms, 43.1 ms, 1.679 |
 
 - **Every enforced step passed in all ten runs on both systems.** Linux: `status` 1.58 to 1.87 times Git's time, the small save 0.94 to 1.09, `goto` 1.91 to 2.70. Windows: `status` 1.49 to 1.80, the small save 0.50 to 0.73, `goto` 1.51 to 1.78.
-- **`goto` on Linux** is over its v0.2 goal of twice Git's time in eight runs of ten, as before this work.
+- **`goto` on Linux** is over its v0.2 goal of twice Git's time in seven runs of ten (eight of the ten runs before this work).
 - **The Nightly workflow** started by hand on the same commit ([run 43136870629](https://github.com/WisHonor/Bolt/actions/runs/43136870629)) passed every job: saving 10 GiB peaked at 44,118,016 bytes in 26.2 s; `status` on the unchanged 100,000-file project took 0.15 s twice (limit 2 s, now enforced); its gate run gave Linux 1.755, 1.027 and 2.041, Windows 1.772, 0.684 and 1.665; git/git imported and matched Git (86,226 commits in 142.2 s, 441 MiB).
 
 ### The runs that decided the rule

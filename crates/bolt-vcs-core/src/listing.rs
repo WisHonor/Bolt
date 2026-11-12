@@ -214,8 +214,9 @@ impl SaveLimits {
                         longest,
                     };
                     for (folder, name) in folders {
-                        // Each was measured before this, unless a listing held itself, which
-                        // would be a tree without end.
+                        // Each was measured before this: a listing that holds itself is read
+                        // again a level deeper each time until the depth check stops it, so
+                        // this is a backstop.
                         let Some(&below) = self.measured.get(&folder) else {
                             return Ok(Err(self.too_deep()));
                         };

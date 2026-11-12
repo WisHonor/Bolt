@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   # On Git's source, Bolt's status and small save may take at most twice Git's time, and goto
-  # three times, twice being its goal for v0.2 (bench/README.md). The bench and nightly
+  # three and a half times, twice being its goal for v0.2 (bench/README.md). The bench and nightly
   # workflows both call this job.
   speed-gate:
     strategy:

@@ -31,6 +31,6 @@ The walks over a save by path are the comparison of two trees (`diff.rs`, behind
 
 ## Consequences
 
-- `bolt goto`, `changes --save`, `show`, `discard`, `shelf`, `unshelf`, `undo` and `redo` refuse a planted deep tree at once, and so do `status` and `save` when the last save holds one in a folder the disk no longer has. A command that never walks the repeated part of a save doesn't walk it now either, so it is not refused for it; `bolt verify` names every save past the limits.
+- `bolt goto`, `changes --save`, `show`, `discard`, `shelf`, `unshelf`, `undo` and `redo` refuse a planted deep tree at once, and so does `status` when the last save holds one in a folder the disk no longer has; `save` then saves the folder's deletion at once, without walking the tree, saying it couldn't count the files changed. A command that never walks the repeated part of a save doesn't walk it now either, so it is not refused for it; `bolt verify` names every save past the limits.
 - The red team's test of decision 127's chain becomes a test that each command refuses it within seconds; [security.md](../security.md)'s row and the follow-ups row on the deep tree are brought up to date.
 - Decision 127 gets a back-link line.

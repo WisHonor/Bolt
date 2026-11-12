@@ -1,5 +1,6 @@
 //! A planted deep tree of shared folder listings: 24 listings each naming the next twice, 8 KiB
-//! that hold 2^25 files by path. Every command that walks it refuses it at once, writing nothing.
+//! that hold 2^25 files by path. Every command that walks it refuses it at once, writing nothing,
+//! and a save on it is made at once, without walking it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod support;
@@ -163,4 +164,43 @@ fn undo_and_redo_across_the_tree_are_refused_at_once() {
     };
     plant_entry(&env, "undo", Action::Undo(step), Some(back), |_| {});
     refused_at_once(&env, &["redo"]);
+}
+
+/// The names at the top of `main`'s save.
+fn top_names(env: &Env) -> Vec<String> {
+    let (repo, state) = env.state();
+    let save = repo.store().save(&state.lines["main"], false).unwrap();
+    let top = repo.store().listing(&save.root).unwrap();
+    top.entries().iter().map(|e| e.name.clone()).collect()
+}
+
+#[test]
+fn a_save_on_the_tree_without_it_is_made_at_once() {
+    // Whole, and naming `deep`, the folder's deletion is saved without walking the tree, with a
+    // warning that the files changed weren't counted. Naming another file keeps the tree as it is.
+    for (args, kept, warns) in [
+        (&["save", "Gone"][..], &["a.txt"][..], true),
+        (&["save", "Gone", "deep"][..], &[][..], true),
+        (
+            &["save", "Part", "a.txt"][..],
+            &["a.txt", "deep"][..],
+            false,
+        ),
+    ] {
+        let (env, _, tree) = on_the_tree();
+        std::fs::write(env.root().join("a.txt"), "a\n").unwrap();
+        let mut bolt = env.bolt_process_in(env.root());
+        bolt.args(args);
+        let ended = run_limited(bolt, 120);
+        assert_eq!(ended.code, Some(0), "{args:?}: {ended:?}");
+        assert!(ended.secs < 10.0, "{args:?} took {:.1} s", ended.secs);
+        assert_ne!(main_tip(&env), tree, "{args:?}");
+        let mut names = top_names(&env);
+        names.retain(|n| n != "bolt.toml" && n != ".boltignore");
+        assert_eq!(names, kept, "{args:?}");
+        let warned = ended
+            .stderr
+            .contains("Bolt couldn't count the files it changed");
+        assert_eq!(warned, warns, "{args:?}: {}", ended.stderr);
+    }
 }

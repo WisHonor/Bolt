@@ -145,7 +145,7 @@ jobs:
     uses: ./.github/workflows/memory-gate.yml
 
   # Bolt's status and small save on Git's source, at most twice Git's time, and goto at most
-  # three times, twice being its goal for v0.2. Nightly and by hand, not on pushes.
+  # three and a half times, twice being its goal for v0.2. Nightly and by hand, not on pushes.
   speed-gate:
     if: github.event_name != 'push'
     uses: ./.github/workflows/speed-gate.yml
