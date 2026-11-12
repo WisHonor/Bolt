@@ -11,7 +11,7 @@
 The red team's session before v0.1 (RT14, [report](../redteam/2026-11-11-v0.1-release.md)) attacked the readers written again under decision 131, the deep-tree refusal of decision 130, and the two halves of milestone 6 together, in a release build, from the no-network sandbox and on Windows and macOS through a `redteam/` CI branch. It found three problems, all Low, and nothing it tried got a name past the look-alike checks or a verdict away from Git's:
 
 - **RT14-1.** A planted save of about 1 KiB holds 8.4 million entries by path through shared listings, under the 10,000,000 a save may have. Decision 130 never refuses a save within the limits, so the commands walk all of it: `status` took 17 s and 1,446 MiB, `changes --save` 26 s, `show` 16 s. `bolt verify` reports nothing, since the save is within the limits.
-- **RT14-2.** Where a boolean is expected, Git refuses a value of exactly -2^31 (`-2147483648`, `-2g`, `-2097152k`) and Bolt read it as true, so Bolt imported a repository Git won't open.
+- **RT14-2.** Where a boolean is expected, the Git in the sandbox (2.39, Linux) refuses a value of exactly -2^31 (`-2147483648`, `-2g`, `-2097152k`), and Bolt reads it as true. Checked afterwards: Git for Windows 2.50 reads it as true too, and opens a repository with `extensions.preciousObjects = -2147483648`; Git's answer depends on the system it runs on. Bolt read it as true before the rewrite as well.
 - **RT14-3.** A `.gitignore` under 1 MiB made of many pattern lines (brackets, `**`) made `status` 4 to 13 times slower than Git's on the same files: the matcher made new working space for every line it tried on every path.
 
 ## Options
@@ -23,10 +23,10 @@ For RT14-1:
 ## Decision
 
 - **RT14-1: B.** It is the cost of a save as big as the format allows, and it is the row decision 109 moved to before networking; the red team's numbers are added to it. Nothing is written or lost.
-- **RT14-2: fixed.** A value Git refuses as a boolean is refused by Bolt, as the reader's other refusals are.
+- **RT14-2: left as it is.** Git itself reads the value two ways, by system; Bolt gives the answer it gave before the rewrite, which is Git for Windows'. Refusing it would be a change of behaviour toward one of Git's two answers, for a value no tool writes. Written down in the follow-ups.
 - **RT14-3: fixed.** The matcher keeps its working space for the whole walk, so a line tried on a path costs no new memory.
 
 ## Consequences
 
-- The proofs of RT14-2 and RT14-3 join the tests; RT14-1's stays switched off, as a record of the cost.
+- The proof of RT14-3 joins the tests; those of RT14-1 and RT14-2 stay switched off, as a record, each saying why.
 - The follow-ups row on hostile saves inside the limits gains RT14-1's numbers; [security.md](../security.md)'s row on the deep tree says what decision 130 refuses and what it leaves.

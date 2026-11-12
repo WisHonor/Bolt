@@ -87,7 +87,7 @@ fn a_small_planted_save_within_the_limits_costs_status_little() {
 /// repository whose `extensions.preciousObjects` Git refuses ("fatal: bad boolean config value"),
 /// and would read `config.worktree` for an `extensions.worktreeConfig` Git refuses.
 #[test]
-#[ignore = "RT14-2: a boolean of -2^31 is read where Git refuses it; until its fix is in"]
+#[ignore = "RT14-2: kept as a record; Git reads a boolean of -2^31 two ways by system, and Bolt keeps its answer (decision 133)"]
 fn import_refuses_a_boolean_extension_git_refuses() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");
