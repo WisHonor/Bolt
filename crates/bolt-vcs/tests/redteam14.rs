@@ -62,7 +62,7 @@ fn shared_tree(pack: &mut PackSet) -> Id {
 /// stores, or the save is refused at once.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "RT14-1: a planted save within the limits costs status gigabytes; until its fix is in"]
+#[ignore = "RT14-1: kept as a record; a planted save within the limits is a known cost until v0.3 (decision 133)"]
 fn a_small_planted_save_within_the_limits_costs_status_little() {
     let env = Env::empty();
     env.bolt()
