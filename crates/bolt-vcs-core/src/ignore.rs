@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -129,6 +130,78 @@ impl Bits {
         }
         out
     }
+
+    const ALL: Bits = Bits([u64::MAX; 4]);
+
+    /// The bytes of `text`, each in both letter cases where case is ignored.
+    fn held_by(text: &[u8], fold: bool) -> Bits {
+        let mut held = Bits::default();
+        for &b in text {
+            put(&mut held.0, usize::from(b));
+            if fold {
+                put(&mut held.0, usize::from(b.to_ascii_lowercase()));
+                put(&mut held.0, usize::from(b.to_ascii_uppercase()));
+            }
+        }
+        held
+    }
+
+    /// The set with every letter in it in both cases.
+    fn either_case(mut self) -> Bits {
+        for low in b'a'..=b'z' {
+            let up = low.to_ascii_uppercase();
+            if self.has(low) || self.has(up) {
+                self.add(low, low);
+                self.add(up, up);
+            }
+        }
+        self
+    }
+
+    fn within(&self, other: &Bits) -> bool {
+        self.0.iter().zip(other.0).all(|(a, b)| a & !b == 0)
+    }
+}
+
+/// A quick test of a line against a path before its pieces are stepped through: the bytes its
+/// first byte can be, and the bytes every match holds. It never turns away a path the line
+/// matches, and turns away most others without reading the pieces.
+#[derive(Debug)]
+struct Sieve {
+    first: Bits,
+    needs: Bits,
+}
+
+impl Sieve {
+    fn of(pat: &Pat) -> Sieve {
+        let Pat::Glob(toks) = pat else {
+            return Sieve {
+                first: Bits::ALL,
+                needs: Bits::default(),
+            };
+        };
+        let mut needs = Bits::default();
+        for tok in toks.iter() {
+            if let Tok::Byte(b, _) = tok {
+                needs.add(*b, *b);
+            }
+        }
+        let first = match toks.first() {
+            Some(Tok::Byte(b, _)) => {
+                let mut one = Bits::default();
+                one.add(*b, *b);
+                one.either_case()
+            }
+            Some(Tok::Set(s)) => s.exact.or(s.folded).either_case(),
+            _ => Bits::ALL,
+        };
+        Sieve { first, needs }
+    }
+
+    /// Whether the line may match `text`, whose path holds the bytes `held`.
+    fn passes(&self, text: &[u8], held: &Bits) -> bool {
+        self.needs.within(held) && text.first().is_none_or(|&c| self.first.has(c))
+    }
 }
 
 /// A compiled pattern. The first two are the everyday shapes, matched without stepping.
@@ -177,53 +250,88 @@ impl Pat {
 /// Steps every position the pattern can be at through `text`, so the time is at most the
 /// pattern's length times the text's.
 fn run(toks: &[Tok], text: &[u8], fold: bool) -> bool {
-    let n = toks.len();
-    // `at[i]`: before piece `i` (`at[n]`: the whole pattern matched). `inside[i]`: within the
+    // One bit per position, positions 0 to `toks.len()`.
+    let words = (toks.len() / 64).saturating_add(1);
+    if words == 1 {
+        return run_in(&mut [0; 4], 1, toks, text, fold);
+    }
+    // Longer patterns step in space kept for the thread, so matching never allocates once warm.
+    thread_local! {
+        static SPACE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+    let size = words.saturating_mul(4);
+    SPACE.with(|space| match space.try_borrow_mut() {
+        Ok(mut space) => {
+            space.clear();
+            space.resize(size, 0);
+            run_in(&mut space, words, toks, text, fold)
+        }
+        Err(_) => run_in(&mut vec![0; size], words, toks, text, fold),
+    })
+}
+
+/// `run` in `space`, four sets of `words` words each, all clear.
+fn run_in(space: &mut [u64], words: usize, toks: &[Tok], text: &[u8], fold: bool) -> bool {
+    // `at`: before piece `i` (at `toks.len()`: the whole pattern matched). `inside`: within the
     // run of the `**/` at `i`, which may end only after a `/`.
-    let mut at = vec![false; n.saturating_add(1)];
-    let mut inside = vec![false; n];
-    let mut next_at = at.clone();
-    let mut next_inside = inside.clone();
-    reach(&mut at, toks, 0);
+    let Some((mut at, rest)) = space.split_at_mut_checked(words) else {
+        return false;
+    };
+    let Some((mut inside, rest)) = rest.split_at_mut_checked(words) else {
+        return false;
+    };
+    let Some((mut next_at, mut next_inside)) = rest.split_at_mut_checked(words) else {
+        return false;
+    };
+    reach(at, toks, 0);
     for &c in text {
-        next_at.fill(false);
-        next_inside.fill(false);
+        next_at.fill(0);
+        next_inside.fill(0);
         let mut alive = false;
-        for (i, tok) in toks.iter().enumerate() {
-            let after = i.saturating_add(1);
-            if inside.get(i) == Some(&true) {
+        for (w, (&a, &d)) in at.iter().zip(inside.iter()).enumerate() {
+            let mut bits = a | d;
+            while bits != 0 {
+                let low = usize::try_from(bits.trailing_zeros()).unwrap_or(0);
+                bits &= bits.wrapping_sub(1);
+                let i = w.saturating_mul(64).saturating_add(low);
+                let Some(tok) = toks.get(i) else {
+                    continue;
+                };
                 alive = true;
-                set(&mut next_inside, i);
-                if c == b'/' {
-                    reach(&mut next_at, toks, after);
-                }
-            }
-            if at.get(i) != Some(&true) {
-                continue;
-            }
-            alive = true;
-            match tok {
-                Tok::Byte(p, keep) => {
-                    let hit = if fold {
-                        c.to_ascii_lowercase() == if *keep { *p } else { p.to_ascii_lowercase() }
-                    } else {
-                        c == *p
-                    };
-                    if hit {
-                        reach(&mut next_at, toks, after);
-                    }
-                }
-                Tok::One if c != b'/' => reach(&mut next_at, toks, after),
-                Tok::Set(s) if s.has(c, fold) => reach(&mut next_at, toks, after),
-                Tok::Star if c != b'/' => reach(&mut next_at, toks, i),
-                Tok::All => reach(&mut next_at, toks, i),
-                Tok::Dirs => {
-                    set(&mut next_inside, i);
+                let after = i.saturating_add(1);
+                if has(inside, i) {
+                    put(next_inside, i);
                     if c == b'/' {
-                        reach(&mut next_at, toks, after);
+                        reach(next_at, toks, after);
                     }
                 }
-                _ => {}
+                if !has(at, i) {
+                    continue;
+                }
+                match tok {
+                    Tok::Byte(p, keep) => {
+                        let hit = if fold {
+                            c.to_ascii_lowercase()
+                                == if *keep { *p } else { p.to_ascii_lowercase() }
+                        } else {
+                            c == *p
+                        };
+                        if hit {
+                            reach(next_at, toks, after);
+                        }
+                    }
+                    Tok::One if c != b'/' => reach(next_at, toks, after),
+                    Tok::Set(s) if s.has(c, fold) => reach(next_at, toks, after),
+                    Tok::Star if c != b'/' => reach(next_at, toks, i),
+                    Tok::All => reach(next_at, toks, i),
+                    Tok::Dirs => {
+                        put(next_inside, i);
+                        if c == b'/' {
+                            reach(next_at, toks, after);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         if !alive {
@@ -232,22 +340,33 @@ fn run(toks: &[Tok], text: &[u8], fold: bool) -> bool {
         std::mem::swap(&mut at, &mut next_at);
         std::mem::swap(&mut inside, &mut next_inside);
     }
-    at.get(n) == Some(&true)
+    has(at, toks.len())
 }
 
-fn set(states: &mut [bool], i: usize) {
-    if let Some(s) = states.get_mut(i) {
-        *s = true;
+fn has(states: &[u64], i: usize) -> bool {
+    states.get(i / 64).is_some_and(|w| {
+        w.checked_shr(u32::try_from(i % 64).unwrap_or(0))
+            .unwrap_or(0)
+            & 1
+            == 1
+    })
+}
+
+fn put(states: &mut [u64], i: usize) {
+    if let Some(w) = states.get_mut(i / 64) {
+        *w |= 1u64
+            .checked_shl(u32::try_from(i % 64).unwrap_or(0))
+            .unwrap_or(0);
     }
 }
 
 /// Puts position `i` in force, and those after it that a run of nothing reaches.
-fn reach(states: &mut [bool], toks: &[Tok], mut i: usize) {
+fn reach(states: &mut [u64], toks: &[Tok], mut i: usize) {
     loop {
-        match states.get_mut(i) {
-            Some(s) if !*s => *s = true,
-            _ => return,
+        if i > toks.len() || has(states, i) {
+            return;
         }
+        put(states, i);
         match toks.get(i) {
             Some(Tok::Star | Tok::All | Tok::Dirs) => i = i.saturating_add(1),
             _ => return,
@@ -448,6 +567,7 @@ fn set_of(text: &[u8]) -> Option<(Set, &[u8])> {
 #[derive(Debug)]
 struct Line {
     pat: Pat,
+    sieve: Sieve,
     /// `!` at the start.
     negated: bool,
     /// `/` at the end.
@@ -471,8 +591,10 @@ impl Line {
         if text.is_empty() {
             return None;
         }
+        let pat = compile(text)?;
         Some(Line {
-            pat: compile(text)?,
+            sieve: Sieve::of(&pat),
+            pat,
             negated,
             dir_only,
             basename: !anchored && !text.contains(&b'/'),
@@ -566,12 +688,18 @@ impl Rules {
 
     /// The last line that matches: `rel` is the path from the file's folder, `base` its name.
     fn last(&self, rel: &[u8], base: &[u8], is_dir: bool, fold: bool) -> Option<&Line> {
+        // Plain lines' quick test takes any path, so only the other lines need the path's bytes.
+        let holds = if self.others.is_empty() {
+            Bits::ALL
+        } else {
+            Bits::held_by(rel, fold)
+        };
         let fits = |&at: &usize| {
             self.lines.get(at).is_some_and(|line| {
+                let text = if line.basename { base } else { rel };
                 (is_dir || !line.dir_only)
-                    && line
-                        .pat
-                        .matches(if line.basename { base } else { rel }, fold)
+                    && line.sieve.passes(text, &holds)
+                    && line.pat.matches(text, fold)
             })
         };
         // A plain line matches the whole name or the whole path from the folder.

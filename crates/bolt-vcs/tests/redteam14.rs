@@ -112,7 +112,6 @@ fn import_refuses_a_boolean_extension_git_refuses() {
 /// `bolt status` takes 14.3 s where `git status` takes 1.1 s, and for `**/z1/**/q*` lines 26 s
 /// against 3.6 s. Each line tried allocates the matcher's state afresh. Run with --release.
 #[test]
-#[ignore = "RT14-3: glob ignore lines cost Bolt over ten times Git's time; until its fix is in"]
 fn hostile_glob_ignore_lines_cost_bolt_no_more_than_twice_git() {
     let mut text = String::new();
     for i in 0..47_368 {

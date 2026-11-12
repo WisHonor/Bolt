@@ -462,6 +462,61 @@ fn matching_takes_time_in_proportion_to_pattern_and_path() {
 }
 
 #[test]
+fn the_quick_test_never_turns_away_a_match() {
+    let pieces = [
+        "a",
+        "B",
+        "/",
+        "*",
+        "**",
+        "?",
+        "[a-c]",
+        "[!a]",
+        "[[:upper:]]",
+        "\\b",
+        "\\B",
+        "**/",
+        "/**",
+        "[B]",
+    ];
+    let mut texts = vec![String::new()];
+    for _ in 0..3 {
+        let longer: Vec<String> = texts
+            .iter()
+            .flat_map(|t| ["a", "B", "c", "/"].map(|c| format!("{t}{c}")))
+            .collect();
+        texts.extend(longer);
+    }
+    texts.sort();
+    texts.dedup();
+    let mut tried = 0;
+    for a in pieces {
+        for b in pieces {
+            for c in pieces {
+                let pattern = format!("{a}{b}{c}");
+                let Some(pat) = compile(pattern.as_bytes()) else {
+                    continue;
+                };
+                let sieve = Sieve::of(&pat);
+                for text in &texts {
+                    for fold in [false, true] {
+                        if pat.matches(text.as_bytes(), fold) {
+                            tried += 1;
+                            let held = Bits::held_by(text.as_bytes(), fold);
+                            assert!(
+                                sieve.passes(text.as_bytes(), &held),
+                                "{pattern:?} {text:?} fold {fold}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(tried > 1000);
+}
+
+#[test]
 fn reading_a_bracket_takes_time_in_proportion_to_its_length() {
     // A reader that looks ahead for `]` again from every `[:` would take hours over these.
     let n = 500_000;
