@@ -22,7 +22,7 @@ use crate::repo::{self, ChangeLock, RepoError, Repository};
 use crate::safe_fs;
 use crate::save::Person;
 use crate::store::{Store, StoreError};
-use crate::text::{bytes, escape, thousands};
+use crate::text::{bytes, escape, escape_all, thousands};
 use crate::warning::{self, Warning};
 
 mod convert;
@@ -1092,8 +1092,9 @@ fn tracked_stop(name: &str) -> ImportError {
     };
     ImportError::Stop {
         what: format!(
-            "Git tracks `{name}` at the top of this project, and Opalro can't use it as its own \
-             .opalro folder."
+            "Git tracks `{}` at the top of this project, and Opalro can't use it as its own \
+             .opalro folder.",
+            escape_all(name)
         ),
         hint: Some(hint.to_owned()),
     }
@@ -1340,7 +1341,7 @@ fn opal_folder_warnings(git: &git::Repo, head: &GitId) -> Result<Vec<Warning>, I
                     "Git checked out a folder named .opalro at `{}`. Opalro left it out of history, \
                      but commands run inside it would use it as an Opalro project; delete it unless \
                      you made it.",
-                    escape(&shown_path(&path), false)
+                    escape_all(&shown_path(&path))
                 );
                 warnings.push(Warning::new(warning::NESTED_OPALRO_FOLDER, message));
             }
@@ -1523,7 +1524,7 @@ mod tests {
             let (message, hint) = (e.to_string(), e.hint().unwrap());
             let what = format!(
                 "Git tracks `{}` at the top of this project",
-                escape(name, false)
+                escape_all(name)
             );
             assert!(message.starts_with(&what), "{message}");
             assert!(!message.contains('\n'), "{message}");

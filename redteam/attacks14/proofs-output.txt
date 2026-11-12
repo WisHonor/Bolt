@@ -1,0 +1,38 @@
+lint-ok
+
+test: the_import_shows_the_joiner_in_a_tracked_opalro_spelling, ignore_message: RT15-1: the import's stop and nested-folder warning hide a joiner in a .opalro spelling; until its fix is in
+
+    Finished `release` profile [optimized] target(s) in 0.34s
+     Running tests/redteam15.rs (/home/attacker/target/release/deps/redteam15-b121724fe379e699)
+
+running 1 test
+test the_import_shows_the_joiner_in_a_tracked_opalro_spelling ... Git tracks ".o\u{200c}palro/x": import succeeded: false
+error: Git tracks `.o‌palro` at the top of this project, and Opalro can't use it as its own .opalro folder.
+
+hint: Nothing was changed. Opalro reads the commit Git is on, so the entry named above has to leave it: rename it or remove it in Git and commit, and move it out of this folder if it is still here. Then run opalro import again.
+
+Git tracks "sub/.o\u{200d}palro/x": import succeeded: true
+Imported 1 commit from Git: 1 line, 0 tags.
+
+    Left out 1 entry whose name Opalro never writes to disk (such as .git and .opalro), with everything in it: `sub/.o\u{200d}palro` in commit 11a12b23f610
+    1 commit can't be recreated exactly by a later export: it holds a folder in a form Git no longer writes, or an entry Opalro left out.
+
+You're on line main.
+warning: Git checked out a folder named .opalro at `sub/.o‍palro`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it.
+
+
+thread 'the_import_shows_the_joiner_in_a_tracked_opalro_spelling' (3901) panicked at crates/opal-vcs/tests/redteam15.rs:42:5:
+a joiner was printed as it is, so the name reads as .opalro:
+".o\u{200c}palro/x": ["error: Git tracks `.o\u{200c}palro` at the top of this project, and Opalro can't use it as its own .opalro folder."]
+"sub/.o\u{200d}palro/x": ["warning: Git checked out a folder named .opalro at `sub/.o\u{200d}palro`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it."]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    the_import_shows_the_joiner_in_a_tracked_opalro_spelling
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `-p opal-vcs --test redteam15`

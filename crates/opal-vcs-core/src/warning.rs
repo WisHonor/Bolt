@@ -38,7 +38,7 @@ pub const ELEVATED_ONLY: &str = "elevated_only";
 /// `start` made the project but couldn't read its first save back to show it.
 pub const FIRST_SAVE_NOT_READ: &str = "first_save_not_read";
 /// Git checked out a folder named `.opalro` below the top of the project.
-pub const NESTED_OPALRO_FOLDER: &str = "nested_opal_folder";
+pub const NESTED_OPALRO_FOLDER: &str = "nested_opalro_folder";
 /// The Git repository has a grafts file, which the import ignored.
 pub const GRAFTS_IGNORED: &str = "grafts_ignored";
 /// Imported commits whose `change-id` header gives a change ID another commit has too took their

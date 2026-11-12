@@ -49,7 +49,7 @@ expression: json
   "tags": 1,
   "warnings": [
     {
-      "kind": "nested_opal_folder",
+      "kind": "nested_opalro_folder",
       "message": "Git checked out a folder named .opalro at `sub/.opalro`. Opalro left it out of history, but commands run inside it would use it as an Opalro project; delete it unless you made it."
     },
     {
