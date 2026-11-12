@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(any(test, feature = "fault-injection"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1134,6 +1134,11 @@ impl PackReader {
                     data_start,
                     stored.min(ZSTD_MAX_FRAME_HEADER),
                 )?;
+                if !plain_frame_header(&frame_header) {
+                    return Err(self.corrupt(format!(
+                        "the zstd data of {id} is not a frame format 1 allows"
+                    )));
+                }
                 match zstd::zstd_safe::get_frame_content_size(&frame_header) {
                     Ok(None) => {}
                     Ok(Some(n)) if n == size => {}
@@ -1144,15 +1149,24 @@ impl PackReader {
                     }
                 }
                 // Making a decoder fails only when memory runs out.
-                let decoder =
-                    zstd::stream::read::Decoder::new(data).map_err(|_| PackError::OutOfMemory)?;
-                copy_decoded(&mut decoder.take(size.saturating_add(1)), out).map_err(|e| {
+                let decoder = zstd::stream::read::Decoder::new(data)
+                    .map_err(|_| PackError::OutOfMemory)?
+                    .single_frame();
+                let mut decoded = decoder.take(size.saturating_add(1));
+                let produced = copy_decoded(&mut decoded, out).map_err(|e| {
                     if zstd_ran_out_of_memory(&e) {
                         PackError::OutOfMemory
                     } else {
                         self.corrupt(format!("the zstd data of {id} is invalid: {e}"))
                     }
-                })??
+                })??;
+                let mut rest = decoded.into_inner().into_inner();
+                if produced == size && !rest.fill_buf()?.is_empty() {
+                    return Err(
+                        self.corrupt(format!("the zstd data of {id} goes on after its frame"))
+                    );
+                }
+                produced
             }
             _ => return Err(self.corrupt(format!("{id} has an unknown compression"))),
         };
@@ -1245,24 +1259,33 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Whether `data` is one modern zstd frame and nothing more, with a window the streamed decoder
-/// takes. The one-call decoder takes frames the streamed one refuses, so only these go to it.
+/// Whether `data` is one zstd frame as format 1 allows it, and nothing more. Only these go to the
+/// one-call decoder, which takes frames the streamed one refuses.
 fn one_plain_frame(data: &[u8]) -> bool {
+    plain_frame_header(data) && zstd::zstd_safe::find_frame_compressed_size(data) == Ok(data.len())
+}
+
+/// Whether `header`, the start of an entry's stored bytes, opens a zstd frame as format 1 allows
+/// it: the frame's magic (so no skippable frame and no format from before zstd 1.0), no
+/// dictionary ID, the header's spare bits clear, and a window of at most 2^27 bytes.
+fn plain_frame_header(header: &[u8]) -> bool {
     const MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
     const MAX_WINDOW: u64 = 1 << 27;
-    if !data.starts_with(&MAGIC)
-        || zstd::zstd_safe::find_frame_compressed_size(data) != Ok(data.len())
-    {
-        return false;
-    }
-    let Some(&descriptor) = data.get(4) else {
+    // Bits 0 and 1 give a dictionary ID's size, bit 3 is reserved and bit 4 unused.
+    const NOT_IN_FORMAT_1: u8 = 0x1B;
+    let Some(&descriptor) = header.get(4) else {
         return false;
     };
+    if !header.starts_with(&MAGIC) || descriptor & NOT_IN_FORMAT_1 != 0 {
+        return false;
+    }
     let window = if descriptor & 0x20 != 0 {
         // A single segment's window is its content size.
-        zstd::zstd_safe::get_frame_content_size(data).ok().flatten()
+        zstd::zstd_safe::get_frame_content_size(header)
+            .ok()
+            .flatten()
     } else {
-        data.get(5).and_then(|&b| {
+        header.get(5).and_then(|&b| {
             let base = 1u64.checked_shl(10 + u32::from(b >> 3))?;
             (base >> 3).checked_mul(u64::from(b & 7))?.checked_add(base)
         })
@@ -2191,10 +2214,31 @@ mod tests {
         Fingerprint { zstd: bool },
         HugeWindow,
         SecondFrame,
+        SecondPlainFrame,
+        SkippableFirst,
+        SkippableAfter,
+        TrailingByte,
+        DictionaryId,
+        UnusedBit,
+        WithChecksum,
+        WrongChecksum,
         Legacy,
         UnknownCompression,
         RawSizeDiffers,
         PackCutShort,
+    }
+
+    /// A skippable frame holding four bytes.
+    const SKIPPABLE: [u8; 12] = [0x50, 0x2A, 0x4D, 0x18, 4, 0, 0, 0, 1, 2, 3, 4];
+
+    /// `frame` with a `Dictionary_ID` field of one byte, 0: no dictionary, which zstd reads.
+    fn with_dictionary_id(frame: &[u8]) -> Vec<u8> {
+        let mut out = frame.to_vec();
+        // The field comes after the window byte, which a single-segment frame doesn't have.
+        let at = if out[4] & 0x20 != 0 { 5 } else { 6 };
+        out[4] |= 0x01;
+        out.insert(at, 0);
+        out
     }
 
     const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
@@ -2259,6 +2303,45 @@ mod tests {
                 frames.extend_from_slice(&[0x00, 0xA0, 0x01, 0x00, 0x00]);
                 (true, frames)
             }
+            Damage::SecondPlainFrame => {
+                let mut frames = zstd::bulk::compress(&data, 3).unwrap();
+                frames.extend_from_slice(&zstd::bulk::compress(&[], 3).unwrap());
+                (true, frames)
+            }
+            Damage::SkippableFirst => {
+                let mut frames = SKIPPABLE.to_vec();
+                frames.extend_from_slice(&zstd::bulk::compress(&data, 3).unwrap());
+                (true, frames)
+            }
+            Damage::SkippableAfter => {
+                let mut frames = zstd::bulk::compress(&data, 3).unwrap();
+                frames.extend_from_slice(&SKIPPABLE);
+                (true, frames)
+            }
+            Damage::TrailingByte => {
+                let mut frame = zstd::bulk::compress(&data, 3).unwrap();
+                frame.push(0);
+                (true, frame)
+            }
+            Damage::DictionaryId => (
+                true,
+                with_dictionary_id(&zstd::bulk::compress(&data, 3).unwrap()),
+            ),
+            Damage::UnusedBit => {
+                let mut frame = zstd::bulk::compress(&data, 3).unwrap();
+                frame[4] |= 0x10;
+                (true, frame)
+            }
+            Damage::WithChecksum | Damage::WrongChecksum => {
+                let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+                enc.include_checksum(true).unwrap();
+                std::io::Write::write_all(&mut enc, &data).unwrap();
+                let mut frame = enc.finish().unwrap();
+                if damage == Damage::WrongChecksum {
+                    *frame.last_mut().unwrap() ^= 1;
+                }
+                (true, frame)
+            }
             Damage::Legacy => {
                 let mut frame = vec![0x27, 0xB5, 0x2F, 0xFD];
                 // Fixed bytes, so both sizes meet the same old-format header; more than a
@@ -2308,6 +2391,8 @@ mod tests {
     fn a_small_entry_is_refused_as_a_streamed_one_is() {
         let invalid = "damaged: the zstd data of <id> is invalid: ";
         let wrong_size = "damaged: <id> does not have its recorded size";
+        let not_allowed = Some("damaged: the zstd data of <id> is not a frame format 1 allows");
+        let goes_on = Some("damaged: the zstd data of <id> goes on after its frame");
         // `None`: whatever the streamed path says, the decoder's own words.
         let cases = [
             (
@@ -2329,9 +2414,17 @@ mod tests {
                 Damage::Fingerprint { zstd: true },
                 Some("object <id> does not match its fingerprint"),
             ),
-            (Damage::HugeWindow, None),
-            (Damage::SecondFrame, None),
-            (Damage::Legacy, None),
+            (Damage::HugeWindow, not_allowed),
+            (Damage::SecondFrame, goes_on),
+            (Damage::SecondPlainFrame, goes_on),
+            (Damage::SkippableFirst, not_allowed),
+            (Damage::SkippableAfter, goes_on),
+            (Damage::TrailingByte, goes_on),
+            (Damage::DictionaryId, not_allowed),
+            (Damage::UnusedBit, not_allowed),
+            (Damage::WithChecksum, Some("read")),
+            (Damage::WrongChecksum, None),
+            (Damage::Legacy, not_allowed),
             (
                 Damage::UnknownCompression,
                 Some("damaged: <id> has an unknown compression"),
@@ -2347,10 +2440,11 @@ mod tests {
                 let (small, reads) = read_damaged(kind, ONE_READ as usize - 4096, damage);
                 let (streamed, _) = read_damaged(kind, ONE_READ as usize + 4096, damage);
                 assert_eq!(small, streamed, "{kind:?} {damage:?}");
-                // Only a wrong fingerprint, checked after either path, is settled by the one read.
-                let settled = matches!(damage, Damage::Fingerprint { .. });
+                // Only a good frame, or a wrong fingerprint, checked after either path, is
+                // settled by the one read.
+                let settled = matches!(damage, Damage::Fingerprint { .. } | Damage::WithChecksum);
                 assert_eq!(reads == 1, settled, "{kind:?} {damage:?}: {reads} reads");
-                if damage == Damage::CutShort {
+                if matches!(damage, Damage::CutShort | Damage::WrongChecksum) {
                     assert!(small.starts_with(invalid), "{kind:?} {damage:?}: {small}");
                 }
                 if let Some(expected) = expected {
@@ -2363,16 +2457,35 @@ mod tests {
     #[test]
     fn only_one_plain_frame_goes_to_the_one_call_decoder() {
         let bytes = b"plain frame ".repeat(100);
-        let plain = zstd::bulk::compress(&bytes, 3).unwrap();
+        // The two ways Opalro writes a frame, and a frame with a checksum.
+        let plain = zstd::bulk::compress(&bytes, ZSTD_LEVEL).unwrap();
         assert!(one_plain_frame(&plain));
-        let mut streamed = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        let mut streamed = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL).unwrap();
         std::io::Write::write_all(&mut streamed, &bytes).unwrap();
         assert!(one_plain_frame(&streamed.finish().unwrap()));
+        let mut checked = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        checked.include_checksum(true).unwrap();
+        std::io::Write::write_all(&mut checked, &bytes).unwrap();
+        assert!(one_plain_frame(&checked.finish().unwrap()));
 
-        // A real frame, which the one-call decoder takes whatever its window.
+        // Real frames, which zstd reads but format 1 doesn't hold: the one-call decoder takes
+        // any window, a dictionary ID of 0 means no dictionary, and the unused bit is ignored.
         let huge = huge_window_frame(&bytes);
         assert!(!one_plain_frame(&huge));
         assert_eq!(zstd::bulk::decompress(&huge, bytes.len()).unwrap(), bytes);
+        let with_id = with_dictionary_id(&plain);
+        assert!(!one_plain_frame(&with_id));
+        assert_eq!(
+            zstd::bulk::decompress(&with_id, bytes.len()).unwrap(),
+            bytes
+        );
+        let mut unused = plain.clone();
+        unused[4] |= 0x10;
+        assert!(!one_plain_frame(&unused));
+        assert_eq!(zstd::bulk::decompress(&unused, bytes.len()).unwrap(), bytes);
+        let mut skippable = SKIPPABLE.to_vec();
+        skippable.extend_from_slice(&plain);
+        assert!(!one_plain_frame(&skippable));
         let mut twice = plain.clone();
         twice.extend_from_slice(&plain);
         assert!(!one_plain_frame(&twice));
@@ -2381,6 +2494,18 @@ mod tests {
         assert!(!one_plain_frame(&legacy));
         assert!(!one_plain_frame(&plain[..plain.len() - 1]));
         assert!(!one_plain_frame(&[]));
+    }
+
+    #[test]
+    fn the_build_reads_no_zstd_format_from_before_1_0() {
+        // A v0.7 frame's header, giving a content size of 5, which the legacy decoders read.
+        let v07 = [0x27, 0xB5, 0x2F, 0xFD, 0x20, 0x05];
+        assert!(zstd::zstd_safe::get_frame_content_size(&v07).is_err());
+        let v1 = [0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x05];
+        assert!(matches!(
+            zstd::zstd_safe::get_frame_content_size(&v1),
+            Ok(Some(5))
+        ));
     }
 
     /// Reads each entry of the pack at `path` with a reader of its own, so no block read for one
