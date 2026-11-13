@@ -5,7 +5,7 @@
 - **Agenda topic:** none (the v0.1 release: the package)
 - **Decided by:** the owner.
 - **Supersedes:** [decision 119](119-packaging-v0.1.md) in part (its "License" point, which prepared v0.1 with no license, and its consequence that anyone can build a release again from the public lock file and workflow)
-- **Refined by:** [decision 141](141-the-user-agreement.md) (the user agreement); [decision 143](143-the-notices-cover-what-is-built-in.md) (the notices, and what MPL-2.0 asks)
+- **Refined by:** [decision 141](141-the-user-agreement.md) (the user agreement); [decision 143](143-the-notices-cover-what-is-built-in.md) (the notices, and what MPL-2.0 asks); [decision 156](156-the-user-agreements-blanks-filled-by-the-owner.md) (the license's rights holder, filled by the owner)
 
 ## Context
 

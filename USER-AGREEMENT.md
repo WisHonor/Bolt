@@ -1,17 +1,16 @@
 # Opalro user agreement
-> **Draft for a lawyer:** not in force until a lawyer has read it and every `[BLANK: …]` is filled.
 
 Please read this before you install Opalro. It is short and in plain words, and each section starts with what it means for you.
 
 ## 1. Who this agreement is between
 
-This agreement is between you and us, and it is what lets you use Opalro. "You" means the person or organisation using Opalro. "We" and "us" mean [BLANK: name or company]. "Opalro" means the program and the documents that come with it.
+This agreement is between you and us, and it is what lets you use Opalro. "You" means the person or organisation using Opalro. "We" and "us" mean Wissam Elmasry. "Opalro" means the program and the documents that come with it.
 
 By installing or using Opalro, you accept this agreement. If you don't accept it, don't install or use Opalro. If you accept it for an organisation, you confirm that you have the right to.
 
 ## 2. What you may do
 
-You may install and run Opalro on the computers you use, for [BLANK: who may use Opalro, and for what], and keep copies of it for your own backups.
+You may install and run Opalro on the computers you use, for your own use as one person, for any purpose, personal or commercial, and keep copies of it for your own backups.
 
 You get permission to use Opalro, not Opalro itself: every right this agreement doesn't give you stays with us.
 
@@ -49,7 +48,7 @@ Opalro is early software, so keep another copy of anything that matters to you. 
 If Opalro causes you a loss, what you can claim from us is limited, as far as the law allows.
 
 - We are not liable for lost or damaged data, lost profits or any indirect loss.
-- In all, we are liable for at most what you paid for Opalro ([BLANK: price]).
+- In all, we are liable for at most what you paid for Opalro (nothing: Opalro 0.1 is free).
 - Nothing here limits what the law doesn't let an agreement limit, such as harm we cause on purpose or by gross negligence, injury, or the rights your own consumer law gives you.
 
 ## 8. Other people's code inside Opalro
@@ -75,7 +74,7 @@ If you send us a problem report or an idea, we may use it to improve Opalro, and
 
 ## 12. The law
 
-The law of [BLANK: country] applies to this agreement, but you keep every right that the consumer law where you live gives you.
+The law of the Province of Quebec, Canada, applies to this agreement, but you keep every right that the consumer law where you live gives you.
 
 ## 13. The whole agreement
 
