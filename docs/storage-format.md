@@ -1,6 +1,6 @@
 # Opalro Storage Format — Draft
 
-> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.1 is released ([decision 121](decisions/121-format-1-freezes-at-v0.1.md) says what that covers and what it promises). Until then anything here may change, and repositories made by development builds are disposable (decision 019).
+> **Status:** repository format 1, frozen since v0.1.0 was published ([decision 121](decisions/121-format-1-freezes-at-v0.1.md) says what that covers and what it promises). It was written during the design phase (2026-10-31), its byte layouts following decisions 004–016 and 019 and the later decisions each section names. Every later Opalro reads what this page describes; anything new on disk comes as a `feature` line or a new format number. Repositories made by development builds before v0.1.0 are not format 1 and are disposable (decision 019).
 
 **In plain words.** This document says exactly which bytes Opalro writes, so any program, or a future version of Opalro, can read an Opalro repository without guessing. Everything Opalro stores is either a piece of file content or a small structured record (a folder listing, a save, a diary entry…). Each one is named by its fingerprint, packed into pack files, and checked against its fingerprint every time it is read.
 
