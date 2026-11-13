@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the v0.1 release: the package)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 140](140-bolt-is-closed-source.md) (people use Bolt under a user agreement)
+- **Refined by:** [decision 156](156-the-user-agreements-blanks-filled-by-the-owner.md) (the owner's four facts filled, and the draft box removed)
 
 ## Context
 
