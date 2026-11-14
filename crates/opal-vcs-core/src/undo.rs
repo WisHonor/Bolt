@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, Position, State};
+use crate::diary::{Action, DiaryEntry, FolderChange, Position, State, TagList};
 use crate::drive::Drive;
 use crate::fsio::Done;
 use crate::history::tip_of;
@@ -345,17 +345,13 @@ fn pick_up(
         let read = repo.store().save(save, repo.signatures_allowed());
         read.map_err(|e| unusable(saves, e.to_string()))?;
     }
-    // The line already says it is the tag list: give damage by the store's own words alone.
-    repo.tag_list(&entry.state).map_err(|e| {
-        let detail = match &e {
-            RepoError::Damaged { detail } => detail
-                .strip_prefix("the project's tag list can't be read: ")
-                .unwrap_or(detail)
-                .to_owned(),
-            _ => e.to_string(),
-        };
-        unusable("its tag list", detail)
-    })?;
+    // Read here rather than through `tag_list`, so the line gives the store's own words.
+    if let Some(id) = entry.state.tags {
+        let tag_list = "its tag list";
+        let bytes = (repo.store().read_record(&id, ObjectKind::TagList))
+            .map_err(|e| unusable(tag_list, e.to_string()))?;
+        TagList::decode(&bytes).map_err(|e| unusable(tag_list, e.to_string()))?;
+    }
     repo.server_lines(&entry.state)
         .map_err(|e| unusable("its server lines", e.to_string()))?;
     // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
