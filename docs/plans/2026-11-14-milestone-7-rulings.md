@@ -6,7 +6,7 @@ The owner asked for v0.2 to be started while they were away, with Claude working
 - **Every ruling, as made:** each ruling as it was written in the build's ledger when it was made, task by task, with its reason and what it costs if it is wrong.
 - **Deferred:** what this milestone left for later, and where each item went.
 
-The decisions themselves are records [157](../decisions/157-v0.2-in-four-milestones.md) to [162](../decisions/162-red-team-m7-rulings.md). Each says "Decided by Claude, at the owner's request while the owner was away. The owner can reverse any part."
+The decisions themselves are records [157](../decisions/157-v0.2-in-four-milestones.md) to [163](../decisions/163-red-team-m7-session-2-rulings.md). Each says "Decided by Claude, at the owner's request while the owner was away. The owner can reverse any part."
 
 **Branch:** `milestone-7`, from `v0.2`. Nothing was merged into `main`, which stays what v0.1 is released from.
 
@@ -23,6 +23,7 @@ The decisions themselves are records [157](../decisions/157-v0.2-in-four-milesto
 9. **Not changed, for you to weigh:** a line or tag named only with the letters k to z (`x`, `try`, `tmp`) can also be the start of a save's change ID, and then `goto` refuses the name as meaning both ([decision 068](../decisions/068-a-goto-target-that-names-both.md)). `line new` makes such names easy now. Counting text as the start of a change ID only from 4 letters on would make short names safe.
 10. **A name that is both a line and a tag, at two saves, is refused** ([162](../decisions/162-red-team-m7-rulings.md)), in `goto`, `show`, `changes --save` and `tag --save`, naming both saves. Only a Git import (a branch and a tag both called `v1`) or a planted project brings such a pair. v0.1 took the line without a word. The way out is to rename the line. The alternatives were to take the line and warn, or to take the tag as Git mostly does.
 11. **The speed gate for `status` is at its limit on Linux, with `main`'s own code too** ([benchmarks.md](../benchmarks.md) §11). Opalro's `status` takes what it took; Git's got about a millisecond quicker on the test machines after their image changed on 2026-11-11, so the ratio there is now 1.84 to 2.15 against your limit of 2. Milestone 7 changed nothing `status` runs. I left the limit alone: it is yours (decisions 128 and 132). `main`'s nightly run can now fail the same way. The choices: speed `status` up (I would do this before v0.2 is released), judge the gate on several runs instead of one, or fix the Git version the gate compares with.
+12. **Two findings of the second red-team session are in v0.1's draft too** ([163](../decisions/163-red-team-m7-session-2-rulings.md)), because they are older than milestone 7. After `opalro show` of a save on another line, the next step it suggests fails. And when a shelf can't be brought back, the hint puts the shelf's stored label inside a command, so a planted project could make a hint that runs something else if pasted. Neither loses data. Both are fixed on `v0.2`. Say if you want them in v0.1 before you publish it.
 
 ## Every ruling, as made
 
@@ -97,6 +98,17 @@ The decisions themselves are records [157](../decisions/157-v0.2-in-four-milesto
 34. Since the fixes, reading a line's name also reads the tag list, so a tag list that can't be read stops `goto <line>` too. That follows from ruling 28 and from "Please confirm" 7, and a test pins it.
 35. The nightly run on milestone 7 failed one job: Linux's speed gate, `status` at 2.029 times Git's time. The red gate doesn't hold milestone 7 back from `v0.2`: on one processor type Opalro's time is the same with and without milestone 7 (13.1 to 13.9 ms against 13.3 to 13.4 ms), and milestone 7 changed nothing `status` runs. Cost if wrong: a real slowdown under a millisecond would hide in this noise. ("Please confirm" 11.)
 
+**The red team's second session (RT18) and its fixes**
+
+36. RT18-1: a save is found by the start of its fingerprint among the saves that lines, server lines and tags reach along first parents (before: lines only), so the IDs the refusal of ruling 28 shows are ones Opalro takes; and the refusal's hints also name the way out (rename the line, or delete the tag). Cost if wrong: a wider search for hex text, and a line named with 8 hex digits is checked against more saves.
+37. RT18-2: when the walk can't read a save behind a holder's own, `line delete` makes one more pass to find the first line, tag or server line whose history holds it, and names it; the deleted line's own history is named when no holder's does. Cost if wrong: about 25 lines on a path only damage reaches.
+38. RT18-3: inside a quoted tag name, `[` and `]` are marked too, so no line's mark can appear inside one.
+39. RT18-4: a save's ID inside a hint's command is its short change ID when the save is on the line the project is on, else 12 hex digits of its fingerprint, decided by asking the resolver; a hint whose ID wouldn't work is left out.
+40. RT18-5: `goto` advises `opalro goto <line>` only when that would go onto the line; otherwise it points at `line rename`.
+41. RT18-6: one rule for every hint: text from the project goes inside a command only when it is plain (a line name's characters, not starting with `-`); anything else is left out or shown as a placeholder. This covers names, labels and paths.
+42. The tag list is read once for one name, not twice (the report's suspicion). A tag list near the largest a record can be still costs about half a gigabyte to read; that is on the follow-ups.
+43. No third red-team session: the fixes are small, each has its proof test, the whole-branch review reads them, and milestone 8's session attacks names and hints again. Cost if wrong: a flaw in these fixes waits for that session.
+
 ## Deferred
 
 Each of these is a row in the [follow-ups](2026-11-01-milestone-1-follow-ups.md), under "Deferred by milestone 7".
@@ -110,4 +122,9 @@ Each of these is a row in the [follow-ups](2026-11-01-milestone-1-follow-ups.md)
 - The questions before moving or deleting a tag don't count the saves only that tag holds, as `line delete`'s question does (for the owner).
 - `status` needs room under its limit again on Linux: a speed pass before v0.2 is released ("Please confirm" 11).
 - The walk on Git's own history was timed in all (17.9 s for 64 questions), not question by question, and not against Git: both before milestone 8 builds on it.
+- A tag list near the largest a record can be costs about half a gigabyte to read for one name; looking a name up needs only the names.
+- The damage message for a tag list that can't be read doesn't say that `opalro undo` may bring the project back.
+- A line whose own history can't be read can't be deleted; that belongs with repair.
+- A save's message can end in text that looks like a line's mark in `history`; with colour on, the real mark is painted and the message isn't (for the owner).
+- The second session checked three attacks by reading the code only: two commands at once, tidying after a deleted line once the undo window has passed, and a planted diary step that also carries a folder change.
 - Smaller points the reviews left: a stored name that starts with `-` needs `--` on the command line, which the guide doesn't show; the tag list is stored again when an undo brings back a list the store already holds; `opalro tag --yes` with no name quietly lists; the model test has no server lines.
