@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Opalro;
 use opal_core::chunks::{Chunk, ChunkList, chunk_len, is_cut};
-use opal_core::diary::{Action, DiaryEntry, State};
+use opal_core::diary::{Action, DiaryEntry, State, Tag, TagList};
 use opal_core::history::current_save;
 use opal_core::id::{ChangeId, ContentHasher, Id, hash_content};
 use opal_core::listing::{Entry, EntryKind, Listing};
@@ -995,6 +995,39 @@ impl Env {
         let repo = Repository::open(self.root()).unwrap();
         let state = repo.current().unwrap().1.state;
         (repo, state)
+    }
+
+    /// Gives the save `at` the tags `names`, in place of the tags there were, written as one step
+    /// through Opalro's own library: names the tag command would refuse too.
+    pub fn plant_tags(&self, names: impl Iterator<Item = String>, at: Id) {
+        let mut repo = Repository::open(self.root()).unwrap();
+        let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let tag = Tag {
+            save: at,
+            message: String::new(),
+            git_tags: vec![],
+        };
+        let list = TagList {
+            tags: names.map(|name| (name, tag.clone())).collect(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.tags = Some(
+            packs
+                .add_record(ObjectKind::TagList, &list.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "tag".into(),
+            who: entry.who,
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
     }
 
     /// `opalro save` with these arguments, whatever happens.

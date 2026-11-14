@@ -1,10 +1,9 @@
 //! `opalro tag`: making, listing, moving and deleting tags.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use opal_core::diary::{Action, DiaryEntry, Position, Tag, TagList};
+use opal_core::diary::Position;
 use opal_core::id::Id;
 use opal_core::journal::Journal;
-use opal_core::pack::ObjectKind;
 use opal_core::repo::Repository;
 
 mod support;
@@ -452,6 +451,58 @@ fn show_and_changes_save_take_a_tags_name() {
 }
 
 #[test]
+fn history_and_show_name_a_saves_tags() {
+    let env = project();
+    let at = tip(&env).to_hex();
+    run(&env, &["tag", "v1.0"], 0);
+    run(&env, &["tag", "release/2026-11"], 0);
+    let (shown, _) = run(&env, &["history"], 0);
+    let first = shown.lines().nth(2).unwrap();
+    assert!(
+        first.ends_with("  [main]  [tag release/2026-11]  [tag v1.0]"),
+        "{shown}"
+    );
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.contains("\n    Line         main\n    Tags         release/2026-11, v1.0\n"),
+        "{shown}"
+    );
+    let listed = json(&env, &["history"], 0);
+    assert_eq!(
+        listed["tags"],
+        serde_json::json!([
+            {"name": "release/2026-11", "save": at},
+            {"name": "v1.0", "save": at},
+        ]),
+        "{listed}"
+    );
+    let shown = json(&env, &["show"], 0);
+    assert_eq!(
+        shown["tags"],
+        serde_json::json!(["release/2026-11", "v1.0"]),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_save_without_tags_shows_no_tags_row() {
+    let (env, a, _) = tagged_then_saved();
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(!shown.contains("Tags"), "{shown}");
+    assert_eq!(json(&env, &["show"], 0)["tags"], serde_json::json!([]));
+    let (shown, _) = run(&env, &["history"], 0);
+    let rows: Vec<&str> = shown.lines().skip(2).collect();
+    assert!(rows[0].ends_with("  [main]"), "{shown}");
+    assert!(rows[1].ends_with("  A  [tag v1]"), "{shown}");
+    let listed = json(&env, &["history"], 0);
+    assert_eq!(
+        listed["tags"],
+        serde_json::json!([{"name": "v1", "save": a.to_hex()}]),
+        "{listed}"
+    );
+}
+
+#[test]
 fn tag_save_takes_a_tags_name() {
     let (env, a, _) = tagged_then_saved();
     let (shown, _) = run(&env, &["tag", "v1-copy", "--save", "v1"], 0);
@@ -459,43 +510,11 @@ fn tag_save_takes_a_tags_name() {
     assert_eq!(tags(&env)[1].1, a);
 }
 
-/// Gives the save `at` the tags `names`, written as one step through Opalro's own library.
-fn plant_tags(env: &Env, names: impl Iterator<Item = String>, at: Id) {
-    let mut repo = Repository::open(env.root()).unwrap();
-    let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
-    let (head, entry) = repo.current().unwrap();
-    let tag = Tag {
-        save: at,
-        message: String::new(),
-        git_tags: vec![],
-    };
-    let list = TagList {
-        tags: names.map(|name| (name, tag.clone())).collect(),
-    };
-    let mut packs = repo.new_packs().unwrap();
-    let mut state = entry.state.clone();
-    state.tags = Some(
-        packs
-            .add_record(ObjectKind::TagList, &list.encode())
-            .unwrap(),
-    );
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: "tag".into(),
-        who: entry.who,
-        opal_version: "0.1.0".into(),
-        state,
-        folder_change: None,
-    };
-    repo.commit(&lock, packs, &diary).unwrap();
-}
-
 #[test]
 fn a_hundred_thousand_tags_are_listed_and_searched_in_time() {
     let (env, a, _) = tagged_then_saved();
     // One short of the most a project holds, so that one more can still be made.
-    plant_tags(&env, (1..100_000).map(|i| format!("v{i:06}")), a);
+    env.plant_tags((1..100_000).map(|i| format!("v{i:06}")), a);
     assert_eq!(tags(&env).len(), 99_999);
     for args in [
         &["tag"][..],

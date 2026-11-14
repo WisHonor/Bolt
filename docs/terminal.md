@@ -301,13 +301,13 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 Saves on line main, newest first:
 
 ▸ ptvz   2 h ago     Ana Lima    Add double jump  [main]
-  kxqmz  3 days ago  Ana Lima    First playable
+  kxqmz  3 days ago  Ana Lima    First playable  [tag v1.0]
   kxqmr  5 days ago  Ben Okafor  Add rock textures
 ```
 
 - **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back. When the first save can't be read, stdout gets nothing, not even the heading; when a later one can't, the rows before it are printed, then the error.
-- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
-- **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line names blue.
+- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is, then `[tag <name>]` for each tag at it, in name order; every tag is listed, however many a save has. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped, the line and tag names too), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
+- **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line and tag names blue.
 
 ### `opalro show`
 
@@ -317,6 +317,7 @@ Save ptvz "Add double jump"
     Author       Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Saved by     Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Line         main
+    Tags         release/2026-11, v1.1
     After        3f9a0c2e7b04 "First playable"
     Fingerprint  d77a81f736da0b96a75602567a49fa760764e22213b6852cda7b6660f926f3ed
 
@@ -330,7 +331,7 @@ Save ptvz "Add double jump"
 
 then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when it changed files.
 
-- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `After` names the save before it by the first 12 hex digits of its fingerprint, and its message (a merge brought in from Git adds the other parents' fingerprints); `opalro show` takes such digits back exactly when some line's history, along first parents, reaches that save: not, say, for a merge's other parent whose Git branch was gone before the import, or for the parent of a save an import left you at past every line (a detached Git `HEAD`), unless another line reaches it; no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
+- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `Tags`, only when the save has tags, names them in name order, in blue like line names; `After` names the save before it by the first 12 hex digits of its fingerprint, and its message (a merge brought in from Git adds the other parents' fingerprints); `opalro show` takes such digits back exactly when some line's history, along first parents, reaches that save: not, say, for a merge's other parent whose Git branch was gone before the import, or for the parent of a save an import left you at past every line (a detached Git `HEAD`), unless another line reaches it; no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `opalro status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
 - **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.

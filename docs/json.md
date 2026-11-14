@@ -502,6 +502,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `opalro_json` | number | `1` |
 | `position` | object | Where the project is, as in `status`: `{"line": …}`, or `{"save": …}` (64 hex digits) when it is at a save instead of on a line. |
 | `saves` | list of save | The saves of the line, newest first, following first parents back to the start. |
+| `tags` | list | Every tag at a listed save, in name order, each `{"name": …, "save": …}`: the tag's name as it is, and its save's fingerprint (64 hex digits). |
 | `warnings` | list | See §4. |
 
 ### `opalro show --json`
@@ -512,6 +513,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 |---|---|---|
 | `opalro_json` | number | `1` |
 | `save` | save | The save shown. |
+| `tags` | list of string | The names of the tags at the save shown, in order, as they are; empty when it has none. |
 | `changes` | list of change | What the save changed compared with its first parent (with all of its files for a save that has none), in the order of the paths. |
 | `warnings` | list | See §4. |
 

@@ -6,20 +6,21 @@ use std::io::{self, Write};
 use crate::style::{self, Role, Sym};
 
 /// A save as `opalro history` lists it, each piece escaped: its change ID, when it was written, by
-/// whom, its message's first line, and the lines whose newest save it is.
+/// whom, its message's first line, the lines whose newest save it is, and its tags.
 pub struct SaveRow {
     pub short: String,
     pub when: String,
     pub author: String,
     pub title: String,
     pub lines: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 impl SaveRow {
     /// The bytes of text it holds.
     fn size(&self) -> usize {
-        let lines: usize = self.lines.iter().map(String::len).sum();
-        self.short.len() + self.when.len() + self.author.len() + self.title.len() + lines
+        let named: usize = self.lines.iter().chain(&self.tags).map(String::len).sum();
+        self.short.len() + self.when.len() + self.author.len() + self.title.len() + named
     }
 }
 
@@ -102,7 +103,7 @@ impl History {
     }
 
     /// A row: the place marker on the first, the save you're at; the message cut at its end on a
-    /// terminal, so that the row and its lines' names fit.
+    /// terminal, so that the row and its lines' and tags' names fit.
     fn write_row(
         &mut self,
         out: &mut dyn Write,
@@ -117,7 +118,16 @@ impl History {
         self.written += 1;
         let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
         let lead = 2 + widths[0] + 2 + widths[1] + 2 + widths[2] + 2;
-        let named: usize = row.lines.iter().map(|l| 4 + style::columns(l)).sum();
+        let named: usize = row
+            .lines
+            .iter()
+            .map(|l| 4 + style::columns(l))
+            .sum::<usize>()
+            + row
+                .tags
+                .iter()
+                .map(|t| 8 + style::columns(t))
+                .sum::<usize>();
         let room = s
             .width
             .map_or(usize::MAX, |w| w.saturating_sub(lead + named));
@@ -133,6 +143,9 @@ impl History {
         );
         for line in &row.lines {
             let _ = write!(text, "  [{}]", s.paint(Role::Line, line));
+        }
+        for tag in &row.tags {
+            let _ = write!(text, "  [tag {}]", s.paint(Role::Line, tag));
         }
         writeln!(out, "{}", text.trim_end())
     }

@@ -1715,6 +1715,12 @@ fn project_text_is_escaped_with_colour_on() {
     assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
     let author = "Ada\\x1b[2J\\u{202e}";
     std::fs::write(env.root().join(name), format!("{TITLE}changed\n")).unwrap();
+    // Only an import brings in a tag named like this; the tag command refuses it.
+    env.plant_tags(
+        std::iter::once(format!("v1{CLEAR}\u{202e}")),
+        support::main_tip(&env),
+    );
+    let shown_tag = "v1\\x1b[2J\\u{202e}";
 
     let said = same_with_colour_on(&env, &["status"], 0);
     assert!(said.contains(shown_name), "{said}");
@@ -1722,9 +1728,11 @@ fn project_text_is_escaped_with_colour_on() {
     let said = same_with_colour_on(&env, &["changes"], 0);
     assert!(said.contains(shown_name), "{said}");
     let said = same_with_colour_on(&env, &["history"], 0);
-    assert!(said.contains(author) && said.contains("\\x1b[2J"), "{said}");
+    for part in [author, "\\x1b[2J", shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
     let said = same_with_colour_on(&env, &["show"], 0);
-    for part in [shown_name, shown_message, author] {
+    for part in [shown_name, shown_message, author, shown_tag] {
         assert!(said.contains(part), "{part}: {said}");
     }
     let said = same_with_colour_on(&env, &["undo", "--list"], 0);

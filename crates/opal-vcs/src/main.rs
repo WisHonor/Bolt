@@ -1388,26 +1388,38 @@ fn history_to(
     json: bool,
     unfinished: Option<Warning>,
 ) -> Result<Vec<Warning>, Failure> {
+    let (_, entry) = repo.current()?;
+    // Each save's tags, found once: an import can bring thousands.
+    let mut tags_at = tags::by_save(repo, &entry.state)?;
     if json {
-        let position = output::position_json(&repo.current()?.1.state.position);
+        let position = output::position_json(&entry.state.position);
+        let listed_tags: RefCell<Vec<(String, Id)>> = RefCell::default();
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
             &format!("{{\"opalro_json\":{OPALRO_JSON},\"position\":{position},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
+                    if let Some(names) = tags_at.remove(id) {
+                        let mut listed = listed_tags.borrow_mut();
+                        listed.extend(names.into_iter().map(|name| (name, *id)));
+                    }
                     each(&output::save_json(id, save, short))
                 })
             },
             || {
+                let mut listed = listed_tags.take();
+                listed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                let tags: Vec<serde_json::Value> = (listed.iter())
+                    .map(|(name, save)| json!({"name": name, "save": save.to_hex()}))
+                    .collect();
                 let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
                 warnings.extend(repo.store().warnings());
-                (json!({}), warnings)
+                (json!({"tags": tags}), warnings)
             },
         );
     }
     let now = now_ms();
-    let (_, entry) = repo.current()?;
     let mut listed = history_output::History::new(match &entry.state.position {
         Position::OnLine(line) => Some(escape(line, false)),
         Position::AtSave(_) => None,
@@ -1424,6 +1436,9 @@ fn history_to(
             author: escape(&s.author.name, false),
             title: escape(s.message.lines().next().unwrap_or_default(), false),
             lines: heads.remove(id).unwrap_or_default(),
+            tags: (tags_at.remove(id).unwrap_or_default().iter())
+                .map(|name| escape(name, false))
+                .collect(),
         };
         listed.add(out, row)?;
         Ok::<(), Failure>(())
@@ -1450,6 +1465,9 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
+    let tags = tags::by_save(repo, &repo.current()?.1.state)?
+        .remove(&id)
+        .unwrap_or_default();
     // Of the parent, only what is shown and the root the walk compares with.
     let (old_root, parent_title) = match save.parents.first() {
         Some(p) => {
@@ -1490,7 +1508,11 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                     warnings.extend(store.warnings());
                     (
-                        json!({"opalro_json": OPALRO_JSON, "save": output::save_json(&id, &save, &short)}),
+                        json!({
+                            "opalro_json": OPALRO_JSON,
+                            "save": output::save_json(&id, &save, &short),
+                            "tags": tags,
+                        }),
                         warnings,
                     )
                 },
@@ -1499,7 +1521,14 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
         shown_as.clone_from(&short);
-        show_output::write_head(&mut out, &id, &save, &short, &parent_title, count, now_ms())?;
+        let head = show_output::Head {
+            id: &id,
+            save: &save,
+            short: &short,
+            parent_title: &parent_title,
+            tags: &tags,
+        };
+        show_output::write_head(&mut out, &head, count, now_ms())?;
         let s = style::out();
         for_each_change(store, old_root, save.root, |c| {
             writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;

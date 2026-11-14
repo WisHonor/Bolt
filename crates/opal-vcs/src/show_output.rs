@@ -10,18 +10,26 @@ use opal_core::text::escape;
 use crate::output;
 use crate::style::{self, Role};
 
-/// Writes the save `id`, shown as `short`, its facts and the rest of its message, then the line
-/// that heads its `count` changes. `parent_title` is its first parent's message's first line,
-/// quoted.
-pub fn write_head(
-    out: &mut dyn Write,
-    id: &Id,
-    save: &Save,
-    short: &str,
-    parent_title: &str,
-    count: usize,
-    now: i64,
-) -> io::Result<()> {
+/// The save `opalro show` shows: `id`, shown as `short`, with its first parent's message's first
+/// line quoted as `parent_title`, and the names of its tags, in order and not yet escaped.
+pub struct Head<'a> {
+    pub id: &'a Id,
+    pub save: &'a Save,
+    pub short: &'a str,
+    pub parent_title: &'a str,
+    pub tags: &'a [String],
+}
+
+/// Writes the save, its facts and the rest of its message, then the line that heads its `count`
+/// changes.
+pub fn write_head(out: &mut dyn Write, head: &Head, count: usize, now: i64) -> io::Result<()> {
+    let Head {
+        id,
+        save,
+        short,
+        parent_title,
+        tags,
+    } = *head;
     let s = style::out();
     let person = |p: &Person| {
         let ago = output::relative_time(p.time_ms, p.tz_offset_min, now);
@@ -45,6 +53,12 @@ pub fn write_head(
         s.paint(Role::Line, &escape(line, false))
     });
     writeln!(out, "    Line         {line}")?;
+    if !tags.is_empty() {
+        let names: Vec<String> = (tags.iter())
+            .map(|t| s.paint(Role::Line, &escape(t, false)))
+            .collect();
+        writeln!(out, "    Tags         {}", names.join(", "))?;
+    }
     // By fingerprint: shortening a change ID for it could read the whole line.
     // A merge brought in from Git has more than one; the first is the one compared with.
     let mut named = save
