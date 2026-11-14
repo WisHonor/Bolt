@@ -524,6 +524,7 @@ fn history_json_leaves_out_a_tag_off_the_listed_line() {
 #[test]
 fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
     let env = project();
+    let at = tip(&env);
     // The state names a tag list that no pack holds.
     let mut repo = Repository::open(env.root()).unwrap();
     let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
@@ -543,15 +544,24 @@ fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
     repo.commit(&lock, packs, &diary).unwrap();
     drop(lock);
     drop(repo);
-    for command in ["history", "show"] {
-        let (shown, said) = run(&env, &[command], 1);
-        assert_eq!(shown, "", "{command}: {said}");
-        assert!(said.starts_with("error: "), "{command}: {said}");
-        assert!(said.contains(" is not in the store"), "{command}: {said}");
-        let doc = json(&env, &[command], 1);
+    let damaged = "This project's Opalro data looks damaged: the project's tag list can't be read: \
+                   object ";
+    let hint = "Nothing was changed. Ask for help before trying to repair it.";
+    let id = at.to_hex();
+    for args in [&["history"][..], &["show"], &["goto", &id[..12]], &["tag"]] {
+        let (shown, said) = run(&env, args, 1);
+        assert_eq!(shown, "", "{args:?}: {said}");
+        assert!(
+            said.starts_with(&format!("error: {damaged}")),
+            "{args:?}: {said}"
+        );
+        assert!(said.contains(" is not in the store.\n"), "{args:?}: {said}");
+        assert!(said.contains(&format!("hint: {hint}")), "{args:?}: {said}");
+        let doc = json(&env, args, 1);
         let told = doc["error"]["message"].as_str().unwrap();
-        assert!(told.contains(" is not in the store"), "{command}: {doc}");
-        assert_eq!(doc.get("saves"), None, "{command}: {doc}");
+        assert!(told.starts_with(damaged), "{args:?}: {doc}");
+        assert_eq!(doc["error"]["hint"], hint, "{args:?}: {doc}");
+        assert_eq!(doc.get("saves"), None, "{args:?}: {doc}");
     }
 }
 

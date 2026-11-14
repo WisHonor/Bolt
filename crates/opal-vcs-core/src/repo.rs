@@ -1579,9 +1579,20 @@ impl Repository {
         let Some(id) = state.tags else {
             return Ok(TagList::default());
         };
-        Ok(TagList::decode(
-            &self.store.read_record(&id, ObjectKind::TagList)?,
-        )?)
+        let unreadable = |e: &dyn std::fmt::Display| {
+            damaged(format!("the project's tag list can't be read: {e}"))
+        };
+        let bytes = match self.store.read_record(&id, ObjectKind::TagList) {
+            Ok(bytes) => bytes,
+            Err(
+                e @ (StoreError::Missing(_)
+                | StoreError::WrongKind { .. }
+                | StoreError::Decode(_)
+                | StoreError::Pack(PackError::FingerprintMismatch { .. })),
+            ) => return Err(unreadable(&e)),
+            Err(e) => return Err(e.into()),
+        };
+        TagList::decode(&bytes).map_err(|e| unreadable(&e))
     }
 
     /// The server lines of `state`; empty if it has none.
@@ -2067,20 +2078,20 @@ mod tests {
         let mut state = repo.current().unwrap().1.state;
         // Each pointer at the other record.
         (state.tags, state.server_lines) = (Some(r), Some(t));
-        assert!(matches!(
-            repo.tag_list(&state),
-            Err(RepoError::Store(StoreError::WrongKind { .. }))
-        ));
+        let tag_list_damaged = |repo: &Repository, state: &State| match repo.tag_list(state) {
+            Err(RepoError::Damaged { detail }) => {
+                detail.starts_with("the project's tag list can't be read: ")
+            }
+            _ => false,
+        };
+        assert!(tag_list_damaged(&repo, &state));
         assert!(matches!(
             repo.server_lines(&state),
             Err(RepoError::Store(StoreError::WrongKind { .. }))
         ));
         // A record that was never stored.
         (state.tags, state.server_lines) = (Some(Id([9; 32])), Some(Id([9; 32])));
-        assert!(matches!(
-            repo.tag_list(&state),
-            Err(RepoError::Store(StoreError::Missing(_)))
-        ));
+        assert!(tag_list_damaged(&repo, &state));
         assert!(matches!(
             repo.server_lines(&state),
             Err(RepoError::Store(StoreError::Missing(_)))
@@ -2088,7 +2099,7 @@ mod tests {
         // Records with the right fingerprints that break the format: neither may be empty.
         commit_records(&mut repo, &TagList::default(), &ServerLines::default());
         let state = repo.current().unwrap().1.state;
-        assert!(matches!(repo.tag_list(&state), Err(RepoError::Decode(_))));
+        assert!(tag_list_damaged(&repo, &state));
         assert!(matches!(
             repo.server_lines(&state),
             Err(RepoError::Decode(_))
