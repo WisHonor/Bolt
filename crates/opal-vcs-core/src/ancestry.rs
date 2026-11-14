@@ -274,8 +274,15 @@ mod tests {
             tip in any::<prop::sample::Index>(),
             others in prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
             clock in prop_oneof![Just(Clock::Forwards), Just(Clock::Random), Just(Clock::Backwards)],
+            // Random times of a chain of new saves after the tip, its last one held by the others.
+            under in prop::option::of(prop::collection::vec(0..1000i64, 1..=3)),
         ) {
-            let parents: Vec<Vec<usize>> = shape
+            let dated = |n: usize, t: i64| match clock {
+                Clock::Forwards => n as i64,
+                Clock::Random => t,
+                Clock::Backwards => -(n as i64),
+            };
+            let mut parents: Vec<Vec<usize>> = shape
                 .iter()
                 .enumerate()
                 .map(|(n, (picks, _))| {
@@ -286,21 +293,23 @@ mod tests {
                     set.into_iter().collect()
                 })
                 .collect();
-            let saves: Vec<(Vec<usize>, i64)> = parents
+            let mut saves: Vec<(Vec<usize>, i64)> = parents
                 .iter()
                 .zip(&shape)
                 .enumerate()
-                .map(|(n, (p, (_, t)))| {
-                    let time = match clock {
-                        Clock::Forwards => n as i64,
-                        Clock::Random => *t,
-                        Clock::Backwards => -(n as i64),
-                    };
-                    (p.clone(), time)
-                })
+                .map(|(n, (p, (_, t)))| (p.clone(), dated(n, *t)))
                 .collect();
             let tip = tip.index(saves.len());
-            let others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
+            let mut others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
+            if let Some(times) = under {
+                let mut parent = tip;
+                for t in times {
+                    parents.push(vec![parent]);
+                    saves.push((vec![parent], dated(saves.len(), t)));
+                    parent = saves.len() - 1;
+                }
+                others.push(parent);
+            }
 
             let mine = ancestors(&parents, &[tip]);
             let theirs = ancestors(&parents, &others);
