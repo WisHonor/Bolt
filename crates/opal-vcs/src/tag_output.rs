@@ -48,11 +48,17 @@ pub fn made(tag: &str, at: &str) -> String {
     format!("{word} save {at} as {}.\n", named(s, tag))
 }
 
-/// What `opalro tag <name>` said when the tag was there already.
-pub fn already(tag: &str, at: &str) -> String {
+/// What `opalro tag <name>` said when the tag was there already; `message_given` when a message
+/// was typed, which the tag didn't take.
+pub fn already(tag: &str, at: &str, message_given: bool) -> String {
+    let s = style::out();
+    let text = format!("Tag {} is already at save {at}.\n", named(s, tag));
+    if !message_given {
+        return text;
+    }
     format!(
-        "Tag {} is already at save {at}.\n",
-        named(style::out(), tag)
+        "{text}\n{}\n",
+        s.detail(None, "Its message was left as it is.")
     )
 }
 

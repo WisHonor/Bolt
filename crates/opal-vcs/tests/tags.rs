@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::id::Id;
+use opal_core::journal::Journal;
 use opal_core::repo::Repository;
 
 mod support;
@@ -155,6 +156,21 @@ fn tagging_the_same_save_twice_says_already() {
 }
 
 #[test]
+fn a_message_for_a_tag_already_there_is_left_as_it_is() {
+    let env = project();
+    run(&env, &["tag", "v1", "First"], 0);
+    let before = env.standing();
+    let (shown, _) = run(&env, &["tag", "v1", "Other"], 0);
+    assert!(shown.starts_with("Tag v1 is already at save "), "{shown}");
+    assert!(
+        shown.ends_with(" \"A\".\n\n    Its message was left as it is.\n"),
+        "{shown}"
+    );
+    assert_eq!(env.standing(), before);
+    assert_eq!(tags(&env)[0].2, "First");
+}
+
+#[test]
 fn moving_a_tag_without_a_terminal_stops_and_names_yes() {
     let (env, a, _) = tagged_then_saved();
     let before = env.standing();
@@ -192,6 +208,8 @@ fn tag_yes_moves_it() {
     let (shown, _) = run(&env, &["tag", "v1", "--yes"], 0);
     assert!(shown.starts_with("Moved tag v1 to save "), "{shown}");
     assert!(shown.contains(" \"B\". It was at save "), "{shown}");
+    // The old save by its ID alone.
+    assert!(!shown.contains("\"A\""), "{shown}");
     assert_eq!(tags(&env)[0].1, b);
     run(&env, &["undo"], 0);
     assert_eq!(tags(&env)[0].1, a);
@@ -221,9 +239,12 @@ fn moving_a_tag_asks_in_a_terminal() {
     let (env, a, b) = tagged_then_saved();
     let before = env.standing();
     // With --json, even at a terminal, nothing is asked.
-    let (code, _, said) = asked(&env, &["tag", "v1", "--json"], "y\n");
+    let (code, shown, said) = asked(&env, &["tag", "v1", "--json"], "y\n");
     assert_eq!(code, Some(1), "{said}");
     assert!(!said.contains("Move it"), "{said}");
+    let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.ends_with("move it with --json."), "{doc}");
     let (code, shown, said) = asked(&env, &["tag", "v1"], "n\n");
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(shown, "Nothing was changed.\n");
@@ -244,6 +265,16 @@ fn deleting_a_tag_asks_in_a_terminal() {
     let env = project();
     run(&env, &["tag", "v1"], 0);
     let before = env.standing();
+    // With --json, even at a terminal, nothing is asked.
+    let (code, shown, said) = asked(&env, &["tag", "--delete", "v1", "--json"], "y\n");
+    assert_eq!(code, Some(1), "{said}");
+    assert!(!said.contains("Delete tag"), "{said}");
+    let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(
+        doc["error"]["message"],
+        "Opalro asks before it deletes a tag, and can't with --json."
+    );
+    assert_eq!(env.standing(), before);
     let (code, shown, said) = asked(&env, &["tag", "--delete", "v1"], "n\n");
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(shown, "Nothing was changed.\n");
@@ -332,6 +363,62 @@ fn an_imported_tags_name_and_message_are_escaped() {
     let (shown, _) = run(&env, &["tag"], 0);
     assert!(shown.contains("\"Red \\x1b[31mhere\"\n"), "{shown}");
     assert!(!shown.contains("Second line"), "{shown}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_imported_tags_questions_are_escaped() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    let name = "v1\u{202e}ateb";
+    env.git(&["tag", "-a", name, "-m", "Red \u{1b}[31mhere"]);
+    env.import();
+    let (code, shown, said) = asked(&env, &["tag", "--delete", name], "n\n");
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        said.starts_with("Delete tag v1\\u{202e}ateb, at save "),
+        "{said}"
+    );
+    support::assert_escaped(&(shown + &said), "the delete question");
+    env.overwrite("a.txt", "b");
+    run(&env, &["save", "B"], 0);
+    let (code, shown, said) = asked(&env, &["tag", name], "n\n");
+    assert_eq!(code, Some(0), "{said}");
+    assert!(
+        said.starts_with("Tag v1\\u{202e}ateb is at save "),
+        "{said}"
+    );
+    assert!(said.contains("Move it to save "), "{said}");
+    support::assert_escaped(&(shown + &said), "the move question");
+}
+
+#[test]
+fn a_tag_step_after_a_stopped_goto_finishes_it_first() {
+    let env = Env::empty();
+    run(&env, &["start", "--preset", "custom"], 0);
+    let first = Repository::open(env.root()).unwrap().head().unwrap();
+    env.overwrite("a.txt", "a");
+    run(&env, &["save", "A"], 0);
+    let saved = tip(&env);
+    // Back as a goto to the save "A" that stopped before `head` moved would leave it.
+    let mut repo = Repository::open(env.root()).unwrap();
+    let second = repo.head().unwrap();
+    let lock = repo.lock_for_change("goto", &mut |_| {}).unwrap();
+    repo.move_head_to(&lock, first).unwrap();
+    let journal = Journal {
+        target: second,
+        from: first,
+        actions: vec![],
+    };
+    journal.write(&repo, &lock).unwrap();
+    drop(lock);
+    drop(repo);
+    let out = env.opalro().args(["tag", "v1", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["warnings"][0]["kind"], "switch_finished", "{doc}");
+    assert_eq!(tags(&env)[0].1, saved);
+    assert!(!env.root().join(".opalro/state/journal").exists());
 }
 
 /// `opalro args --json`, which must succeed; its document, masked.

@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -1710,10 +1710,9 @@ fn tag_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(), F
 
 /// What `tags::tag` and `tags::delete_tag` call before they move or delete a tag: yes with
 /// `--yes`, no where Opalro can't ask, and otherwise the answer, noting in `asked` that it asked.
-/// The saves are named through `reader`, as the engine holds the project while it asks.
 fn tag_confirm<'a>(
     yes: bool,
-    reader: &'a Repository,
+    root: &'a Path,
     asked: &'a Cell<bool>,
     noticed: &'a mut Vec<Warning>,
 ) -> impl FnMut(&Ask<'_>) -> bool + 'a {
@@ -1722,15 +1721,20 @@ fn tag_confirm<'a>(
             return yes;
         }
         asked.set(true);
-        ask_about_tag(reader, ask, noticed)
+        ask_about_tag(root, ask, noticed)
     }
 }
 
-/// Asks in the terminal whether to move or delete a tag.
-fn ask_about_tag(repo: &Repository, ask: &Ask<'_>, noticed: &mut Vec<Warning>) -> bool {
+/// Asks in the terminal whether to move or delete a tag. The engine holds the project while it
+/// asks, so the saves are named through a look of their own, opened now that the lock is held.
+fn ask_about_tag(root: &Path, ask: &Ask<'_>, noticed: &mut Vec<Warning>) -> bool {
     let e = style::err();
+    let reader = Repository::open_untouched(root).ok();
     let mut at = |id: &Id| {
-        let (short, title) = named_save(repo, id, noticed);
+        let (short, title) = match &reader {
+            Some(repo) => named_save(repo, id, noticed),
+            None => (id.short_hex(), None),
+        };
         match title {
             Some(title) => format!(
                 "{} \"{}\"",
@@ -1753,6 +1757,9 @@ fn ask_about_tag(repo: &Repository, ask: &Ask<'_>, noticed: &mut Vec<Warning>) -
         ),
     };
     let _ = write!(std::io::stderr(), "{question}");
+    if let Some(repo) = &reader {
+        noticed.extend(repo.store().warnings());
+    }
     answered_yes()
 }
 
@@ -1776,15 +1783,19 @@ fn tag_command(
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
     let save = save.map(|text| resolve(repo, text)).transpose()?;
-    let reader = Repository::open_untouched(repo.root())?;
+    let root = repo.root().to_owned();
     let (asked, mut noticed) = (Cell::new(false), Vec::new());
-    let mut confirm = tag_confirm(yes, &reader, &asked, &mut noticed);
+    let mut confirm = tag_confirm(yes, &root, &asked, &mut noticed);
     let done = tags::tag(repo, name, message, save, &who, &mut waiting, &mut confirm);
     drop(confirm);
     let (tagged, mut warnings) = match done {
         Err(TagError::NotMoved { .. }) if asked.get() => return nothing_changed(repo, noticed),
         Err(TagError::NotMoved { name, from, .. }) => {
-            let (was, _) = named_save(repo, &from, &mut Vec::new());
+            let mut found = Vec::new();
+            let (was, _) = named_save(repo, &from, &mut found);
+            for warning in found {
+                repo.store().note(warning);
+            }
             return Err(Failure {
                 message: format!(
                     "Tag {} is at another save, {was}, and Opalro can't ask whether to move it {}.",
@@ -1807,17 +1818,24 @@ fn tag_command(
         Tagged::Already { save } => {
             let (save, at) = save_named(repo, &save, &mut warnings);
             let document = json!({"tag": name, "save": save, "moved_from": null, "changed": false});
-            (document, tag_output::already(name, &at), false)
+            (
+                document,
+                tag_output::already(name, &at, message.is_some()),
+                false,
+            )
         }
         Tagged::Moved { from, to } => {
             let (save, at) = save_named(repo, &to, &mut warnings);
-            let (_, was) = save_named(repo, &from, &mut warnings);
+            // The old save by its ID alone.
+            let was = match named_save(repo, &from, &mut warnings) {
+                (short, Some(_)) => style::out().paint(style::Role::ChangeId, &short),
+                (short, None) => goto_output::at_save(&short, None),
+            };
             let document =
                 json!({"tag": name, "save": save, "moved_from": from.to_hex(), "changed": true});
             (document, tag_output::moved(name, &at, &was), true)
         }
     };
-    warnings.extend(reader.store().warnings());
     warnings.extend(repo.store().warnings());
     print_step(json, document, text, &warnings, recorded)
 }
@@ -1833,9 +1851,9 @@ fn tag_delete_command(
         &std::env::current_dir()?,
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
-    let reader = Repository::open_untouched(repo.root())?;
+    let root = repo.root().to_owned();
     let (asked, mut noticed) = (Cell::new(false), Vec::new());
-    let mut confirm = tag_confirm(yes, &reader, &asked, &mut noticed);
+    let mut confirm = tag_confirm(yes, &root, &asked, &mut noticed);
     let done = tags::delete_tag(repo, name, &who, &mut waiting, &mut confirm);
     drop(confirm);
     let (save, mut warnings) = match done {
@@ -1857,7 +1875,6 @@ fn tag_delete_command(
     };
     warnings.extend(noticed);
     let (document_save, at) = save_named(repo, &save, &mut warnings);
-    warnings.extend(reader.store().warnings());
     warnings.extend(repo.store().warnings());
     let document = json!({"tag": name, "save": document_save});
     print_step(

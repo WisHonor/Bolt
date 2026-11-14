@@ -416,6 +416,7 @@ On the server (origin):
 |---|---|---|
 | Made | `Tagged save <id> "<message>" as <tag>.` | `Changed your mind? opalro undo` |
 | Already there | `Tag <tag> is already at save <id> "<message>".` | |
+| Already there, with a message typed | `Tag <tag> is already at save <id> "<message>".`, then the detail `Its message was left as it is.` | |
 | Moved | `Moved tag <tag> to save <id> "<message>". It was at save <old id>.` | `Changed your mind? opalro undo` |
 | Deleted | `Deleted tag <tag>, which was at save <id> "<message>".` | `Changed your mind? opalro undo` |
 | A question answered no | `Nothing was changed.` | |
