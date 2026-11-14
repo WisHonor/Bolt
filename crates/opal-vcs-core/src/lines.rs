@@ -258,10 +258,7 @@ pub(crate) fn check_new_name(
 ) -> Result<(), NameError> {
     validate_line_name(name).map_err(|e| NameError::Bad {
         name: name.to_owned(),
-        reason: match e {
-            DecodeError::Invalid(reason) => reason.to_owned(),
-            _ => "it breaks the rules for line names".to_owned(),
-        },
+        reason: name_reason(e, "a line name"),
     })?;
     // No two lines are alike, so the one found is the only one.
     if let Some(taken) = line_named_alike(&state.lines, name)
@@ -278,6 +275,17 @@ pub(crate) fn check_new_name(
         });
     }
     Ok(())
+}
+
+/// Why `validate_line_name` refused a name, calling the name `called` ("a line name", say).
+pub(crate) fn name_reason(e: DecodeError, called: &str) -> String {
+    match e {
+        DecodeError::Invalid(reason) => match reason.strip_prefix("a line name") {
+            Some(rest) => format!("{called}{rest}"),
+            None => reason.to_owned(),
+        },
+        _ => format!("it breaks the rules for {called}"),
+    }
 }
 
 /// Runs `f` under the lock for changes once a stopped switch is finished. What finishing left to

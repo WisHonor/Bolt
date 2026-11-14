@@ -6,10 +6,9 @@ use crate::diary::{
     Action, DiaryEntry, MAX_TAG_MESSAGE_BYTES, MAX_TAGS, State, Tag, TagList, fold_line_name,
     validate_line_name,
 };
-use crate::encoding::DecodeError;
 use crate::history::tip_of;
 use crate::id::Id;
-use crate::lines::{step, told};
+use crate::lines::{name_reason, step, told};
 use crate::pack::ObjectKind;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
@@ -199,10 +198,7 @@ pub fn by_save(repo: &Repository, state: &State) -> Result<HashMap<Id, Vec<Strin
 fn check_new_name(list: &TagList, state: &State, name: &str) -> Result<(), TagError> {
     validate_line_name(name).map_err(|e| TagError::BadName {
         name: name.to_owned(),
-        reason: match e {
-            DecodeError::Invalid(reason) => reason.to_owned(),
-            _ => "it breaks the rules for tag names".to_owned(),
-        },
+        reason: name_reason(e, "a tag's name"),
     })?;
     let folded = fold_line_name(name);
     if let Some(taken) = list.tags.keys().find(|t| fold_line_name(t) == folded) {
@@ -413,10 +409,10 @@ mod tests {
 
         let bad = tagged(&mut repo, "v 1", None, None, true).0.unwrap_err();
         assert!(matches!(bad, TagError::BadName { .. }), "{bad:?}");
-        assert!(
-            bad.to_string()
-                .starts_with("\"v 1\" can't be a tag's name: "),
-            "{bad}"
+        assert_eq!(
+            bad.to_string(),
+            "\"v 1\" can't be a tag's name: a tag's name can only hold letters, digits, -, _, . \
+             and /."
         );
         assert_eq!(
             bad.hint().as_deref(),
