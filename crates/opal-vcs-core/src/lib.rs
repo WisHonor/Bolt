@@ -1,6 +1,7 @@
 //! Opalro's engine library: objects, storage and history. No `unsafe` code is allowed here.
 #![forbid(unsafe_code)]
 
+pub mod ancestry;
 pub mod changeids;
 pub mod changes;
 pub mod chunks;
