@@ -546,7 +546,7 @@ Each row is the change ID, when the save was made, who made it, and the first li
 
 ### `opalro goto`
 
-Go to another line or save. Name a line, a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint. A tag takes you to its save, not onto a line.
+Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint. A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or rename the line.
 
 ```sh
 opalro goto main
@@ -659,7 +659,7 @@ On the server (origin):
   main@origin
 ```
 
-`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw.
+`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw. Type one as it is listed (`opalro goto main@origin`, `opalro show main@origin`) to reach its save.
 
 `opalro line new` starts a new line at the save you're on and moves you onto it; your files stay as they are. `opalro line rename` renames a line, and `opalro line delete` deletes one; `opalro undo` takes back each of them.
 
@@ -778,7 +778,7 @@ opalro save "Add a draft"
 
 ### `opalro show`
 
-Show everything about one save: the one you're at, or one you name by line, tag, change ID or fingerprint.
+Show everything about one save: the one you're at, or one you name as `opalro goto` takes it: by line, server line, tag, change ID or fingerprint.
 
 ```sh
 opalro show
@@ -1151,6 +1151,7 @@ Next: look around with: opalro status
 
 - **In place.** It makes `.opalro` next to `.git`, in the same folder. It never changes the Git repository, never runs Git, and never goes online.
 - **What comes along:** every commit, exactly, as a save; your branches as lines; each server's branches, as Git last saw them, as server lines (`main@origin`); and tags. Names Opalro doesn't allow are renamed by a fixed rule, and the summary lists them. You end up where Git was: on its current branch's line, or at the save of a detached `HEAD`, where saving asks for a new line's name.
+- **A branch and a tag of one name.** Git lets a branch and a tag share a name (a release branch and a tag both called `v1`, say), and the import keeps both. If they point at different commits, Opalro won't guess which you mean: `opalro goto v1` stops, showing both saves' IDs. Type the ID you want, or give the line another name with `opalro line rename v1 v1-branch`; then `v1` means the tag.
 - **Work you hadn't committed** isn't refused: it shows as unsaved changes and goes into your next save.
 - **Ignore rules** carry over by themselves, since Opalro reads `.gitignore` files.
 - **Git LFS files** come in as ordinary files, read from `.git/lfs/objects`, which must hold every version the history names. Opalro never downloads them: first run `git lfs fetch --all`.

@@ -573,6 +573,112 @@ fn tag_save_takes_a_tags_name() {
     assert_eq!(tags(&env)[1].1, a);
 }
 
+/// An imported project with `main` at "two" and `main@origin` at "one", that save given.
+/// `before` runs in Git just before the import.
+fn with_a_server_line(before: impl FnOnce(&Env)) -> (Env, Id) {
+    let env = Env::new();
+    let one = env.commit("a.txt", "one", "one");
+    env.commit("a.txt", "two", "two");
+    env.git(&["update-ref", "refs/remotes/origin/main", &one]);
+    before(&env);
+    env.import();
+    let (repo, state) = env.state();
+    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    (env, server)
+}
+
+#[test]
+fn show_changes_and_tag_save_take_a_server_line() {
+    let (env, server) = with_a_server_line(|_| {});
+    let shown = json(&env, &["show", "main@origin"], 0);
+    assert_eq!(shown["save"]["id"], server.to_hex(), "{shown}");
+    let (changed, _) = run(&env, &["changes", "--save", "main@origin"], 0);
+    assert!(changed.contains("a.txt"), "{changed}");
+    let (shown, _) = run(&env, &["tag", "v2", "--save", "main@origin"], 0);
+    assert!(shown.ends_with(" \"one\" as v2.\n"), "{shown}");
+    assert_eq!(tags(&env)[0].1, server);
+}
+
+/// Each of goto, show, changes --save and tag --save refuses `name` with `message` and `hint`,
+/// in text and in JSON, and changes nothing.
+fn refused_everywhere(env: &Env, name: &str, message: &str, hint: &str) {
+    let before = env.standing();
+    let commands = [
+        &["goto", name][..],
+        &["show", name],
+        &["changes", "--save", name],
+        &["tag", "rel-1", "--save", name],
+    ];
+    for args in commands {
+        let (shown, said) = run(env, args, 1);
+        assert_eq!(shown, "", "{args:?}");
+        assert!(
+            said.contains(&format!("error: {message}\n")),
+            "{args:?}: {said}"
+        );
+        assert!(
+            said.contains(&format!("hint: {hint}\n")),
+            "{args:?}: {said}"
+        );
+        let doc = json(env, args, 1);
+        assert_eq!(doc["error"]["message"], message, "{args:?}: {doc}");
+        assert_eq!(doc["error"]["hint"], hint, "{args:?}: {doc}");
+    }
+    assert_eq!(env.standing(), before);
+}
+
+fn hex12(id: Id) -> String {
+    id.to_hex()[..12].to_owned()
+}
+
+#[test]
+fn a_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
+    let env = Env::new();
+    let first = env.commit("a.txt", "one", "one");
+    env.git(&["tag", "v1.0", &first]);
+    env.commit("a.txt", "two", "two");
+    env.git(&["branch", "v1.0"]);
+    env.import();
+    let (repo, state) = env.state();
+    let tag = repo.tag_list(&state).unwrap().tags["v1.0"].save;
+    let line = state.lines["v1.0"];
+    drop(repo);
+    let message = format!(
+        "\"v1.0\" is the name of a line and also of a tag at another save (line {}, tag {}), so \
+         Opalro didn't pick either.",
+        hex12(line),
+        hex12(tag)
+    );
+    let hint = "To reach one of them, type its ID as shown here. To reach the line by another \
+                name: opalro line rename <old> <new>";
+    refused_everywhere(&env, "v1.0", &message, hint);
+    // The way out: the line's own commands take its name as a line's.
+    run(&env, &["line", "rename", "v1.0", "v1.0-line"], 0);
+    run(&env, &["goto", "v1.0"], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(tag));
+    run(&env, &["goto", "v1.0-line"], 0);
+    assert_eq!(env.state().1.position, Position::OnLine("v1.0-line".into()));
+}
+
+#[test]
+fn a_server_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
+    let (env, server) = with_a_server_line(|env| drop(env.git(&["tag", "main@origin", "main"])));
+    let tag = tags(&env)[0].1;
+    assert_ne!(tag, server);
+    let message = format!(
+        "\"main@origin\" is the name of a server line and also of a tag at another save (server \
+         line {}, tag {}), so Opalro didn't pick either.",
+        hex12(server),
+        hex12(tag)
+    );
+    refused_everywhere(
+        &env,
+        "main@origin",
+        &message,
+        "To reach one of them, type its ID as shown here.",
+    );
+}
+
 #[test]
 fn a_hundred_thousand_tags_are_listed_and_searched_in_time() {
     let (env, a, _) = tagged_then_saved();

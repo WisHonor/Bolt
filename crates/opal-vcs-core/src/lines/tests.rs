@@ -322,11 +322,13 @@ fn deleting_asks_only_when_nothing_else_holds_the_saves() {
     assert!(asked.is_empty());
 }
 
-#[test]
-fn a_server_line_holds_a_line_too() {
-    let (_dir, mut repo, _, two) = two_of_its_own();
+/// Gives server `origin` the line `line` at `save`, and no other.
+fn server_line(repo: &mut Repository, line: &str, save: Id) {
     let servers = ServerLines {
-        servers: BTreeMap::from([("origin".to_owned(), BTreeMap::from([("b".to_owned(), two)]))]),
+        servers: BTreeMap::from([(
+            "origin".to_owned(),
+            BTreeMap::from([(line.to_owned(), save)]),
+        )]),
     };
     let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
     let (head, mut entry) = repo.current().unwrap();
@@ -337,7 +339,27 @@ fn a_server_line_holds_a_line_too() {
     entry.parent = Some(head);
     entry.state.server_lines = Some(id);
     repo.commit(&lock, packs, &entry).unwrap();
-    drop(lock);
+}
+
+/// A tag list with each of `tags`.
+fn tags(tags: &[(&str, Id)]) -> TagList {
+    let tag = |save| Tag {
+        save,
+        message: String::new(),
+        git_tags: vec![],
+    };
+    TagList {
+        tags: tags
+            .iter()
+            .map(|(n, s)| ((*n).to_owned(), tag(*s)))
+            .collect(),
+    }
+}
+
+#[test]
+fn a_server_line_holds_a_line_too() {
+    let (_dir, mut repo, _, two) = two_of_its_own();
+    server_line(&mut repo, "b", two);
     let (done, asked) = deleted(&mut repo, "b", true);
     assert_eq!(done.unwrap().only_here, 0);
     assert!(asked.is_empty());
@@ -371,6 +393,128 @@ fn a_no_keeps_the_line() {
         Some("To delete it anyway: opalro line delete b --yes")
     );
     assert_eq!(repo.head().unwrap(), head);
+}
+
+fn hex12(id: Id) -> String {
+    id.to_hex()[..12].to_owned()
+}
+
+#[test]
+fn a_server_line_is_read_in_the_same_order_by_resolve() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    server_line(&mut repo, "main", two);
+    assert_eq!(resolve(&repo, "main@origin").unwrap(), two);
+    let on_server = Target::ServerLine {
+        server: "origin".into(),
+        line: "main".into(),
+        save: two,
+    };
+    assert_eq!(resolve_target(&repo, "main@origin").unwrap(), on_server);
+    // A tag of the same name at the same save: the server line.
+    set(&mut repo, Some(&tags(&[("main@origin", two)])), |_| {});
+    assert_eq!(resolve_target(&repo, "main@origin").unwrap(), on_server);
+    // A tag holding `@` that no server line has is just the tag.
+    set(&mut repo, Some(&tags(&[("b@origin", start)])), |_| {});
+    assert_eq!(resolve(&repo, "b@origin").unwrap(), start);
+    assert_eq!(
+        resolve_target(&repo, "b@origin").unwrap(),
+        Target::Save(start)
+    );
+}
+
+#[test]
+fn a_name_found_at_several_levels_is_the_first_in_order() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    // `b` is a line and a tag at the line's save, `rel-1` a tag alone.
+    set(
+        &mut repo,
+        Some(&tags(&[("b", two), ("rel-1", start)])),
+        |_| {},
+    );
+    assert_eq!(
+        resolve_target(&repo, "b").unwrap(),
+        Target::Line("b".into())
+    );
+    assert_eq!(resolve(&repo, "b").unwrap(), two);
+    assert_eq!(resolve_target(&repo, "rel-1").unwrap(), Target::Save(start));
+}
+
+#[test]
+fn a_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    set(&mut repo, Some(&tags(&[("b", start)])), |_| {});
+    let refused = resolve(&repo, "b").unwrap_err();
+    assert!(
+        matches!(&refused, ResolveError::LineOrTag { line, tag, .. }
+            if *line == hex12(two) && *tag == hex12(start)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "\"b\" is the name of a line and also of a tag at another save (line {}, tag {}), so \
+             Opalro didn't pick either.",
+            hex12(two),
+            hex12(start)
+        )
+    );
+    assert_eq!(
+        refused.hint().unwrap(),
+        "To reach one of them, type its ID as shown here. To reach the line by another name: \
+         opalro line rename <old> <new>"
+    );
+    assert!(matches!(
+        resolve_target(&repo, "b"),
+        Err(ResolveError::LineOrTag { .. })
+    ));
+    // Renaming the line is the way out; its own commands take its name as a line's.
+    renamed(&mut repo, Some("b"), "b-line").unwrap();
+    assert_eq!(resolve(&repo, "b").unwrap(), start);
+    assert_eq!(resolve(&repo, "b-line").unwrap(), two);
+}
+
+#[test]
+fn a_server_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    server_line(&mut repo, "main", two);
+    set(&mut repo, Some(&tags(&[("main@origin", start)])), |_| {});
+    let refused = resolve(&repo, "main@origin").unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "\"main@origin\" is the name of a server line and also of a tag at another save \
+             (server line {}, tag {}), so Opalro didn't pick either.",
+            hex12(two),
+            hex12(start)
+        )
+    );
+    assert_eq!(
+        refused.hint().unwrap(),
+        "To reach one of them, type its ID as shown here."
+    );
+    assert!(matches!(
+        resolve_target(&repo, "main@origin"),
+        Err(ResolveError::ServerLineOrTag { .. })
+    ));
+}
+
+#[test]
+fn a_line_named_like_another_saves_id_and_a_tag_is_refused_for_the_id_first() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    let hex = start.to_hex()[..8].to_owned();
+    set(&mut repo, Some(&tags(&[(&hex, start)])), |st| {
+        st.lines.insert(hex.clone(), two);
+    });
+    let refused = resolve(&repo, &hex).unwrap_err();
+    assert!(
+        matches!(refused, ResolveError::LineOrSave { .. }),
+        "{refused:?}"
+    );
 }
 
 #[test]

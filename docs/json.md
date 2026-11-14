@@ -171,7 +171,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `opalro changes --json`
 
-`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (a line name, a tag's name, the start of a change ID, or the start of a fingerprint) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
+`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (named as for `goto`: a line name, a server line `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint, with the same refusals) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -193,7 +193,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `opalro goto --json`
 
-`opalro goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), a tag's name (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). A line's or a tag's name that is also the start of another save's change ID or fingerprint is refused (exit code 1), and `error.message` lists the IDs it matched, so a line or tag named like a save's ID never passes for that save; type more of the ID to reach the save ([decision 068](decisions/068-a-goto-target-that-names-both.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
+`opalro goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), a tag's name (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). A line's or a tag's name that is also the start of another save's change ID or fingerprint is refused (exit code 1), and `error.message` lists the IDs it matched, so a line or tag named like a save's ID never passes for that save; type more of the ID to reach the save ([decision 068](decisions/068-a-goto-target-that-names-both.md)). A line's or a server line's name that a tag at another save has too is refused the same way (exit code 1): `error.message` gives the first 12 hex digits of both saves' fingerprints, and `error.hint` says to type one of them, and for a line, how to rename it; a tag at the line's own save changes nothing ([decision 162](decisions/162-red-team-m7-rulings.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -473,7 +473,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `opalro tag <name> --json`
 
-`opalro tag <name> [<message>] [--save <save>]` tags the save the project is at, or the one `--save` names (by line name, tag, change ID or fingerprint). A new tag's name follows the rules for line names, and can't be a line's or differ from another tag's only by letter case; such a name fails the command (exit code 1), changing nothing. Tagging the save a tag is at already changes nothing and records no step. A tag at another save is moved, which in a terminal Opalro asks about first; with `--json` it never asks, so the command fails (exit code 1), moving nothing, and `error.hint` names `--yes`, which moves it without asking. Making or moving a tag is one step, which `opalro undo` takes back.
+`opalro tag <name> [<message>] [--save <save>]` tags the save the project is at, or the one `--save` names (as for `goto`: by line name, server line, tag, change ID or fingerprint, with the same refusals). A new tag's name follows the rules for line names, and can't be a line's or differ from another tag's only by letter case; such a name fails the command (exit code 1), changing nothing. Tagging the save a tag is at already changes nothing and records no step. A tag at another save is moved, which in a terminal Opalro asks about first; with `--json` it never asks, so the command fails (exit code 1), moving nothing, and `error.hint` names `--yes`, which moves it without asking. Making or moving a tag is one step, which `opalro undo` takes back.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -507,7 +507,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `opalro show --json`
 
-`opalro show` takes a line name, a tag's name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), tried in that order, and shows the save the project is on when given none. A text that is both a line's or a tag's name and the start of another save's ID is refused, as for `goto` (and for `changes --save`).
+`opalro show` takes a line name, a server line `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), tried in that order, and shows the save the project is on when given none. A text that is both a line's or a tag's name and the start of another save's ID is refused, as for `goto` (and for `changes --save` and `tag --save`), and so is a line's or server line's name that a tag at another save has too.
 
 | Field | Type | Meaning |
 |---|---|---|

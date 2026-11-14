@@ -5,7 +5,7 @@ use std::io;
 use crate::ancestry::only_in;
 use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
 use crate::encoding::DecodeError;
-use crate::history::{ResolveError, line_named, resolve, tip_of};
+use crate::history::{ResolveError, find, tip_of};
 use crate::id::Id;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
@@ -356,31 +356,10 @@ pub enum Target {
     Save(Id),
 }
 
-/// Reads `text` as, in this order, a line's name, a server line `line@server`, a tag's name, the
-/// start of a change ID, or the start of a fingerprint. A line name never holds `@`, so a server
-/// line can't be taken for one; a line or tag name that is also the start of another save's ID
-/// is refused.
+/// Reads `text` in the same order as [`crate::history::resolve`]: a line's name, a server line
+/// `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint.
 pub fn resolve_target(repo: &Repository, text: &str) -> Result<Target, ResolveError> {
-    let (_, entry) = repo.current()?;
-    if line_named(repo, &entry, text)?.is_some() {
-        return Ok(Target::Line(text.to_owned()));
-    }
-    if let Some((line, server)) = text.split_once('@') {
-        let servers = repo.server_lines(&entry.state)?;
-        let save = servers
-            .servers
-            .get(server)
-            .and_then(|lines| lines.get(line));
-        if let Some(save) = save {
-            return Ok(Target::ServerLine {
-                server: server.to_owned(),
-                line: line.to_owned(),
-                save: *save,
-            });
-        }
-    }
-    // An imported tag may hold `@` too.
-    Ok(Target::Save(resolve(repo, text)?))
+    find(repo, text).map(|(target, _)| target)
 }
 
 #[cfg(test)]

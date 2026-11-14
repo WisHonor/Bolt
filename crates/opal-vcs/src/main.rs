@@ -103,8 +103,8 @@ enum Command {
     /// Show your unsaved changes line by line, in these files and folders or everywhere; or what
     /// a save changed.
     Changes {
-        /// The save to show, by line name, tag, change ID or fingerprint, against its first
-        /// parent.
+        /// The save to show, by line name, line@server, tag, change ID or fingerprint, against its
+        /// first parent.
         #[arg(long, value_name = "SAVE")]
         save: Option<String>,
         /// Only these files and folders.
@@ -115,7 +115,8 @@ enum Command {
     History,
     /// Show one save.
     Show {
-        /// The save, by line name, tag, change ID or fingerprint; the one you're at if left out.
+        /// The save, by line name, line@server, tag, change ID or fingerprint; the one you're at
+        /// if left out.
         save: Option<String>,
     },
     /// List the lines, marking the one you're on, then the server lines; or make, rename or
@@ -131,8 +132,8 @@ enum Command {
         name: Option<String>,
         /// What the tag marks, in a few words.
         message: Option<String>,
-        /// The save to tag, by line name, tag, change ID or fingerprint; the one you're at if left
-        /// out.
+        /// The save to tag, by line name, line@server, tag, change ID or fingerprint; the one
+        /// you're at if left out.
         #[arg(long, value_name = "SAVE", requires = "name")]
         save: Option<String>,
         /// Delete this tag.

@@ -1,6 +1,5 @@
-//! Red-team session RT17 (milestone 7, lines and tags): one test per finding, each asserting
-//! what should be true. They fail until their fix is in, so they are ignored; run them with
-//! `cargo test -p opal-vcs --all-features --test redteam17 -- --ignored`.
+//! The proofs of red-team session RT17 (milestone 7, lines and tags): one test per finding,
+//! each asserting what should be true.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::id::Id;
@@ -34,7 +33,6 @@ fn shown(env: &Env, text: &str) -> (Option<i32>, String, serde_json::Value) {
 }
 
 #[test]
-#[ignore = "RT17-1: show takes a tag where goto takes the server line of the same name"]
 fn a_server_lines_name_means_the_same_save_in_goto_and_show() {
     // Git allows a tag named `main@origin`; the import keeps it as it is.
     let env = Env::new();
@@ -44,20 +42,23 @@ fn a_server_lines_name_means_the_same_save_in_goto_and_show() {
     env.git(&["tag", "main@origin", &two]);
     env.import();
     let (repo, state) = env.state();
-    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    let tag = repo.tag_list(&state).unwrap().tags["main@origin"].save;
     drop(repo);
     let (code, said, doc) = shown(&env, "main@origin");
-    assert_eq!(code, Some(0), "{said}");
-    // Decision 159: a line, a server line, a tag. `goto main@origin` goes to `one`.
-    assert_eq!(
+    assert_ne!(
         doc["save"]["id"],
-        server.to_hex(),
-        "show main@origin showed the tag's save, while goto main@origin goes to the server line's"
+        tag.to_hex(),
+        "show main@origin showed the tag's save: {said}"
     );
+    // The server line and the tag are at two saves, so both commands refuse the name alike.
+    let (shown_code, _, shown_said) = run(&env, &["show", "main@origin"]);
+    let (goto_code, _, goto_said) = run(&env, &["goto", "main@origin"]);
+    assert_eq!((code, shown_code, goto_code), (Some(1), Some(1), Some(1)));
+    assert!(shown_said.contains("server line"), "{shown_said}");
+    assert_eq!(shown_said, goto_said);
 }
 
 #[test]
-#[ignore = "RT17-2: a name that is both a line and a tag goes to the line, silently"]
 fn a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line() {
     // A branch and a tag of one name, at two commits: Git warns and takes the tag.
     let env = Env::new();
