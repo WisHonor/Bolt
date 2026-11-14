@@ -312,9 +312,9 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
 /// ordered pairs of tips: the lines in name order, then the server lines in name order, each
 /// standing for the commit its save records. Where a commit in the tips' history is dated before
 /// a parent the walk may count too many, though never too few and never a held tip as holding
-/// some, so only that is asserted there. Returns how many pairs it compared, and whether the
-/// counts had to be equal.
-pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool) {
+/// some, so only that is asserted there. Returns how many pairs it compared, whether the counts
+/// had to be equal, and how many of the walk's came out higher.
+pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
     let repo = Repository::open(dir).unwrap();
     let state = repo.current().unwrap().1.state;
     let servers = repo.server_lines(&state).unwrap().servers;
@@ -334,13 +334,16 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool) {
         })
         .collect();
     let n = tips.len();
-    let pairs: Vec<(usize, usize)> = (0..n)
-        .flat_map(|a| (0..n).filter(move |&b| b != a).map(move |b| (a, b)))
+    // Round the tips: each with its next neighbour, then with the one after, and so on, so every
+    // tip comes first once before the cap. Two tips at one save tell nothing.
+    let pairs: Vec<(usize, usize)> = (1..n)
+        .flat_map(|step| (0..n).map(move |a| (a, (a + step) % n)))
+        .filter(|&(a, b)| tips[a].1 != tips[b].1)
         .take(64)
         .collect();
     if pairs.is_empty() {
         println!("The ancestry walk has no pairs to compare.");
-        return (0, true);
+        return (0, true, 0);
     }
     let compared: Vec<&str> = (0..n)
         .filter(|&i| pairs.iter().any(|&(a, b)| a == i || b == i))
@@ -378,7 +381,7 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool) {
             pairs.len()
         );
     }
-    (pairs.len(), exact)
+    (pairs.len(), exact, pairs.len() - equal)
 }
 
 /// Whether a commit in the history of `tips` has a committer date earlier than a parent's.

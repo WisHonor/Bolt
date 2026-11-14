@@ -245,6 +245,26 @@ mod tests {
         assert_eq!(only_in(&repo, ids[1], &[ids[2]]).unwrap(), 0);
     }
 
+    #[test]
+    fn a_history_dated_backwards_can_count_high_never_low() {
+        let (_dir, mut repo) = project();
+        // X, then S dated before it, then A merging S and X, and B after S.
+        let [_x, _s, a, b] = plant(
+            &mut repo,
+            &[
+                (vec![], 50),
+                (vec![0], 10),
+                (vec![1, 0], 100),
+                (vec![1], 90),
+            ],
+        )[..] else {
+            panic!()
+        };
+        // The answer is 1 (A alone), but newest first X is read before S, which would have carried
+        // B's mark to it, so X is counted as A's too.
+        assert_eq!(only_in(&repo, a, &[b]).unwrap(), 2);
+    }
+
     /// `k` saves of their own first, so that each history's IDs, and so its tie order, differ.
     fn filler(k: usize) -> Vec<(Vec<usize>, i64)> {
         (0..k).map(|_| (vec![], 0)).collect()

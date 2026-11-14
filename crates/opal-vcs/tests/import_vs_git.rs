@@ -119,7 +119,7 @@ fn everyday_history_matches_git() {
     assert_eq!(assert_matches_git(env.root()), 0);
     // Nine lines and three server lines across the merges: held ones, ones that hold some, and
     // ones parted at a fork.
-    assert_eq!(assert_ancestry_matches_git(env.root()), (64, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (64, true, 0));
     // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
     // later one in byte order takes a suffix.
     let (repo, state) = env.state();
@@ -151,7 +151,7 @@ fn everyday_history_matches_git() {
         .assert()
         .success();
     assert_eq!(assert_matches_git(detached.path()), 0);
-    assert_eq!(assert_ancestry_matches_git(detached.path()), (64, true));
+    assert_eq!(assert_ancestry_matches_git(detached.path()), (64, true, 0));
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn unusual_commits_match_git() {
     env.git(&["update-ref", "refs/heads/main", &last]);
     env.import();
     let counted = assert_matches_git_counting(env.root());
-    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
     assert_eq!(counted.headers, 8);
@@ -292,20 +292,25 @@ fn packed_and_loose_objects_match_git() {
     );
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
-    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
 }
 
 #[test]
 fn a_history_dated_backwards_matches_git() {
     let env = Env::new();
-    // The third commit on main is dated before its parent, as Git allows.
+    // The third commit on main is dated before its parent, as Git allows. Apart from main, X, then
+    // S dated before it, then a at a merge of S and X, and b after S.
     let mut stream = String::new();
-    for (mark, (branch, from, time)) in [
-        ("main", None, 1_700_002_000),
-        ("main", None, 1_700_003_000),
-        ("main", None, 1_700_001_000),
-        ("main", None, 1_700_004_000),
-        ("side", Some(2), 1_700_003_500),
+    for (mark, (branch, from, merge, time)) in [
+        ("main", None, None, 1_700_002_000),
+        ("main", None, None, 1_700_003_000),
+        ("main", None, None, 1_700_001_000),
+        ("main", None, None, 1_700_004_000),
+        ("side", Some(2), None, 1_700_003_500),
+        ("a", None, None, 1_600_000_050),
+        ("b", Some(6), None, 1_600_000_010),
+        ("a", Some(7), Some(6), 1_600_000_100),
+        ("b", None, None, 1_600_000_090),
     ]
     .into_iter()
     .enumerate()
@@ -320,6 +325,9 @@ fn a_history_dated_backwards_matches_git() {
         if let Some(from) = from {
             let _ = writeln!(stream, "from :{from}");
         }
+        if let Some(merge) = merge {
+            let _ = writeln!(stream, "merge :{merge}");
+        }
     }
     // A line main holds.
     stream.push_str("reset refs/heads/old\nfrom :1\n\n");
@@ -328,9 +336,11 @@ fn a_history_dated_backwards_matches_git() {
     env.git(&["reset", "-q", "--hard"]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
-    // main, old and side: old is held, main and side each hold some, and main's walk from side
-    // crosses the commit dated back.
-    assert_eq!(assert_ancestry_matches_git(env.root()), (6, false));
+    // old is held, main and side each hold some, and main's walk from side crosses the commit
+    // dated back. From a against b the walk reads X before S and counts it too (2 where Git
+    // counts 1): the one count that comes out high.
+    let (pairs, exact, higher) = assert_ancestry_matches_git(env.root());
+    assert_eq!((pairs, exact, higher), (20, false, 1));
 }
 
 #[test]
@@ -373,7 +383,7 @@ fn sha256_repositories_match_git() {
     env.git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
-    assert_eq!(assert_ancestry_matches_git(env.root()), (6, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
 }
 
 #[test]
@@ -409,7 +419,7 @@ fn optional_git_files_are_ignored() {
     assert!(!git_dir.join("refs/heads/main").exists());
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
-    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
 }
 
 #[test]
@@ -438,7 +448,7 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
     env.git(&["update-ref", "refs/heads/main", &commit]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
-    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true));
+    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
 
     // What Git would write out here: each name this system can hold. Where letter case doesn't
     // count, the second of the twins is written over the first.
@@ -549,7 +559,7 @@ fn a_real_repository_matches_git() {
         began.elapsed().as_secs_f64()
     );
     // A clone's server lines give the walk tips enough, without a branch of its own beside main.
-    let (pairs, _) = assert_ancestry_matches_git(work.path());
+    let (pairs, ..) = assert_ancestry_matches_git(work.path());
     assert!(
         pairs > 0,
         "no pairs of tips to compare the ancestry walk on"
