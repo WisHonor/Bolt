@@ -19,24 +19,26 @@ struct Node {
 }
 
 impl Node {
-    /// A shared save never spread can wait: everything under it is shared too.
-    fn needs_look(&self) -> bool {
-        self.marks != self.spread && !(self.marks == BOTH && self.spread == 0)
+    /// One side's mark not yet passed on. Shared saves only spread while one of these is left.
+    fn one_side_waiting(&self) -> bool {
+        self.marks != self.spread && self.marks != BOTH
     }
 }
 
 struct Walk<'r> {
     repo: &'r Repository,
+    tip: Id,
     nodes: HashMap<Id, Node>,
-    /// Newest first; may hold stale entries, skipped when popped.
+    /// Newest first: every node whose marks aren't all spread, and stale entries skipped when
+    /// popped.
     heap: BinaryHeap<(i64, Id)>,
-    /// How many nodes need looking at.
+    /// How many nodes are `one_side_waiting`.
     waiting: usize,
 }
 
 impl Walk<'_> {
-    /// Adds `marks` to a save, reading it the first time it is met.
-    fn mark(&mut self, id: Id, marks: u8) -> Result<(), RepoError> {
+    /// Adds `marks` to a save, reading it the first time it is met. True once the tip is held.
+    fn mark(&mut self, id: Id, marks: u8) -> Result<bool, RepoError> {
         let node = match self.nodes.entry(id) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
@@ -53,13 +55,13 @@ impl Walk<'_> {
             }
         };
         if node.marks | marks == node.marks {
-            return Ok(());
+            return Ok(false);
         }
-        let before = node.needs_look();
+        let before = node.one_side_waiting();
         node.marks |= marks;
-        self.waiting = self.waiting - usize::from(before) + usize::from(node.needs_look());
+        self.waiting = self.waiting - usize::from(before) + usize::from(node.one_side_waiting());
         self.heap.push((node.time, id));
-        Ok(())
+        Ok(id == self.tip && node.marks & OTHERS != 0)
     }
 }
 
@@ -68,13 +70,16 @@ impl Walk<'_> {
 pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoError> {
     let mut walk = Walk {
         repo,
+        tip,
         nodes: HashMap::new(),
         heap: BinaryHeap::new(),
         waiting: 0,
     };
     walk.mark(tip, TIP)?;
     for &other in others {
-        walk.mark(other, OTHERS)?;
+        if walk.mark(other, OTHERS)? {
+            return Ok(0);
+        }
     }
     while walk.waiting > 0 {
         let Some((_, id)) = walk.heap.pop() else {
@@ -87,20 +92,17 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
             continue;
         }
         // A mark that arrives late spreads again, to correct what the first one reached.
-        let before = node.needs_look();
+        let before = node.one_side_waiting();
         node.spread = node.marks;
         walk.waiting -= usize::from(before);
         let (marks, parents) = (node.marks, node.parents.clone());
         for parent in parents {
-            walk.mark(parent, marks)?;
+            if walk.mark(parent, marks)? {
+                return Ok(0);
+            }
         }
     }
-    Ok(walk
-        .nodes
-        .values()
-        .filter(|n| n.marks == TIP)
-        .map(|_| 1)
-        .sum())
+    Ok(walk.nodes.values().filter(|n| n.marks == TIP).count() as u64)
 }
 
 #[cfg(test)]
@@ -239,6 +241,63 @@ mod tests {
         let before = repo.store().saves_read();
         assert_eq!(only_in(&repo, ids[side_a], &[ids[side_b]]).unwrap(), 3);
         assert!(repo.store().saves_read() - before <= 7);
+    }
+
+    /// Main save `k`'s time.
+    fn at(k: usize) -> i64 {
+        60_000 * (k as i64 + 1)
+    }
+
+    /// Three saves after `from`, dated within a minute of it. Returns the newest.
+    fn feature_after(saves: &mut Vec<(Vec<usize>, i64)>, from: usize) -> usize {
+        let mut parent = from;
+        for j in 1..=3 {
+            saves.push((vec![parent], saves[from].1 + 10_000 * j));
+            parent = saves.len() - 1;
+        }
+        parent
+    }
+
+    #[test]
+    fn a_line_combined_into_another_is_answered_at_once() {
+        let (_dir, mut repo) = project();
+        let mut saves = Vec::new();
+        chain_after(&mut saves, None, 1000, 0);
+        let feature = feature_after(&mut saves, 990);
+        saves.push((vec![999, feature], at(1000)));
+        let main = saves.len() - 1;
+        let ids = plant(&mut repo, &saves);
+        let before = repo.store().saves_read();
+        assert_eq!(only_in(&repo, ids[feature], &[ids[main]]).unwrap(), 0);
+        let read = repo.store().saves_read() - before;
+        assert!(read <= 6, "{read} saves read");
+    }
+
+    #[test]
+    fn an_older_side_line_does_not_send_the_walk_to_the_start() {
+        let (_dir, mut repo) = project();
+        let mut saves: Vec<(Vec<usize>, i64)> = Vec::new();
+        let mut main: Vec<usize> = Vec::new();
+        for k in 0..1000 {
+            let mut parents: Vec<usize> = main.last().copied().into_iter().collect();
+            if k == 951 {
+                // A side line from save 900, dated before save 950, combined here.
+                let mut side = main[900];
+                for j in 1..=3 {
+                    saves.push((vec![side], at(900) + 600_000 * j));
+                    side = saves.len() - 1;
+                }
+                parents.push(side);
+            }
+            saves.push((parents, at(k)));
+            main.push(saves.len() - 1);
+        }
+        let feature = feature_after(&mut saves, main[990]);
+        let ids = plant(&mut repo, &saves);
+        let before = repo.store().saves_read();
+        assert_eq!(only_in(&repo, ids[feature], &[ids[main[999]]]).unwrap(), 3);
+        let read = repo.store().saves_read() - before;
+        assert!(read <= 140, "{read} saves read");
     }
 
     /// Every save reachable from `starts`, themselves included.
