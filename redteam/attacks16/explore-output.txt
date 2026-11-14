@@ -1,0 +1,326 @@
+   Compiling libc v0.2.191
+   Compiling proc-macro2 v1.0.107
+   Compiling rustix v1.1.6
+   Compiling serde_core v1.0.229
+   Compiling quote v1.0.47
+   Compiling jobserver v0.1.35
+   Compiling syn v3.0.9
+   Compiling getrandom v0.4.3
+   Compiling cc v1.10.0
+   Compiling zstd-sys v2.1.2+zstd.1.5.7
+   Compiling rustversion v1.0.23
+   Compiling blake3 v1.8.7
+   Compiling encoding_rs v0.8.44
+   Compiling thiserror v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.21
+   Compiling tempfile v3.27.0
+   Compiling dirs-sys v0.5.0
+   Compiling toml_datetime v1.1.2+spec-1.1.0
+   Compiling serde_spanned v1.1.2
+   Compiling wait-timeout v0.2.1
+   Compiling toml v1.1.8+spec-1.1.0
+   Compiling serde v1.0.229
+   Compiling clap_derive v4.6.7
+   Compiling directories v6.0.0
+   Compiling opal-vcs-platform v0.1.0 (/work/crates/opal-vcs-platform)
+   Compiling rusty-fork v0.3.1
+   Compiling serde_json v1.0.154
+   Compiling clap v4.6.7
+   Compiling rand v0.10.3
+   Compiling terminal_size v0.4.4
+   Compiling console v0.16.6
+   Compiling proptest v1.12.0
+   Compiling insta v1.49.0
+   Compiling assert_cmd v2.2.2
+   Compiling zstd-safe v8.2.0
+   Compiling zstd v0.14.3
+   Compiling opal-vcs-core v0.1.0 (/work/crates/opal-vcs-core)
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `release` profile [optimized] target(s) in 51.56s
+     Running tests/rt17_explore.rs (target/release/deps/rt17_explore-5dec8f21fb34fb1f)
+
+running 10 tests
+test e10_amend_a_tagged_save ... $ opalro ["tag", "v1"]
+  code Some(0)
+  out: Tagged save kplp "A" as v1.
+
+  err: 
+$ opalro ["save", "--amend", "A2"]
+  code Some(1)
+  out: 
+  err: error: Opalro can't amend this save: tag v1 shows it too, and two saves you can see would then share one change ID.
+
+hint: Nothing was saved. Save your changes as a new save instead: opalro save "describe your change"
+
+$ opalro ["tag"]
+  code Some(0)
+  out: 1 tag:
+
+  v1  0c7581e44095
+
+  err: 
+$ opalro ["history"]
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> kplp  just now  Test  A  [main]  [tag v1]
+  lrur  just now  Test  Start project
+
+  err: 
+ok
+test e1_branch_and_tag_alike_from_git ... git rev-parse v1: ac02afa1758e43253430d22d68551cc7061001fa
+lines {"main": Id([148, 127, 3, 76, 6, 160, 105, 90, 253, 100, 163, 12, 151, 142, 216, 15, 90, 146, 61, 6, 189, 71, 175, 127, 216, 109, 126, 86, 91, 67, 32, 179]), "v1": Id([148, 127, 3, 76, 6, 160, 105, 90, 253, 100, 163, 12, 151, 142, 216, 15, 90, 146, 61, 6, 189, 71, 175, 127, 216, 109, 126, 86, 91, 67, 32, 179])}
+tags ["v1"]
+$ opalro ["show", "v1", "--json"]
+  code Some(0)
+  out: {"changes":[{"change":"modified","kind":"file","new_size":3,"old_size":3,"path":"a.txt"}],"opalro_json":1,"save":{"author":{"email":"ada@example.com","name":"Ada Lovelace","time_ms":1794651616000,"tz_offset_min":0},"change_id":"tuyupyurwzulptvzwrsrttolxkwrlwkt","change_id_short":"tuyu","id":"947f034c06a0695afd64a30c978ed80f5a923d06bd47af7fd86d7e565b4320b3","line":null,"message":"two\n","saver":{"email":"test@example.com","name":"Test","time_ms":1794651616000,"tz_offset_min":0}},"tags":[],"warnings":[]}
+
+  err: 
+$ opalro ["tag"]
+  code Some(0)
+  out: 1 tag:
+
+  v1  c3615ac2ac52
+
+  err: 
+ok
+test e2_tag_at_missing_save_blocks_line_delete ... $ opalro ["line", "new", "feat"]
+  code Some(0)
+  out: Started line feat at save stmy "A".
+
+    You're on it: your next save goes on feat.
+
+  err: 
+$ opalro ["goto", "main"]
+  code Some(0)
+  out: Switched to line main at save stmy "A".
+
+    No file needed changing.
+
+  err: 
+$ opalro ["line", "delete", "feat", "--yes"]
+  code Some(0)
+  out: Deleted line feat, which was at save stmy "A".
+
+  err: 
+$ opalro ["line", "delete", "feat"]
+  code Some(1)
+  out: 
+  err: error: There is no line named "feat".
+
+hint: See the lines with: opalro line
+
+$ opalro ["history"]
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> stmy  just now  Test  A  [main]
+  uzwm  just now  Test  Start project
+
+  err: 
+$ opalro ["goto", "feat"]
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "feat".
+
+hint: See your saves with: opalro history
+
+$ opalro ["tag", "--delete", "ghost", "--yes"]
+  code Some(0)
+  out: Deleted tag ghost, which was at save 777777777777.
+
+  err: 
+ok
+test e3_hint_with_shell_text ... $ opalro ["tag", "--delete", "v1; touch pwned"]
+  code Some(1)
+  out: 
+  err: error: Opalro asks before it deletes a tag, and can't without a terminal.
+
+hint: To delete it: opalro tag --delete v1; touch pwned --yes
+
+$ opalro ["tag"]
+  code Some(0)
+  out: 1 tag:
+
+  v1; touch pwned  2405636139d9
+
+  err: 
+ok
+test e4_ghost_tag_with_own_save ... $ opalro ["line", "new", "feat"]
+  code Some(0)
+  out: Started line feat at save sqxv "A".
+
+    You're on it: your next save goes on feat.
+
+  err: 
+$ opalro ["save", "F"]
+  code Some(0)
+  out: Saved vtxw "F" on feat  (1 file)
+
+  err: 
+$ opalro ["goto", "main"]
+  code Some(0)
+  out: Switched to line main at save sqxv "A".
+
+    1 file written.
+
+  err: 
+$ opalro ["line", "delete", "feat", "--yes"]
+  code Some(1)
+  out: 
+  err: error: object 7777777777777777777777777777777777777777777777777777777777777777 is not in the store
+
+$ opalro ["line", "delete", "feat", "--json"]
+  code Some(1)
+  out: {"error":{"hint":null,"message":"object 7777777777777777777777777777777777777777777777777777777777777777 is not in the store"},"opalro_json":1,"warnings":[]}
+
+  err: 
+ok
+test e5_tag_at_a_tree ... $ opalro ["line", "new", "feat"]
+  code Some(0)
+  out: Started line feat at save nsox "A".
+
+    You're on it: your next save goes on feat.
+
+  err: 
+$ opalro ["save", "F"]
+  code Some(0)
+  out: Saved puvp "F" on feat  (1 file)
+
+  err: 
+$ opalro ["goto", "main"]
+  code Some(0)
+  out: Switched to line main at save nsox "A".
+
+    1 file written.
+
+  err: 
+$ opalro ["line", "delete", "feat", "--yes"]
+  code Some(1)
+  out: 
+  err: error: object dab7422ddc566e469a60e56396c912d17e83bc11f6fac5f2f7dfc8fbda29274a is FolderListing, not Save
+
+$ opalro ["history"]
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> nsox  just now  Test  A  [main]
+  xrow  just now  Test  Start project
+
+  err: 
+$ opalro ["goto", "tree"]
+  code Some(1)
+  out: 
+  err: error: object dab7422ddc566e469a60e56396c912d17e83bc11f6fac5f2f7dfc8fbda29274a is FolderListing, not Save
+
+$ opalro ["show", "tree"]
+  code Some(1)
+  out: 
+  err: error: object dab7422ddc566e469a60e56396c912d17e83bc11f6fac5f2f7dfc8fbda29274a is FolderListing, not Save
+
+ok
+test e6_server_line_and_tag_alike ... servers ServerLines { servers: {"origin": {"main": Id([52, 97, 135, 186, 180, 229, 228, 107, 117, 28, 71, 236, 243, 166, 22, 99, 63, 77, 164, 187, 80, 81, 163, 27, 38, 171, 188, 165, 57, 19, 209, 203])}} }
+$ opalro ["show", "main@origin", "--json"]
+  code Some(0)
+  out: {"changes":[{"change":"modified","kind":"file","new_size":3,"old_size":3,"path":"a.txt"}],"opalro_json":1,"save":{"author":{"email":"ada@example.com","name":"Ada Lovelace","time_ms":1794651619000,"tz_offset_min":0},"change_id":"qmkkqxtwlnqowswksrsrwlloqwztrmsw","change_id_short":"qmkk","id":"9aade020794aafc0f1a0b3c32c0d34d390caff57e29b8daba80ea4e7b8b06f02","line":null,"message":"two\n","saver":{"email":"test@example.com","name":"Test","time_ms":1794651619000,"tz_offset_min":0}},"tags":["main@origin"],"warnings":[]}
+
+  err: 
+$ opalro ["changes", "--save", "main@origin"]
+  code Some(0)
+  out: modified  a.txt  +1 -1  (3 B -> 3 B)
+@@ -1,1 +1,1 @@
+-one
+\ No newline at end of file
++two
+\ No newline at end of file
+
+  err: 
+$ opalro ["goto", "main@origin"]
+  code Some(0)
+  out: Switched to save lpqq "one". You are not on a line.
+
+    1 file written.
+    Saving here asks for a new line's name.
+
+  err: 
+$ opalro ["history"]
+  code Some(0)
+  out: At save lpqq, not on a line. Saves back from it, newest first:
+
+> lpqq  just now  Ada Lovelace  one
+
+  err: 
+ok
+test e7_branch_and_tag_alike_goto ... git rev-parse v1: 970e72175d2a80d550b6ef2b484f0839f2159957
+ / warning: refname 'v1' is ambiguous.
+
+$ opalro ["goto", "v1"]
+  code Some(0)
+  out: Switched to line v1 at save qmkk "two".
+
+    No file needed changing.
+
+  err: 
+$ opalro ["tag", "copy", "--save", "v1"]
+  code Some(0)
+  out: Tagged save qmkk "two" as copy.
+
+  err: 
+$ opalro ["tag"]
+  code Some(0)
+  out: 2 tags:
+
+  copy  9aade020794a
+  v1    346187bab4e5
+
+  err: 
+ok
+test e8_show_server_line_without_tag ... $ opalro ["show", "main@origin"]
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "main@origin".
+
+hint: See your saves with: opalro history
+
+$ opalro ["tag", "x", "--save", "main@origin"]
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "main@origin".
+
+hint: See your saves with: opalro history
+
+$ opalro ["history"]
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> nnpp  just now  Ada Lovelace  two  [main]
+  uryt  just now  Ada Lovelace  one
+
+  err: 
+ok
+test e9_forged_marks ... $ opalro ["history"]
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> zlpu  just now  Test  A  [main]
+  wqyt  just now  Test  Start project  [tag v9]  [main]
+
+  err: 
+$ opalro ["show", "v9]  [main"]
+  code Some(0)
+  out: Save wqyt "Start project"
+
+    Author       Test <test@example.com>, 2026-11-14 10:20 +00:00  (just now)
+    Saved by     Test <test@example.com>, 2026-11-14 10:20 +00:00  (just now)
+    Line         main
+    Tags         v9]  [main
+    Fingerprint  98d25bf66c76e11ce6dc0c0e6be43b1029928185ffc473c186f54f02094143d1
+
+No files changed.
+
+  err: 
+ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.68s
+

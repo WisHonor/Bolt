@@ -1,0 +1,60 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.34s
+     Running tests/redteam17.rs (target/debug/deps/redteam17-20a9680e3d54785f)
+
+running 5 tests
+test a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line ... FAILED
+test a_server_lines_name_means_the_same_save_in_goto_and_show ... FAILED
+test a_tags_name_cannot_put_a_lines_mark_on_another_save ... FAILED
+test the_hint_to_delete_a_tag_quotes_its_name ... FAILED
+test a_tag_at_a_missing_save_is_named_when_it_stops_line_delete ... FAILED
+
+failures:
+
+---- a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line stdout ----
+
+thread 'a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line' (17609) panicked at crates/opal-vcs/tests/redteam17.rs:78:5:
+show v1 went to line v1's save without a word, though tag v1 (which `opalro tag` lists) is at another save: {"changes":[{"change":"modified","kind":"file","new_size":3,"old_size":3,"path":"a.txt"}],"opalro_json":1,"save":{"author":{"email":"ada@example.com","name":"Ada Lovelace","time_ms":1794651624000,"tz_offset_min":0},"change_id":"zyrvsxxuopnszlymloxyummtxopsxvum","change_id_short":"zyrv","id":"d6baf5736f0b725ea754af9edb3c61910063c71e79c87ae43a8d0f041dafd543","line":null,"message":"two\n","saver":{"email":"test@example.com","name":"Test","time_ms":1794651624000,"tz_offset_min":0}},"tags":[],"warnings":[]} 
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_server_lines_name_means_the_same_save_in_goto_and_show stdout ----
+
+thread 'a_server_lines_name_means_the_same_save_in_goto_and_show' (17610) panicked at crates/opal-vcs/tests/redteam17.rs:52:5:
+assertion `left == right` failed: show main@origin showed the tag's save, while goto main@origin goes to the server line's
+  left: String("d6baf5736f0b725ea754af9edb3c61910063c71e79c87ae43a8d0f041dafd543")
+ right: "1266c134b077547919176c412a8060ab0141c7527a3bbb894d3d66d93494514a"
+
+---- a_tags_name_cannot_put_a_lines_mark_on_another_save stdout ----
+
+thread 'a_tags_name_cannot_put_a_lines_mark_on_another_save' (17612) panicked at crates/opal-vcs/tests/redteam17.rs:136:5:
+the first save's row reads as if line main were at it:
+Saves on line main, newest first:
+
+> xkql  just now  Test  A  [main]
+  oqop  just now  Test  Start project  [tag v9]  [main]
+
+
+---- the_hint_to_delete_a_tag_quotes_its_name stdout ----
+
+thread 'the_hint_to_delete_a_tag_quotes_its_name' (17696) panicked at crates/opal-vcs/tests/redteam17.rs:115:5:
+the hint is a shell command with the name unquoted: error: Opalro asks before it deletes a tag, and can't without a terminal.
+
+hint: To delete it: opalro tag --delete v1; touch pwned --yes
+
+
+---- a_tag_at_a_missing_save_is_named_when_it_stops_line_delete stdout ----
+
+thread 'a_tag_at_a_missing_save_is_named_when_it_stops_line_delete' (17611) panicked at crates/opal-vcs/tests/redteam17.rs:99:5:
+line delete --yes stopped on the tag's missing save without naming the tag: error: object 7777777777777777777777777777777777777777777777777777777777777777 is not in the store
+
+
+
+failures:
+    a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line
+    a_server_lines_name_means_the_same_save_in_goto_and_show
+    a_tag_at_a_missing_save_is_named_when_it_stops_line_delete
+    a_tags_name_cannot_put_a_lines_mark_on_another_save
+    the_hint_to_delete_a_tag_quotes_its_name
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+error: test failed, to rerun pass `-p opal-vcs --test redteam17`
