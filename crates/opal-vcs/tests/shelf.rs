@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::Path;
 
-use opal_core::diary::{Action, Position, State};
+use opal_core::diary::{Action, DiaryEntry, Position, State};
 use opal_core::id::{Id, hash_content};
 use opal_core::journal::{self, Change, Expected, Journal};
 use opal_core::listing::EntryKind;
@@ -960,4 +960,41 @@ fn shelf_and_unshelf_json_match_their_snapshots() {
     insta::assert_json_snapshot!("shelf", doc(&["shelf", "Mine"]));
     insta::assert_json_snapshot!("shelf_list", doc(&["shelf", "--list"]));
     insta::assert_json_snapshot!("unshelf", doc(&["unshelf"]));
+}
+
+/// Gives the project's one shelf the label `label`, as a planted project may.
+fn relabel(env: &Env, label: &str) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("shelf", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut state = entry.state.clone();
+    state.shelves[0].0 = label.to_owned();
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "shelf".into(),
+        who: entry.who,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &diary).unwrap();
+}
+
+#[test]
+fn unshelfs_hint_carries_a_label_only_when_it_is_plain() {
+    for (label, plain) in [("1", true), ("1; touch pwned", false), ("-1", false)] {
+        let env = project(SAVED);
+        write(&env, "a.txt", "mine\n");
+        ok(&env, &["shelf"]);
+        relabel(&env, label);
+        write(&env, "a.txt", "in the way\n");
+        // The newest shelf: `-1` couldn't be typed as a label.
+        let (_, said) = refused(&env, &["unshelf"]);
+        let carried = format!("then run opalro unshelf {label} (a new shelf would be the newest).");
+        let same = "then run the same unshelf command again (a new shelf would be the newest).";
+        assert_eq!(said.contains(&carried), plain, "{label}: {said}");
+        assert_eq!(said.contains(same), !plain, "{label}: {said}");
+    }
 }

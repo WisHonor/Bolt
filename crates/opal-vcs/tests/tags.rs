@@ -404,9 +404,10 @@ fn an_imported_tags_questions_are_escaped() {
 }
 
 /// Names no line could have, each able to forge its own end unquoted, and how each is shown.
-const ODD: [(&str, &str); 6] = [
+const ODD: [(&str, &str); 7] = [
     ("v1 b", "\"v1 b\""),
-    ("v9]  [main", "\"v9]  [main\""),
+    ("v9]  [main", "\"v9\\]  \\[main\""),
+    ("x]  [main]  [tag y", "\"x\\]  \\[main\\]  \\[tag y\""),
     ("a, b", "\"a, b\""),
     ("say \"hi\"", "\"say \\\"hi\\\"\""),
     ("a\\b", "\"a\\\\b\""),

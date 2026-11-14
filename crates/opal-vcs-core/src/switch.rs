@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State};
+use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
@@ -266,7 +266,12 @@ impl SwitchError {
                 Some("opalro shelf --list shows the shelves there are.".to_owned())
             }
             SwitchError::ShelfInTheWay(c) => {
-                let unshelf = format!("opalro unshelf {}", escape(&c.label, false));
+                // A planted label could be shell text; Opalro's own are numbers.
+                let unshelf = if is_plain(&c.label) {
+                    format!("opalro unshelf {}", c.label)
+                } else {
+                    "the same unshelf command again".to_owned()
+                };
                 let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was \
                                made";
                 let (elsewhere, newest) = if let Some(base) = &c.goto_base {

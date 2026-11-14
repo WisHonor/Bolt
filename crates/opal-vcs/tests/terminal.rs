@@ -1776,7 +1776,8 @@ fn project_text_is_escaped_with_colour_on() {
         std::iter::once(format!("v1{CLEAR}\u{202e}")),
         support::main_tip(&env),
     );
-    let shown_tag = "v1\\x1b[2J\\u{202e}";
+    // The name's own `[` is marked too, so it can't open a line's mark.
+    let shown_tag = "v1\\x1b\\[2J\\u{202e}";
 
     let said = same_with_colour_on(&env, &["status"], 0);
     assert!(said.contains(shown_name), "{said}");

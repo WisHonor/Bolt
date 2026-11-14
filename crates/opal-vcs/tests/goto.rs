@@ -746,3 +746,33 @@ fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
     env.opalro().args(["save", "Four"]).assert().success();
     assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
 }
+
+#[test]
+fn goto_gives_no_command_for_a_stored_line_name_that_reads_as_an_option() {
+    let env = two_lines();
+    let feature = env.state().1.lines["feature"];
+    {
+        let mut repo = Repository::open(env.root()).unwrap();
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        state.lines.insert("-x".into(), feature);
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "test".into(),
+            who: entry.who,
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains("Saving here asks for a new line's name."),
+        "{said}"
+    );
+    assert!(!said.contains("opalro goto"), "{said}");
+}

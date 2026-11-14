@@ -1040,6 +1040,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_read_with_one_read_of_the_tag_list() {
+        use crate::repo::TAG_LISTS_READ;
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_tag(&mut repo, "rel-1", ids[0]);
+        let hex = ids[0].to_hex()[..8].to_owned();
+        for name in ["main", "rel-1", hex.as_str()] {
+            let before = TAG_LISTS_READ.get();
+            resolve(&repo, name).unwrap();
+            assert_eq!(TAG_LISTS_READ.get() - before, 1, "{name}");
+        }
+        // A line that is also a tag at another save is refused after one read too.
+        name_tag(&mut repo, "main", ids[0]);
+        let before = TAG_LISTS_READ.get();
+        assert!(matches!(
+            resolve(&repo, "main"),
+            Err(ResolveError::LineOrTag { .. })
+        ));
+        assert_eq!(TAG_LISTS_READ.get() - before, 1);
+    }
+
+    #[test]
     fn saves_off_the_lines_that_share_a_start_are_more_than_one() {
         // No two saves can be made to share 8 digits, so the empty start stands in for one.
         let (_dir, mut repo, ids) = project_with(&[]);

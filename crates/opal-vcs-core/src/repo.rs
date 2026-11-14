@@ -394,6 +394,12 @@ impl From<PackError> for RepoError {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many tag lists this thread read, to show a name is read with one.
+    pub(crate) static TAG_LISTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn damaged(detail: impl Into<String>) -> RepoError {
     RepoError::Damaged {
         detail: detail.into(),
@@ -1579,6 +1585,8 @@ impl Repository {
         let Some(id) = state.tags else {
             return Ok(TagList::default());
         };
+        #[cfg(test)]
+        TAG_LISTS_READ.set(TAG_LISTS_READ.get() + 1);
         let unreadable = |e: &dyn std::fmt::Display| {
             damaged(format!("the project's tag list can't be read: {e}"))
         };

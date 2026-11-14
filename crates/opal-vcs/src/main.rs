@@ -29,7 +29,7 @@ use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
-use opal_core::diary::{Action, DiaryEntry, Position};
+use opal_core::diary::{Action, DiaryEntry, Position, is_plain};
 use opal_core::diff::{count_changes, for_each_change};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
@@ -2023,7 +2023,8 @@ fn keep_saving(repo: &Repository, line: &str) -> Option<goto_output::KeepSaving>
         })
     };
     match resolve_target(repo, line) {
-        Ok(lines::Target::Line(_)) => Some(KeepSaving::Goto(line.to_owned())),
+        // A stored name can read as an option (`-x`): only a plain one goes in a command.
+        Ok(lines::Target::Line(_)) if is_plain(line) => Some(KeepSaving::Goto(line.to_owned())),
         Err(ResolveError::LineOrTag { .. }) => rename("a tag at another save"),
         Err(ResolveError::LineOrSave { .. }) => rename("the start of another save's ID"),
         _ => None,

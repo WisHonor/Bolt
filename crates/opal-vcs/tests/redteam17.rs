@@ -133,12 +133,16 @@ fn a_tags_name_cannot_put_a_lines_mark_on_another_save() {
         .unwrap()
         .parents[0];
     drop(repo);
-    env.plant_tags(["v9]  [main".to_owned()].into_iter(), first);
-    let (code, shown, said) = run(&env, &["history"]);
-    assert_eq!(code, Some(0), "{said}");
-    let start = shown.lines().find(|l| l.contains("Start project")).unwrap();
-    assert!(
-        !start.contains("[main]"),
-        "the first save's row reads as if line main were at it:\n{shown}"
-    );
+    // The first session's name, and the second's, which closes its quotes after the mark.
+    for name in ["v9]  [main", "x]  [main]  [tag y"] {
+        env.plant_tags([name.to_owned()].into_iter(), first);
+        let (code, shown, said) = run(&env, &["history"]);
+        assert_eq!(code, Some(0), "{said}");
+        let start = shown.lines().find(|l| l.contains("Start project")).unwrap();
+        // Any `[main` not marked as part of the name reads as line main's mark.
+        assert!(
+            !start.replace("\\[", "").contains("[main") && !start.contains("]  ["),
+            "{name}: the first save's row reads as if line main were at it:\n{shown}"
+        );
+    }
 }

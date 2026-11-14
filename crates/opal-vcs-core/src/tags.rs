@@ -90,14 +90,17 @@ impl TagError {
 }
 
 /// A stored tag's name as text shows it: as it is when it fits the rules for line names, and
-/// otherwise between double quotes, escaped, with `\` and `"` marked so its end can't be forged.
+/// otherwise between double quotes, escaped, with `\`, `"`, `[` and `]` marked so neither its end
+/// nor a line's mark can be forged.
 #[must_use]
 pub fn shown_name(name: &str) -> String {
     if validate_line_name(name).is_ok() {
         return name.to_owned();
     }
     // Marked before escaping, so a `\` that `escape` writes is never doubled.
-    let marked = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let marked = (name.replace('\\', "\\\\").replace('"', "\\\""))
+        .replace('[', "\\[")
+        .replace(']', "\\]");
     format!("\"{}\"", escape(&marked, false))
 }
 
@@ -284,6 +287,14 @@ mod tests {
         assert_eq!(shown_name("v1\u{202e}ateb"), "\"v1\\u{202e}ateb\"");
         assert_eq!(shown_name("a\u{1b}b"), "\"a\\x1bb\"");
         assert_eq!(shown_name(""), "\"\"");
+        // A line's mark can't appear inside the quotes.
+        assert_eq!(shown_name("a[b"), "\"a\\[b\"");
+        assert_eq!(shown_name("a]b"), "\"a\\]b\"");
+        assert_eq!(
+            shown_name("x]  [main]  [tag y"),
+            "\"x\\]  \\[main\\]  \\[tag y\""
+        );
+        assert_eq!(shown_name("\"[\\]"), "\"\\\"\\[\\\\\\]\"");
     }
 
     fn who() -> Person {

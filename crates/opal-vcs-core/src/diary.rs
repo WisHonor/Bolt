@@ -97,6 +97,17 @@ pub fn is_line_name_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')
 }
 
+/// Whether text from the project may stand inside a command a hint gives: only what a line's
+/// name may hold, not starting with `-`, or two such parts as `line@server`.
+#[must_use]
+pub fn is_plain(text: &str) -> bool {
+    let plain = |part: &str| validate_line_name(part).is_ok() && !part.starts_with('-');
+    match text.split_once('@') {
+        Some((line, server)) => plain(line) && plain(server),
+        None => plain(text),
+    }
+}
+
 /// Decision 012's rules for line names.
 pub fn validate_line_name(name: &str) -> Result<(), DecodeError> {
     if name.is_empty() {
@@ -564,6 +575,39 @@ mod tests {
     use super::*;
     use crate::test_support::hex;
     use proptest::prelude::*;
+
+    #[test]
+    fn plain_text_is_only_what_a_line_name_may_hold() {
+        for plain in [
+            "main",
+            "v1.0",
+            "feature/x",
+            "1",
+            "a_b-c",
+            "a@b",
+            "main@origin",
+        ] {
+            assert!(is_plain(plain), "{plain}");
+        }
+        for odd in [
+            "",
+            "-x",
+            "-1",
+            "a b",
+            "a;b",
+            "1; touch pwned",
+            "$(x)",
+            "a\"b",
+            "a'b",
+            "-a@b",
+            "a@-b",
+            "a@",
+            "@b",
+            "a@b@c",
+        ] {
+            assert!(!is_plain(odd), "{odd}");
+        }
+    }
 
     fn person() -> Person {
         Person {

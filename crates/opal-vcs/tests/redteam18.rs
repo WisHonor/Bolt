@@ -94,7 +94,6 @@ fn line_delete_names_a_tag_whose_history_cant_be_read() {
 }
 
 #[test]
-#[ignore = "RT18-3: a quoted tag name still puts a line's mark on another save in history"]
 fn a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save() {
     let env = project();
     let (repo, state) = env.state();
@@ -172,7 +171,6 @@ fn gotos_advice_to_keep_saving_on_a_line_can_be_followed() {
 }
 
 #[test]
-#[ignore = "RT18-6: unshelf's hint carries a stored shelf label inside a command, unquoted"]
 fn the_hint_to_bring_back_a_shelf_carries_no_stored_label_in_a_command() {
     use opal_core::diary::{Action, DiaryEntry};
     use opal_core::repo::Repository;
