@@ -256,7 +256,7 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 | Saved what paths name | the same | `Only what you named was saved: opalro status lists the changes left out.` | |
 | Updated (`--amend`) | `Updated save <id> "<message's first line>" on <line>  (2 files)` | `The ID stays the same.` | |
 | The files couldn't be counted | the same, ending `(couldn't count the changed files)` | | |
-| Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: …` when `--line` was given | |
+| Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: opalro line new <name> makes one without saving.` when `--line` was given | |
 | Nothing to amend | `Nothing to amend: your files match your last save, <id> "<message>", and so does the message.` (`what you named matches` with paths) | | |
 
 - The count is files, never lines: counting lines would slow every save. `on <line>` is left out for a save that names no line.

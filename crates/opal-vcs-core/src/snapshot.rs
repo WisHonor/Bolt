@@ -12,15 +12,15 @@ use std::sync::Arc;
 use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
-use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
+use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
-use crate::encoding::DecodeError;
 use crate::filecache::{self, FileCache, FileState};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::ingest::{self, IngestError, Ready};
+use crate::lines::{NameError, check_new_name};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
@@ -176,20 +176,9 @@ pub enum SaveError {
     NeedsMessage,
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
     NeedsLineName,
-    // `reason` is Opalro's own wording.
-    #[error("`{}` can't be a line's name: {reason}.", escape(name, false))]
-    BadLineName { name: String, reason: &'static str },
-    #[error(
-        "There is already a line {}, and two lines can't have names that differ only by letter \
-         case.",
-        escape(taken, false)
-    )]
-    LineTaken { taken: String },
-    #[error(
-        "You're on line {}, and making a new line from a line comes in v0.2.",
-        escape(line, false)
-    )]
-    LineFromLine { line: String },
+    /// `--line` named a line that can't be made; never [`NameError::Repo`].
+    #[error(transparent)]
+    Name(NameError),
     #[error(
         "{} matches nothing in your files or in the last save.",
         escape(given, false)
@@ -237,6 +226,15 @@ pub enum SaveError {
 impl From<StoreError> for SaveError {
     fn from(e: StoreError) -> Self {
         SaveError::Repo(e.into())
+    }
+}
+
+impl From<NameError> for SaveError {
+    fn from(e: NameError) -> Self {
+        match e {
+            NameError::Repo(e) => SaveError::Repo(e),
+            e => SaveError::Name(e),
+        }
     }
 }
 
@@ -392,12 +390,7 @@ impl SaveError {
                 "Say what you changed: opalro save \"describe your change\"".into()
             }
             SaveError::NeedsLineName => "Name it: opalro save --line <name> \"message\"".into(),
-            SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
-                "Choose another name.".into()
-            }
-            SaveError::LineFromLine { line } => {
-                format!("Leave out --line to save on {}.", escape(line, false))
-            }
+            SaveError::Name(e) => e.hint()?,
             SaveError::NoMatch { .. } => {
                 "Name files, folders or patterns from the folder you are in.".into()
             }
@@ -469,7 +462,7 @@ pub fn save_folder(
     if req.amend && matches!(entry.state.position, Position::AtSave(_)) {
         return Err(SaveError::AmendAtSave);
     }
-    let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
+    let (line, parent_id) = save_goes_on(repo, &entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // An amend needs the change-ID cache before the walk; a save, only once it has its save.
     let mut early_cache = None;
@@ -945,34 +938,29 @@ fn large_save(
     }))
 }
 
-/// The line a save goes on, and the save it builds on: the current line or, at a save, the new
-/// line `new_line`, which the save's diary entry then makes. `None` at a save without one.
-fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(Option<String>, Id), SaveError> {
-    match (&state.position, new_line) {
-        (Position::OnLine(line), None) => {
-            let tip = *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
-                detail: format!("the current line {line} has no save"),
-            })?;
-            Ok((Some(line.clone()), tip))
+/// The line a save goes on, and the save it builds on: the current line, or the new line
+/// `new_line`, which the save's diary entry then makes; the line the project was on stays where
+/// it was. `None` at a save without one.
+fn save_goes_on(
+    repo: &Repository,
+    state: &State,
+    new_line: Option<&str>,
+) -> Result<(Option<String>, Id), SaveError> {
+    let parent = match &state.position {
+        Position::OnLine(line) => *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
+            detail: format!("the current line {line} has no save"),
+        })?,
+        Position::AtSave(at) => *at,
+    };
+    let line = match (&state.position, new_line) {
+        (_, Some(name)) => {
+            check_new_name(repo, state, name, None)?;
+            Some(name.to_owned())
         }
-        (Position::OnLine(line), Some(_)) => Err(SaveError::LineFromLine { line: line.clone() }),
-        (Position::AtSave(at), None) => Ok((None, *at)),
-        (Position::AtSave(at), Some(name)) => {
-            validate_line_name(name).map_err(|e| SaveError::BadLineName {
-                name: name.to_owned(),
-                reason: match e {
-                    DecodeError::Invalid(reason) => reason,
-                    _ => "it breaks the rules for line names",
-                },
-            })?;
-            if let Some(taken) = line_named_alike(&state.lines, name) {
-                return Err(SaveError::LineTaken {
-                    taken: taken.to_owned(),
-                });
-            }
-            Ok((Some(name.to_owned()), *at))
-        }
-    }
+        (Position::OnLine(line), None) => Some(line.clone()),
+        (Position::AtSave(_), None) => None,
+    };
+    Ok((line, parent))
 }
 
 /// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state

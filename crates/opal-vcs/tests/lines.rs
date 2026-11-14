@@ -168,7 +168,7 @@ fn nothing_changed_at_a_save_needs_no_line_name() {
 }
 
 #[test]
-fn line_with_nothing_changed_says_no_line_was_made() {
+fn save_line_with_nothing_to_save_makes_no_line_and_names_line_new() {
     let (env, first) = at_first_save();
     let before = env.standing();
     let out = env.save(&["--line", "feature", "C"]);
@@ -176,7 +176,7 @@ fn line_with_nothing_changed_says_no_line_was_made() {
     let said = text(&out.stdout);
     assert!(said.contains("Nothing to save"), "{said}");
     assert!(
-        said.contains("No line was made: a new line starts with a save, so change a file first."),
+        said.contains("No line was made: opalro line new <name> makes one without saving."),
         "{said}"
     );
     assert_eq!(env.standing(), before);
@@ -186,15 +186,43 @@ fn line_with_nothing_changed_says_no_line_was_made() {
 }
 
 #[test]
-fn line_is_refused_on_a_line() {
+fn save_line_on_a_line_starts_a_new_line_and_leaves_the_old_one_where_it_was() {
     let env = Env::empty();
     env.opalro()
         .args(["start", "--preset", "custom"])
         .assert()
         .success();
+    let main = env.state().1.lines["main"];
+    let before = Repository::open(env.root()).unwrap().head().unwrap();
     env.overwrite("a.txt", "a");
-    let err = refused_save(&env, &["--line", "feature", "A"]);
-    assert!(err.contains("comes in v0.2"), "{err}");
+    let out = env.save(&["--line", "wall-run", "Try wall running"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("You're on the new line wall-run."));
+    let out = env.opalro().args(["line", "--json"]).output().unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["lines"], serde_json::json!(["main", "wall-run"]));
+    assert_eq!(doc["position"], serde_json::json!({"line": "wall-run"}));
+    let (repo, state) = env.state();
+    assert_eq!(state.lines["main"], main);
+    let save = repo.store().save(&state.lines["wall-run"], false).unwrap();
+    assert_eq!(save.parents, vec![main]);
+    // One diary entry, the save's, makes the line too.
+    let (_, entry) = repo.current().unwrap();
+    assert_eq!(entry.parent, Some(before));
+    assert_eq!(entry.command, "save");
+}
+
+#[test]
+fn save_line_on_a_line_refuses_a_tags_name() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.git(&["tag", "v1"]);
+    env.import();
+    env.overwrite("a.txt", "b");
+    let err = refused_save(&env, &["--line", "v1", "B"]);
+    assert!(err.contains("is a tag's name already"), "{err}");
+    let err = refused_save(&env, &["--line", "MAIN", "B"]);
+    assert!(err.contains("There is already a line main"), "{err}");
 }
 
 #[test]

@@ -485,7 +485,7 @@ Nothing to save: no changes since your last save, rmns "Add a to-do list and an 
 
 **A message is needed.** `opalro save` with no message stops and saves nothing. Only `--amend` may leave it out.
 
-**At an older save,** a save starts a new line, and `--line <name>` names it: see [Lines](#8-lines).
+**`--line <name>` starts a new line** with the save, and you're on it afterwards. On a line, the line you were on stays where it was. At an older save, a save always starts a new line, and `--line` names it: see [Lines](#8-lines). When there is nothing to save, no line is made; `opalro line new <name>` makes one without saving.
 
 ### `opalro changes`
 
@@ -1025,7 +1025,7 @@ Making a shelf and bringing one back are steps that `opalro undo` takes back. Sh
 
 A line is a name, like `main` or `feature/double-jump`, that points at the newest save made on it and moves forward each time you save. Every project starts with `main`.
 
-**How a line starts.** You start a new line by saving somewhere that isn't the newest save of a line:
+**How a line starts.** On a line, `opalro save --line <name> "message"` starts a new line with the save, and the line you were on stays where it was. You also start a new line by saving somewhere that isn't the newest save of a line:
 
 1. Find a save in `opalro history`, and go to it with `opalro goto` and its change ID. Opalro says you are not on a line.
 2. Change some files.
@@ -1050,7 +1050,7 @@ opalro line
 
 **Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case.
 
-**In v0.1** a line can be made, listed and switched to. There is no merging yet: two lines can't be combined into one, and lines can't be renamed or deleted. Those come in v0.2. While you are on a line, `--line` is refused.
+**In v0.1** a line can be made, listed and switched to. There is no merging yet: two lines can't be combined into one, and lines can't be renamed or deleted. Those come in v0.2.
 
 ## 9. Coming from Git
 

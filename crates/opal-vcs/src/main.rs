@@ -199,7 +199,7 @@ struct SaveArgs {
     /// After an import, save files Git wrote with CRLF line endings as they are.
     #[arg(long)]
     accept_crlf: bool,
-    /// At a save rather than on a line, the name of the new line this save starts.
+    /// The name of a new line this save starts.
     #[arg(long, value_name = "NAME")]
     line: Option<String>,
     /// Save without asking, however much the save adds.
@@ -970,8 +970,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     format!("Nothing to save there: it matches {last_save}.\n")
                 };
                 if req.new_line.is_some() {
-                    text += "No line was made: a new line starts with a save, so change a file \
-                             first.\n";
+                    text += "No line was made: opalro line new <name> makes one without saving.\n";
                 }
                 text
             };

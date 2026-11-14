@@ -97,7 +97,7 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             ),
             (
                 "opalro save --line wall-run \"Try wall running\"",
-                "At a save, start the new line wall-run",
+                "Start the new line wall-run with this save",
             ),
         ],
         "changes" => &[
