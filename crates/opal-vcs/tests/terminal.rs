@@ -586,6 +586,21 @@ fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {
     }
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_tag_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "word ".repeat(30).trim_end()]);
+    run_at(&env, None, &["tag", "v1"]);
+    run_at(&env, None, &["tag", "v2"]);
+    let (shown, _) = run_at(&env, Some(60), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    assert!(row.ends_with("...  [main]  [tag v1]  [tag v2]"), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 60), "{shown}");
+}
+
 #[test]
 fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
     let env = started();

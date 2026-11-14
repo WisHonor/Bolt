@@ -334,7 +334,7 @@ then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when
 - **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `Tags`, only when the save has tags, names them in name order, in blue like line names; `After` names the save before it by the first 12 hex digits of its fingerprint, and its message (a merge brought in from Git adds the other parents' fingerprints); `opalro show` takes such digits back exactly when some line's history, along first parents, reaches that save: not, say, for a merge's other parent whose Git branch was gone before the import, or for the parent of a save an import left you at past every line (a detached Git `HEAD`), unless another line reaches it; no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `opalro status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
-- **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.
+- **Colour:** IDs magenta and bold, the line and tag names blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.
 
 ### `opalro goto`
 

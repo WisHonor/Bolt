@@ -1,8 +1,8 @@
 //! `opalro tag`: making, listing, moving and deleting tags.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use opal_core::diary::Position;
-use opal_core::id::Id;
+use opal_core::diary::{Action, DiaryEntry, Position};
+use opal_core::id::{Id, hash_content};
 use opal_core::journal::Journal;
 use opal_core::repo::Repository;
 
@@ -488,7 +488,8 @@ fn history_and_show_name_a_saves_tags() {
 fn a_save_without_tags_shows_no_tags_row() {
     let (env, a, _) = tagged_then_saved();
     let (shown, _) = run(&env, &["show"], 0);
-    assert!(!shown.contains("Tags"), "{shown}");
+    assert!(shown.contains("\n    Line "), "{shown}");
+    assert!(!shown.contains("\n    Tags "), "{shown}");
     assert_eq!(json(&env, &["show"], 0)["tags"], serde_json::json!([]));
     let (shown, _) = run(&env, &["history"], 0);
     let rows: Vec<&str> = shown.lines().skip(2).collect();
@@ -500,6 +501,58 @@ fn a_save_without_tags_shows_no_tags_row() {
         serde_json::json!([{"name": "v1", "save": a.to_hex()}]),
         "{listed}"
     );
+}
+
+#[test]
+fn history_json_leaves_out_a_tag_off_the_listed_line() {
+    let env = project();
+    let on_main = tip(&env);
+    run(&env, &["tag", "v1.0"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "side");
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["tag", "side-1.0"], 0);
+    run(&env, &["goto", "main"], 0);
+    let listed = json(&env, &["history"], 0);
+    assert_eq!(
+        listed["tags"],
+        serde_json::json!([{"name": "v1.0", "save": on_main.to_hex()}]),
+        "{listed}"
+    );
+}
+
+#[test]
+fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
+    let env = project();
+    // The state names a tag list that no pack holds.
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut state = entry.state.clone();
+    state.tags = Some(hash_content(b"no such tag list"));
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "tag".into(),
+        who: entry.who,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    let packs = repo.new_packs().unwrap();
+    repo.commit(&lock, packs, &diary).unwrap();
+    drop(lock);
+    drop(repo);
+    for command in ["history", "show"] {
+        let (shown, said) = run(&env, &[command], 1);
+        assert_eq!(shown, "", "{command}: {said}");
+        assert!(said.starts_with("error: "), "{command}: {said}");
+        assert!(said.contains(" is not in the store"), "{command}: {said}");
+        let doc = json(&env, &[command], 1);
+        let told = doc["error"]["message"].as_str().unwrap();
+        assert!(told.contains(" is not in the store"), "{command}: {doc}");
+        assert_eq!(doc.get("saves"), None, "{command}: {doc}");
+    }
 }
 
 #[test]
