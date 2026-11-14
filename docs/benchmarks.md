@@ -1,6 +1,6 @@
 # Opalro Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Opalro promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Opalro must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Opalro beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
@@ -974,3 +974,37 @@ Everything here was measured on 2026-11-11. The finished code is `193c017` (the 
 
 - **The starting point:** the Nightly workflow on `main` before this work ([run 42966403404](https://github.com/WisHonor/Bolt/actions/runs/42966403404)) passed every job but Linux's gate under decision 099, where `goto` took 2.651 times Git's time (31.3 ms against 11.8), the worst of the ten runs then on record. Decision 129 picked a limit of 3 from those ten.
 - **The first run under the new rule** ([run 42970694870](https://github.com/WisHonor/Bolt/actions/runs/42970694870), on `f888f2a`, whose engine is `main`'s) failed on Linux: `status` 2.207 times Git's time (17.0 ms against 7.7) and `goto` 3.012 (25.8 ms against 8.6). Opalro's times were ordinary for that runner type; Git's were the quickest on record, on a runner quick at what Git spends its time on, while a `goto`'s ten flushes don't get quicker with the processor. Decision 132 raised `goto`'s limit to 3.5 from the eleven runs then on record, before the ten runs above. The `status` limit is the owner's and stays; the follow-ups list records that a runner whose Git is unusually quick can push `status` past it with Opalro's own time unchanged.
+
+## 11. v0.2, milestone 7: the walk on Git's own history, and the gate on the runners' new image
+
+**In plain words.** Milestone 7 added one thing that costs time: the walk that tells whether a save is in another's history ([decision 160](decisions/160-whether-a-save-is-in-anothers-history.md)), which `line delete` uses. On Git's own repository it answered 64 questions with Git's own counts, in 17.9 seconds in all. While milestone 7 was built, the speed gate went red on Linux for `status`. Opalro didn't get slower: on one processor type its `status` takes what `main`'s code takes. Git got quicker on the runners after their image changed, and Opalro's `status` now sits right at the limit there, with `main`'s code too.
+
+Everything here was measured on 2026-11-14: `24357e1` and `26e910a` on `milestone-7`, and `017aa95` on `v0.2`, which has `main`'s code.
+
+### The walk on Git's own repository
+
+The Nightly workflow's differential job ([run 43582373823](https://github.com/WisHonor/Opalro-VCS/actions/runs/43582373823)) imported git/git: 86,273 commits, 1 line, 8 server lines and 1,018 tags in 118.5 s, 457 MiB at peak, everything matching Git.
+
+- **64 pairs of tips** (the line and the server lines), each asked "how many saves does this one have that the other lacks": all 64 counts equal to `git rev-list --count`.
+- **17,850.1 ms walking in all,** about 0.28 s a pair. The job doesn't print each pair's time, so this doesn't tell short walks from long ones, and it wasn't compared with Git's time for the same questions. Both are measured before milestone 8 builds on the walk (the follow-ups list).
+- The walk reads back to where the oldest line the others have alone parted (decision 161's accepted cost), and two histories that share nothing are read whole.
+
+### The gate before and after milestone 7
+
+`bench/run.sh gate` by the `Speed gate` workflow, started by hand three times on each commit, and once by the Nightly workflow. Each cell is Opalro's median, Git's median and the ratio, as the job prints them. Limits: `status` and the small save 2, `goto` 3.5.
+
+| Commit | Run | Linux processor | `status` | Small save | `goto` |
+|---|---|---|---|---|---|
+| `017aa95` (`main`'s code) | [43585651883](https://github.com/WisHonor/Opalro-VCS/actions/runs/43585651883) | Xeon 6975P-C | 13.1 ms, 7.1 ms, 1.842 | 17.6 ms, 16.7 ms, 1.050 | 19.1 ms, 9.9 ms, 1.918 |
+| `017aa95` | [43585666162](https://github.com/WisHonor/Opalro-VCS/actions/runs/43585666162) | Xeon 6975P-C | 13.9 ms, 7.1 ms, 1.945 | 18.0 ms, 16.1 ms, 1.117 | 19.2 ms, 9.9 ms, 1.945 |
+| `017aa95` | [43585658749](https://github.com/WisHonor/Opalro-VCS/actions/runs/43585658749) | EPYC 7763 | 21.7 ms, 11.8 ms, 1.834 | 28.9 ms, 28.8 ms, 1.001 | 32.0 ms, 14.7 ms, 2.179 |
+| `24357e1` (milestone 7) | [43582373823](https://github.com/WisHonor/Opalro-VCS/actions/runs/43582373823) (Nightly) | Xeon 6975P-C | 13.4 ms, 6.6 ms, **2.029, over** | 17.3 ms, 15.8 ms, 1.095 | 19.2 ms, 8.8 ms, 2.184 |
+| `26e910a` (milestone 7) | [43584912525](https://github.com/WisHonor/Opalro-VCS/actions/runs/43584912525) | Xeon 6975P-C | 13.3 ms, 6.4 ms, **2.076, over** | 17.7 ms, 16.3 ms, 1.084 | 18.9 ms, 8.9 ms, 2.114 |
+| `26e910a` | [43584898811](https://github.com/WisHonor/Opalro-VCS/actions/runs/43584898811) | EPYC 7763 | 22.2 ms, 12.8 ms, 1.730 | 29.5 ms, 30.0 ms, 0.981 | 32.2 ms, 15.8 ms, 2.036 |
+| `26e910a` | [43584905919](https://github.com/WisHonor/Opalro-VCS/actions/runs/43584905919) | Xeon Platinum 8573C | 19.7 ms, 9.2 ms, **2.147, over** | 28.0 ms, 23.3 ms, 1.202 | 30.2 ms, 14.0 ms, 2.147 |
+
+- **Opalro's own times are the same before and after milestone 7** on each processor type: `status` 13.1 and 13.9 ms before against 13.3 and 13.4 ms after on the Xeon 6975P-C, 21.7 against 22.2 ms on the EPYC 7763, and the small save and `goto` alike. Milestone 7 changed no code that `status` runs, and nothing in `bench/` or the workflows.
+- **Git's time decides the ratio.** On one processor type Git's `status` took 6.4 to 7.1 ms from run to run, which is 1.84 to 2.08 times with Opalro unchanged.
+- **Git is quicker on these runners than it was.** In §10's ten runs of 2026-11-11, where Opalro took 13.5 and 14.0 ms, Git took 7.9 and 8.2 ms; now it takes 6.4 to 7.1 ms. In between the runners' image changed: `main`'s Nightly of 2026-11-13 ran on ubuntu-24.04 image 20261101.360.1 with git 2.56.0, today's runs on 20261111.127.1 and 20261111.370.1 with git 2.56.1. Which of the two made Git quicker wasn't measured.
+- **Windows passed every run,** on both commits: `status` 1.64 to 1.81 times Git's time, the small save 0.67 to 0.73, `goto` 1.66 to 1.79.
+- **What follows.** The gate for `status` can now fail on Linux with `main`'s own code, on a runner where Git is quick. The limit is the owner's (decisions 128 and 132) and wasn't touched. `status` needs room under it again before v0.2 is released (the follow-ups list).
