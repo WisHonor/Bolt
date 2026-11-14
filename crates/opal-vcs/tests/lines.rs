@@ -213,6 +213,26 @@ fn save_line_on_a_line_starts_a_new_line_and_leaves_the_old_one_where_it_was() {
 }
 
 #[test]
+fn save_line_on_a_line_with_nothing_to_save_makes_no_line() {
+    let env = Env::empty();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let before = env.standing();
+    let out = env.save(&["--line", "x", "msg"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.contains("Nothing to save"), "{said}");
+    assert!(said.contains("No line was made"), "{said}");
+    assert_eq!(env.standing(), before);
+    let out = env.opalro().args(["line", "--json"]).output().unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["lines"], serde_json::json!(["main"]));
+    assert_eq!(doc["position"], serde_json::json!({"line": "main"}));
+}
+
+#[test]
 fn save_line_on_a_line_refuses_a_tags_name() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");

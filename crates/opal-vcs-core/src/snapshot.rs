@@ -215,6 +215,8 @@ pub enum SaveError {
     LargeSave(LargeSave),
     #[error("You're at a save, not on a line, so there is no newest save of a line to amend.")]
     AmendAtSave,
+    #[error("An amend replaces the newest save of your line, so it can't start a new line.")]
+    AmendNewLine,
     #[error("{}", shown_too(by))]
     AmendShared {
         /// Who else shows the save: `line x`, `server line y@origin` or `tag v1`.
@@ -424,6 +426,9 @@ impl SaveError {
             SaveError::AmendAtSave => {
                 "To amend a line's newest save, go to the line first: opalro goto <line>".into()
             }
+            SaveError::AmendNewLine => {
+                "To start a line with these changes: opalro save --line <name> \"message\"".into()
+            }
             SaveError::AmendShared { .. } => {
                 "Save your changes as a new save instead: opalro save \"describe your change\""
                     .into()
@@ -449,6 +454,9 @@ pub fn save_folder(
 ) -> Result<SaveOutcome, SaveError> {
     if req.message.is_none() && !req.amend {
         return Err(SaveError::NeedsMessage);
+    }
+    if req.amend && req.new_line.is_some() {
+        return Err(SaveError::AmendNewLine);
     }
     let lock = repo.lock_for_change(req.command, on_wait)?;
     // A stopped switch is finished first, so the save is of the folder it left. What came of it
@@ -3047,6 +3055,30 @@ mod tests {
             panic!("nothing was amended");
         };
         assert_eq!(save.message, "Start project");
+    }
+
+    #[test]
+    fn an_amend_can_t_start_a_new_line() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("x"),
+            only: None,
+            amend: true,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(refused, Err(SaveError::AmendNewLine)),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
     }
 
     #[test]
