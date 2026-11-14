@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 7, its red-team session, RT17)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 159](159-tags.md) (one order for a name in all four commands; a name that is both a line and a tag; how a tag's name is shown, and what a hint may carry); [decision 068](068-a-goto-target-that-names-both.md) (the refusal of text that names two things now covers a line and a tag); [decision 158](158-making-renaming-and-deleting-lines.md) (`line delete` names a holder it can't read)
+- **Refined by:** [decision 163](163-red-team-m7-session-2-rulings.md) (the IDs the refusal shows now work, and its hints name the way out; `line delete` names a holder whose history can't be read; `[` and `]` are marked inside a quoted name; no hint puts any text from the project inside a command unless it is plain)
 
 ## Context
 
