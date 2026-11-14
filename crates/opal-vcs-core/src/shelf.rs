@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::diary::{Action, MAX_SHELVES};
 use crate::diff::{count_changes, for_each_change};
-use crate::history::{resolve, tip_of};
+use crate::history::{id_for_command, tip_of};
 use crate::id::Id;
 use crate::kept;
 use crate::listing::{Entry, EntryKind};
@@ -188,13 +188,15 @@ pub fn unshelf(
         if !plan.collisions.is_empty() {
             // Each kind of path in the way has its own way out.
             let (changed, unsaved) = changed_since(repo, base, current, plan.collisions)?;
-            // `goto` finds only the saves a line reaches.
-            let goto_reaches_base = !changed.is_empty()
-                && matches!(resolve(repo, &base.short_hex()), Ok(found) if found == base);
+            let goto_base = if changed.is_empty() {
+                None
+            } else {
+                id_for_command(repo, &base)
+            };
             return Err(SwitchError::ShelfInTheWay(Box::new(ShelfCollisions {
                 label: name,
                 base,
-                goto_reaches_base,
+                goto_base,
                 unsaved,
                 changed,
             })));

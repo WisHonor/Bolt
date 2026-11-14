@@ -811,10 +811,22 @@ fn a_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
         hex12(line),
         hex12(tag)
     );
-    let hint = "To reach one of them, type its ID as shown here. To reach the line by another \
-                name: opalro line rename <old> <new>";
+    let hint = "To reach one of them, type its ID as shown here. To end the double meaning, \
+                rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag \
+                --delete <name>).";
     refused_everywhere(&env, "v1.0", &message, hint);
-    // The way out: the line's own commands take its name as a line's.
+    // Each ID shown reaches its save.
+    run(&env, &["goto", &hex12(tag)], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(tag));
+    run(&env, &["goto", &hex12(line)], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(line));
+    // One way out: deleting the tag.
+    run(&env, &["tag", "--delete", "v1.0", "--yes"], 0);
+    run(&env, &["goto", "v1.0"], 0);
+    assert_eq!(env.state().1.position, Position::OnLine("v1.0".into()));
+    run(&env, &["undo"], 0);
+    run(&env, &["undo"], 0);
+    // The other: the line's own commands take its name as a line's.
     run(&env, &["line", "rename", "v1.0", "v1.0-line"], 0);
     run(&env, &["goto", "v1.0"], 0);
     assert_eq!(env.state().1.position, Position::AtSave(tag));
@@ -837,8 +849,17 @@ fn a_server_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
         &env,
         "main@origin",
         &message,
-        "To reach one of them, type its ID as shown here.",
+        "To reach one of them, type its ID as shown here. To end the double meaning, delete the \
+         tag: opalro tag --delete <name>",
     );
+    run(&env, &["goto", &hex12(server)], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(server));
+    run(&env, &["goto", &hex12(tag)], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(tag));
+    // As the hint says, deleting the tag ends the double meaning.
+    run(&env, &["tag", "--delete", "main@origin", "--yes"], 0);
+    run(&env, &["goto", "main@origin"], 0);
+    assert_eq!(env.state().1.position, Position::AtSave(server));
 }
 
 #[test]

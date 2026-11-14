@@ -463,9 +463,12 @@ fn a_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
     );
     assert_eq!(
         refused.hint().unwrap(),
-        "To reach one of them, type its ID as shown here. To reach the line by another name: \
-         opalro line rename <old> <new>"
+        "To reach one of them, type its ID as shown here. To end the double meaning, rename the \
+         line (opalro line rename <old> <new>) or delete the tag (opalro tag --delete <name>)."
     );
+    // Each ID the refusal shows reaches its save.
+    assert_eq!(resolve(&repo, &hex12(two)).unwrap(), two);
+    assert_eq!(resolve(&repo, &hex12(start)).unwrap(), start);
     assert!(matches!(
         resolve_target(&repo, "b"),
         Err(ResolveError::LineOrTag { .. })
@@ -494,12 +497,84 @@ fn a_server_line_and_a_tag_of_one_name_at_two_saves_are_refused() {
     );
     assert_eq!(
         refused.hint().unwrap(),
-        "To reach one of them, type its ID as shown here."
+        "To reach one of them, type its ID as shown here. To end the double meaning, delete the \
+         tag: opalro tag --delete <name>"
     );
     assert!(matches!(
         resolve_target(&repo, "main@origin"),
         Err(ResolveError::ServerLineOrTag { .. })
     ));
+    // `two` is on line b, but the ID shown reaches the server line's save even with b gone.
+    set(&mut repo, None, |st| {
+        st.lines.remove("b");
+    });
+    assert_eq!(resolve(&repo, &hex12(two)).unwrap(), two);
+}
+
+/// A save no line reaches, after `parent`, and one after it.
+fn off_the_lines(repo: &mut Repository, parent: Id) -> (Id, Id) {
+    let behind = plant(repo, &[parent]);
+    (behind, plant(repo, &[behind]))
+}
+
+#[test]
+fn a_fingerprint_finds_a_save_a_tag_or_server_line_reaches() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start) = project();
+    let (behind_tag, tagged) = off_the_lines(&mut repo, start);
+    let (behind_server, on_server) = off_the_lines(&mut repo, start);
+    let (behind_none, unheld) = off_the_lines(&mut repo, start);
+    for id in [behind_tag, tagged, behind_server, on_server] {
+        assert!(matches!(
+            resolve(&repo, &id.to_hex()[..8]),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+    set(&mut repo, Some(&tags(&[("rel-1", tagged)])), |_| {});
+    server_line(&mut repo, "main", on_server);
+    for id in [behind_tag, tagged, behind_server, on_server] {
+        assert_eq!(resolve(&repo, &id.to_hex()[..8]).unwrap(), id);
+        assert_eq!(resolve(&repo, &id.to_hex()).unwrap(), id);
+    }
+    for id in [behind_none, unheld] {
+        assert!(matches!(
+            resolve(&repo, &id.to_hex()[..8]),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+    // Fewer than 8 hex digits are still no ID.
+    assert!(matches!(
+        resolve(&repo, &tagged.to_hex()[..7]),
+        Err(ResolveError::NotFound(_))
+    ));
+}
+
+#[test]
+fn a_line_named_like_the_start_of_a_tag_only_saves_id_is_refused() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start) = project();
+    let (_, tagged) = off_the_lines(&mut repo, start);
+    let hex = tagged.to_hex()[..8].to_owned();
+    set(&mut repo, Some(&tags(&[("rel-1", tagged)])), |st| {
+        st.lines.insert(hex.clone(), start);
+    });
+    match resolve(&repo, &hex) {
+        Err(ResolveError::LineOrSave { saves, .. }) => assert_eq!(saves, [tagged.to_hex()]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_tag_at_a_save_that_cant_be_read_breaks_no_lookup() {
+    use crate::history::resolve;
+    let (_dir, mut repo, start, two) = two_of_its_own();
+    let missing = Id::from_hex(&"7".repeat(64)).unwrap();
+    set(&mut repo, Some(&tags(&[("ghost", missing)])), |_| {});
+    server_line(&mut repo, "main", missing);
+    // The lines' saves are found as before; the missing save by its own fingerprint only.
+    assert_eq!(resolve(&repo, &hex12(start)).unwrap(), start);
+    assert_eq!(resolve(&repo, &hex12(two)).unwrap(), two);
+    assert_eq!(resolve(&repo, &hex12(missing)).unwrap(), missing);
 }
 
 #[test]

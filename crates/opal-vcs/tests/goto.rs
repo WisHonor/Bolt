@@ -292,6 +292,41 @@ fn goto_a_save_at_a_lines_tip_is_at_the_save() {
 }
 
 #[test]
+fn goto_advises_renaming_a_line_whose_name_goto_would_refuse() {
+    let env = two_lines();
+    let (_, state) = env.state();
+    let (feature, main) = (state.lines["feature"], state.lines["main"]);
+    // A tag feature at another save.
+    env.plant_tags(["feature".to_owned()].into_iter(), main);
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains(
+            "Line feature is here too, but feature is also a tag at another save. To keep saving \
+             on the line, rename it first: opalro line rename <old> <new>"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("opalro goto feature"), "{said}");
+    // A line named like the start of another save's ID.
+    env.plant_tags(["rel-1".to_owned()].into_iter(), main);
+    let hex = main.to_hex()[..8].to_owned();
+    goto(&env, "main");
+    env.opalro()
+        .args(["line", "rename", "feature", &hex])
+        .assert()
+        .success();
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains(&format!(
+            "Line {hex} is here too, but {hex} is also the start of another save's ID. To keep \
+             saving on the line, rename it first: opalro line rename <old> <new>"
+        )),
+        "{said}"
+    );
+    assert!(!said.contains(&format!("opalro goto {hex}")), "{said}");
+}
+
+#[test]
 fn goto_a_server_line_is_at_its_save() {
     let env = two_lines();
     let (repo, state) = env.state();

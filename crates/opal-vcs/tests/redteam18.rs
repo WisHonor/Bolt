@@ -38,7 +38,6 @@ fn with_line(name: &str) -> Env {
 }
 
 #[test]
-#[ignore = "RT18-1: the ID a server-line-or-tag refusal gives doesn't reach a save off the lines"]
 fn the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves() {
     // origin/main is one commit ahead of main, and a tag named main@origin is at main.
     let env = Env::new();
@@ -118,7 +117,6 @@ fn a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-#[ignore = "RT18-4: show's hint names a change ID that changes --save can't find"]
 fn the_command_shows_hint_gives_finds_the_save_shown() {
     let env = with_line("feat");
     env.opalro().args(["goto", "feat"]).assert().success();
@@ -150,7 +148,6 @@ fn the_command_shows_hint_gives_finds_the_save_shown() {
 }
 
 #[test]
-#[ignore = "RT18-5: goto's advice to keep saving on a line names a line goto then refuses"]
 fn gotos_advice_to_keep_saving_on_a_line_can_be_followed() {
     let env = with_line("v1");
     let (repo, state) = env.state();

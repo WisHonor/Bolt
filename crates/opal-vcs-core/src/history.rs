@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use crate::changeids::ChangeIds;
-use crate::diary::{DiaryEntry, Position};
+use crate::diary::{DiaryEntry, Position, TagList};
 use crate::id::{ChangeId, Id, is_hex_start};
 use crate::lines::Target;
 use crate::repo::{RepoError, Repository};
@@ -88,13 +88,16 @@ impl ResolveError {
                     .to_owned(),
             ),
             ResolveError::LineOrTag { .. } => Some(
-                "To reach one of them, type its ID as shown here. To reach the line by another \
-                 name: opalro line rename <old> <new>"
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag \
+                 --delete <name>)."
                     .to_owned(),
             ),
-            ResolveError::ServerLineOrTag { .. } => {
-                Some("To reach one of them, type its ID as shown here.".to_owned())
-            }
+            ResolveError::ServerLineOrTag { .. } => Some(
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 delete the tag: opalro tag --delete <name>"
+                    .to_owned(),
+            ),
             ResolveError::Repo(r) => r.hint(),
         }
     }
@@ -403,14 +406,15 @@ fn by_change_prefix(
     Ok(found)
 }
 
-/// Calls `visit` once for each save reachable from `tips` along first parents. A chain an
-/// earlier tip walked is not walked again, so the cost doesn't grow with the number of tips.
+/// Calls `visit` once for each save reachable from `tips` along first parents and not in `seen`,
+/// adding them to it. A chain an earlier tip walked is not walked again, so the cost doesn't grow
+/// with the number of tips.
 fn each_once<E>(
+    seen: &mut HashSet<Id>,
     tips: impl IntoIterator<Item = Id>,
     mut first_parent: impl FnMut(&Id) -> Result<Option<Id>, E>,
     mut visit: impl FnMut(&Id),
 ) -> Result<(), E> {
-    let mut seen = HashSet::new();
     for tip in tips {
         let mut next = Some(tip);
         while let Some(id) = next {
@@ -424,11 +428,12 @@ fn each_once<E>(
     Ok(())
 }
 
-/// The saves, among those any line reaches by first parents, whose fingerprint starts with
-/// `text`, each with its fingerprint.
+/// The saves, among those any line, server line or tag reaches by first parents, whose
+/// fingerprint starts with `text`, each with its fingerprint. `tags` are the project's.
 fn by_fingerprint_prefix(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let text = text.to_ascii_lowercase();
@@ -459,20 +464,47 @@ fn by_fingerprint_prefix(
         }
     }
     let mut found = Vec::new();
+    let mut visit = |id: &Id| {
+        let hex = id.to_hex();
+        if hex.starts_with(&text) {
+            found.push((*id, hex));
+        }
+    };
+    let first_parent = |id: &Id| {
+        let save = repo.store().save(id, repo.signatures_allowed())?;
+        Ok::<_, RepoError>(save.parents.first().copied())
+    };
+    let mut seen = HashSet::new();
     each_once(
+        &mut seen,
         entry.state.lines.values().copied(),
-        |id| {
-            let save = repo.store().save(id, repo.signatures_allowed())?;
-            Ok::<_, RepoError>(save.parents.first().copied())
-        },
-        |id| {
-            let hex = id.to_hex();
-            if hex.starts_with(&text) {
-                found.push((*id, hex));
-            }
-        },
+        first_parent,
+        &mut visit,
+    )?;
+    // A server line's or tag's save that can't be read ends its chain there: it can still be
+    // named, and it never stops a search that the lines alone would answer.
+    let servers = repo.server_lines(&entry.state)?;
+    let more = (servers.servers.values())
+        .flat_map(|lines| lines.values().copied())
+        .chain(tags.tags.values().map(|tag| tag.save));
+    each_once(
+        &mut seen,
+        more,
+        |id| Ok::<_, RepoError>(first_parent(id).ok().flatten()),
+        &mut visit,
     )?;
     Ok(found)
+}
+
+/// The save `id` as a hint's command names it: its short change ID when that reaches it from where
+/// the project is, otherwise the first 12 hex digits of its fingerprint when those do; `None`
+/// when neither does.
+#[must_use]
+pub fn id_for_command(repo: &Repository, id: &Id) -> Option<String> {
+    let reaches = |text: &String| matches!(resolve(repo, text), Ok(found) if found == *id);
+    let save = repo.store().save(id, repo.signatures_allowed()).ok();
+    let short = save.and_then(|save| short_change_id(repo, id, &save.change_id).ok());
+    short.into_iter().chain([id.short_hex()]).find(reaches)
 }
 
 /// Finds a save from text, as [`find`] reads it.
@@ -487,8 +519,10 @@ pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
 /// is a line or tag name that is also the start of another save's ID.
 pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), ResolveError> {
     let (_, entry) = repo.current()?;
-    if let Some(line) = line_named(repo, &entry, text)? {
-        if let Some(tag) = tag_elsewhere(repo, &entry, text, line)? {
+    // Read once: it can be large.
+    let tags = repo.tag_list(&entry.state)?;
+    if let Some(line) = line_named(repo, &entry, &tags, text)? {
+        if let Some(tag) = tag_elsewhere(&tags, text, line) {
             return Err(ResolveError::LineOrTag {
                 text: text.to_owned(),
                 line: shown_save(&line),
@@ -501,7 +535,7 @@ pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), Resolv
     if let Some((line, server)) = text.split_once('@') {
         let servers = repo.server_lines(&entry.state)?;
         if let Some(&save) = servers.servers.get(server).and_then(|l| l.get(line)) {
-            if let Some(tag) = tag_elsewhere(repo, &entry, text, save)? {
+            if let Some(tag) = tag_elsewhere(&tags, text, save) {
                 return Err(ResolveError::ServerLineOrTag {
                     text: text.to_owned(),
                     line: shown_save(&save),
@@ -516,22 +550,16 @@ pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), Resolv
             return Ok((target, save));
         }
     }
-    let id = match tag_named(repo, &entry, text)? {
+    let id = match tag_named(repo, &entry, &tags, text)? {
         Some(id) => id,
-        None => one_of(text, by_id(repo, &entry, text)?)?,
+        None => one_of(text, by_id(repo, &entry, &tags, text)?)?,
     };
     Ok((Target::Save(id), id))
 }
 
 /// The save of the tag named `text`, if it isn't `save`.
-fn tag_elsewhere(
-    repo: &Repository,
-    entry: &DiaryEntry,
-    text: &str,
-    save: Id,
-) -> Result<Option<Id>, ResolveError> {
-    let tags = repo.tag_list(&entry.state)?;
-    Ok(tags.tags.get(text).map(|t| t.save).filter(|t| *t != save))
+fn tag_elsewhere(tags: &TagList, text: &str, save: Id) -> Option<Id> {
+    tags.tags.get(text).map(|t| t.save).filter(|t| *t != save)
 }
 
 /// A save as a refusal names it: its fingerprint's first 12 hex digits.
@@ -544,12 +572,13 @@ fn shown_save(id: &Id) -> String {
 fn line_named(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Option<Id>, ResolveError> {
     let Some(&line) = entry.state.lines.get(text) else {
         return Ok(None);
     };
-    let saves = others_by_id(repo, entry, text, line)?;
+    let saves = others_by_id(repo, entry, tags, text, line)?;
     if saves.is_empty() {
         return Ok(Some(line));
     }
@@ -564,12 +593,13 @@ fn line_named(
 fn tag_named(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Option<Id>, ResolveError> {
-    let Some(tag) = repo.tag_list(&entry.state)?.tags.remove(text) else {
+    let Some(tag) = tags.tags.get(text) else {
         return Ok(None);
     };
-    let saves = others_by_id(repo, entry, text, tag.save)?;
+    let saves = others_by_id(repo, entry, tags, text, tag.save)?;
     if saves.is_empty() {
         return Ok(Some(tag.save));
     }
@@ -583,10 +613,11 @@ fn tag_named(
 fn others_by_id(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
     own: Id,
 ) -> Result<Vec<String>, ResolveError> {
-    let mut saves: Vec<String> = by_id(repo, entry, text)?
+    let mut saves: Vec<String> = by_id(repo, entry, tags, text)?
         .into_iter()
         .filter(|(id, _)| *id != own)
         .map(|(_, shown)| shown)
@@ -600,13 +631,14 @@ fn others_by_id(
 fn by_id(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     if !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b)) {
         return by_change_prefix(repo, entry, text);
     }
     if is_hex_start(text) {
-        return by_fingerprint_prefix(repo, entry, text);
+        return by_fingerprint_prefix(repo, entry, tags, text);
     }
     Ok(Vec::new())
 }
@@ -1008,6 +1040,27 @@ mod tests {
     }
 
     #[test]
+    fn saves_off_the_lines_that_share_a_start_are_more_than_one() {
+        // No two saves can be made to share 8 digits, so the empty start stands in for one.
+        let (_dir, mut repo, ids) = project_with(&[]);
+        let behind = plant(&mut repo, &[ids[0]], "lmno", None);
+        let tagged = plant(&mut repo, &[behind], "mnop", None);
+        name_tag(&mut repo, "rel-1", tagged);
+        let (_, entry) = repo.current().unwrap();
+        let tags = repo.tag_list(&entry.state).unwrap();
+        let found = by_fingerprint_prefix(&repo, &entry, &tags, "").unwrap();
+        let mut all: Vec<Id> = found.iter().map(|(id, _)| *id).collect();
+        all.sort_unstable();
+        let mut want = vec![ids[0], behind, tagged];
+        want.sort_unstable();
+        assert_eq!(all, want);
+        assert!(matches!(
+            one_of("", found),
+            Err(ResolveError::Ambiguous { candidates, .. }) if candidates.len() == 3
+        ));
+    }
+
+    #[test]
     fn ambiguous_candidates_are_sorted_and_listed_once() {
         let a = (Id([0x12; 32]), "1234".to_owned());
         let b = (Id([0x11; 32]), "1111".to_owned());
@@ -1037,6 +1090,7 @@ mod tests {
         let mut reads = 0;
         let mut visited = Vec::new();
         each_once(
+            &mut HashSet::new(),
             (0..100_000).map(|_| numbered(299)),
             |id| {
                 reads += 1;
@@ -1060,6 +1114,7 @@ mod tests {
         let tips = [49, 20, 89, 49, 9, 60, 0].map(numbered);
         let (mut reads, mut visited) = (0, Vec::new());
         each_once(
+            &mut HashSet::new(),
             tips,
             |id| {
                 reads += 1;
@@ -1076,6 +1131,7 @@ mod tests {
     #[test]
     fn a_walk_that_fails_stops_with_the_error() {
         let result = each_once(
+            &mut HashSet::new(),
             [numbered(5)],
             |id| {
                 if number(id) == 3 {

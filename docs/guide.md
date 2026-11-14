@@ -546,7 +546,7 @@ Each row is the change ID, when the save was made, who made it, and the first li
 
 ### `opalro goto`
 
-Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint. A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or rename the line.
+Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
 
 ```sh
 opalro goto main
@@ -805,7 +805,7 @@ Save ptvz "Add double jump"
 Next: see its lines with: opalro changes --save ptvz
 ```
 
-The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
+The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
 
 ### `opalro start`
 
@@ -1151,7 +1151,7 @@ Next: look around with: opalro status
 
 - **In place.** It makes `.opalro` next to `.git`, in the same folder. It never changes the Git repository, never runs Git, and never goes online.
 - **What comes along:** every commit, exactly, as a save; your branches as lines; each server's branches, as Git last saw them, as server lines (`main@origin`); and tags. Names Opalro doesn't allow are renamed by a fixed rule, and the summary lists them. You end up where Git was: on its current branch's line, or at the save of a detached `HEAD`, where saving asks for a new line's name.
-- **A branch and a tag of one name.** Git lets a branch and a tag share a name (a release branch and a tag both called `v1`, say), and the import keeps both. If they point at different commits, Opalro won't guess which you mean: `opalro goto v1` stops, showing both saves' IDs. Type the ID you want, or give the line another name with `opalro line rename v1 v1-branch`; then `v1` means the tag.
+- **A branch and a tag of one name.** Git lets a branch and a tag share a name (a release branch and a tag both called `v1`, say), and the import keeps both. If they point at different commits, Opalro won't guess which you mean: `opalro goto v1` stops, showing both saves' IDs. Type the ID you want. To end the double meaning, give the line another name with `opalro line rename v1 v1-branch`, and `v1` then means the tag; or delete the tag with `opalro tag --delete v1`, and `v1` then means the line. A server branch and a tag of one name (`main@origin`) stop the same way, and deleting the tag is the way out.
 - **Work you hadn't committed** isn't refused: it shows as unsaved changes and goes into your next save.
 - **Ignore rules** carry over by themselves, since Opalro reads `.gitignore` files.
 - **Git LFS files** come in as ordinary files, read from `.git/lfs/objects`, which must hold every version the history names. Opalro never downloads them: first run `git lfs fetch --all`.

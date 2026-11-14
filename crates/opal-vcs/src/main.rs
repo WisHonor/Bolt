@@ -33,7 +33,7 @@ use opal_core::diary::{Action, DiaryEntry, Position};
 use opal_core::diff::{count_changes, for_each_change};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
-    LineIds, ResolveError, current_save, for_each_on_line, resolve, short_change_id,
+    LineIds, ResolveError, current_save, for_each_on_line, id_for_command, resolve, short_change_id,
 };
 use opal_core::id::{ChangeId, Id};
 use opal_core::import::{ImportError, ImportPass, ImportRequest, import_git};
@@ -1489,7 +1489,6 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         Ok::<(), StoreError>(())
     })?;
     let mut out = output::Stdout::new();
-    let mut shown_as = String::new();
     let done = (|| -> Result<Vec<Warning>, Failure> {
         if json {
             // The document `json!` would make, in pieces: serde_json writes an object's keys in
@@ -1521,7 +1520,6 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-        shown_as.clone_from(&short);
         let head = show_output::Head {
             id: &id,
             save: &save,
@@ -1539,10 +1537,13 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         Ok(warnings)
     })();
     output::listed(done, || so_far(early, repo))?;
-    if !json && count > 0 {
+    if !json
+        && count > 0
+        && let Some(named) = id_for_command(repo, &id)
+    {
         style::next(&format!(
             "see its lines with: {}",
-            style::err().command(&format!("opalro changes --save {shown_as}"))
+            style::err().command(&format!("opalro changes --save {named}"))
         ));
     }
     Ok(())
@@ -1973,10 +1974,18 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         None => done.save.short_hex(),
     };
     // Likewise, this only leaves out a line of advice if it fails.
-    let lines = repo
-        .current()
-        .map(|(_, e)| e.state.lines)
-        .unwrap_or_default();
+    let keep = match &done.position {
+        Position::AtSave(id) if !json => {
+            let lines = repo
+                .current()
+                .map(|(_, e)| e.state.lines)
+                .unwrap_or_default();
+            (lines.iter())
+                .find(|(_, tip)| *tip == id)
+                .and_then(|(line, _)| keep_saving(repo, line))
+        }
+        _ => None,
+    };
     warnings.extend(repo.store().warnings());
     let text = if json {
         let document = json!({
@@ -1993,7 +2002,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         });
         format!("{document}\n")
     } else {
-        goto_output::switched(&done, &short, save.as_ref(), &lines)
+        goto_output::switched(&done, &short, save.as_ref(), keep.as_ref())
     };
     output::print_done(&text, &warnings)?;
     // A goto to where the project already is records no step, so has nothing to undo.
@@ -2001,6 +2010,24 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         style::changed_your_mind();
     }
     Ok(())
+}
+
+/// How to keep saving on `line`, as its name reads now: only a name that goes onto it is
+/// advised.
+fn keep_saving(repo: &Repository, line: &str) -> Option<goto_output::KeepSaving> {
+    use goto_output::KeepSaving;
+    let rename = |why| {
+        Some(KeepSaving::Rename {
+            line: line.to_owned(),
+            why,
+        })
+    };
+    match resolve_target(repo, line) {
+        Ok(lines::Target::Line(_)) => Some(KeepSaving::Goto(line.to_owned())),
+        Err(ResolveError::LineOrTag { .. }) => rename("a tag at another save"),
+        Err(ResolveError::LineOrSave { .. }) => rename("the start of another save's ID"),
+        _ => None,
+    }
 }
 
 fn discard_command(

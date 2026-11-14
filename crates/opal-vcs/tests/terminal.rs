@@ -643,6 +643,47 @@ fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
     }
 }
 
+/// The save `opalro show name` at a terminal says to see with `opalro changes --save <id>`: the
+/// `<id>`, after checking that command runs.
+#[cfg(feature = "fault-injection")]
+fn shows_next_id(env: &Env, name: &str) -> String {
+    let (_, said) = run_at(env, Some(80), &["show", name]);
+    let (_, rest) = said
+        .split_once("Next: see its lines with: opalro changes --save ")
+        .unwrap_or_else(|| panic!("{said}"));
+    let id = rest.split_whitespace().next().unwrap().to_owned();
+    run_at(env, None, &["changes", "--save", &id]);
+    id
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn shows_next_step_names_a_save_off_the_line_by_its_fingerprint() {
+    // origin/main is ahead of main, and line feat, with tag rel at its save, past main.
+    let env = Env::new();
+    let one = env.commit("a.txt", "one", "one");
+    let two = env.commit("a.txt", "two", "two");
+    env.git(&["update-ref", "refs/remotes/origin/main", &two]);
+    env.git(&["reset", "-q", "--hard", &one]);
+    env.import();
+    run_at(&env, None, &["line", "new", "feat"]);
+    put(&env, "a.txt", "feat\n");
+    run_at(&env, None, &["save", "Feat"]);
+    run_at(&env, None, &["tag", "rel"]);
+    run_at(&env, None, &["goto", "main"]);
+    let (repo, state) = env.state();
+    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    let (feat, main) = (state.lines["feat"], state.lines["main"]);
+    let main_change = repo.store().save(&main, false).unwrap().change_id;
+    let short = opal_core::history::short_change_id(&repo, &main, &main_change).unwrap();
+    drop(repo);
+    for (name, save) in [("rel", feat), ("feat", feat), ("main@origin", server)] {
+        assert_eq!(shows_next_id(&env, name), save.to_hex()[..12], "{name}");
+    }
+    // On the line the project is on, the short change ID.
+    assert_eq!(shows_next_id(&env, "main"), short);
+}
+
 #[cfg(feature = "fault-injection")]
 #[test]
 fn changes_colours_only_added_removed_and_hunk_lines() {

@@ -266,9 +266,13 @@ fn unshelf_onto_another_save_applies_where_nothing_collides() {
     assert_eq!(files(env.root()), wanted);
 }
 
-/// The text of `opalro goto` to the save `save`, as a hint names it.
-fn goto_hint(save: Id) -> String {
-    format!("opalro goto {}", &save.to_hex()[..12])
+/// The text of `opalro goto` to the save `save` on the current line, as a hint names it: by its
+/// short change ID.
+fn goto_hint(env: &Env, save: Id) -> String {
+    let repo = Repository::open(env.root()).unwrap();
+    let change_id = repo.store().save(&save, false).unwrap().change_id;
+    let short = opal_core::history::short_change_id(&repo, &save, &change_id).unwrap();
+    format!("opalro goto {short}")
 }
 
 #[test]
@@ -288,7 +292,7 @@ fn unshelf_onto_a_save_that_changed_a_shelved_file_stops() {
     assert!(!said.contains("Your unsaved changes"), "{said}");
     // Saving, shelving or discarding wouldn't clear the way: going to that save does.
     assert!(!said.contains("Save, shelve or discard"), "{said}");
-    let goto = goto_hint(shelved_on);
+    let goto = goto_hint(&env, shelved_on);
     let way = format!("{goto}, then run opalro unshelf 1 there");
     assert!(said.contains(&way), "{said}");
     assert_eq!(
@@ -355,7 +359,7 @@ fn unshelf_tells_unsaved_work_from_what_the_save_changed() {
         said.contains("Save, shelve or discard your unsaved changes"),
         "{said}"
     );
-    let goto = goto_hint(shelved_on);
+    let goto = goto_hint(&env, shelved_on);
     assert!(
         said.contains(&format!("{goto}, then run opalro unshelf 1 there")),
         "{said}"
@@ -390,7 +394,7 @@ fn a_folder_the_save_made_a_file_counts_as_changed_by_the_save() {
         "{said}"
     );
     assert!(!said.contains("Your unsaved changes"), "{said}");
-    let goto = goto_hint(shelved_on);
+    let goto = goto_hint(&env, shelved_on);
     assert!(
         said.contains(&format!("{goto}, then run opalro unshelf 1 there")),
         "{said}"
@@ -457,7 +461,7 @@ fn a_save_no_line_reaches_any_more_is_not_offered_to_goto() {
     write(&env, "c.txt", "mine\n");
     ok(&env, &["undo", "--to", &changed_b.to_hex(), "--shelve"]);
     assert_eq!(labels(&env), ["1"]);
-    let goto = goto_hint(left_behind);
+    let goto = format!("opalro goto {}", &left_behind.to_hex()[..12]);
     let words: Vec<&str> = goto.split(' ').collect();
     refused(&env, &words[1..]);
     let (_, said) = refused(&env, &["unshelf"]);
