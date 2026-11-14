@@ -282,27 +282,25 @@ pub(crate) fn check_new_name(
 
 /// Runs `f` under the lock for changes once a stopped switch is finished. What finishing left to
 /// tell stays in `earlier` until `f` takes it with [`told`], so a refusal still tells it.
-fn step<T>(
+pub(crate) fn step<T, E: From<RepoError>>(
     repo: &mut Repository,
     command: &str,
     on_wait: &mut dyn FnMut(&str),
-    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier) -> Result<T, LineError>,
-) -> Result<T, LineError> {
+    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier) -> Result<T, E>,
+) -> Result<T, E> {
     let done = switch::locked(repo, command, on_wait, |repo, lock, earlier, _| {
         Ok(f(repo, lock, earlier))
     });
     match done {
         Ok(done) => done,
-        Err(SwitchError::Repo(e)) => Err(LineError::Repo(e)),
+        Err(SwitchError::Repo(e)) => Err(e.into()),
         // Taking the lock and finishing a switch fail only with the repository's errors.
-        Err(e) => Err(LineError::Repo(RepoError::Io(io::Error::other(
-            e.to_string(),
-        )))),
+        Err(e) => Err(RepoError::Io(io::Error::other(e.to_string())).into()),
     }
 }
 
 /// What finishing a stopped switch left to tell, taken for a step that succeeded.
-fn told(earlier: &mut Earlier) -> Vec<Warning> {
+pub(crate) fn told(earlier: &mut Earlier) -> Vec<Warning> {
     switch::switch_warnings(Plan::default(), Applied::default(), earlier).warnings
 }
 
