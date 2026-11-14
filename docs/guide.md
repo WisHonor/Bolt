@@ -1386,7 +1386,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No merging.** Two lines can't be combined, and lines can't be renamed or deleted (v0.2).
+- **No merging.** Two lines can't be combined into one yet, and Opalro can't yet show who changed each line of a file (both v0.2).
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.

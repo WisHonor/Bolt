@@ -592,6 +592,7 @@ fn tag_list(m: &Model, tags: &BTreeMap<String, usize>) -> Option<Id> {
     let list = TagList {
         tags: tags.iter().map(|(n, &s)| (n.clone(), tag(s))).collect(),
     };
+    // Built with the engine's own encoder; the encoding has format tests of its own.
     let flavor = ObjectKind::TagList.flavor().unwrap();
     Some(hash_record(flavor, &list.encode()))
 }

@@ -462,22 +462,22 @@ Each milestone's own questions are decided before its plan is written, and each 
 
 Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-deleting-lines.md) to [160](decisions/160-whether-a-save-is-in-anothers-history.md): [plans/2026-11-14-milestone-7-lines-and-tags.md](plans/2026-11-14-milestone-7-lines-and-tags.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
 
-**1. Whose history a save is in** (Task 1)
+**1. Whose history a save is in** ✅ (2026-11-14; Task 1)
 - One walk through every parent, newest first, that counts the saves a line has and nothing else has ([decision 160](decisions/160-whether-a-save-is-in-anothers-history.md)).
 - *Done when:* it agrees with a full walk on generated histories, whatever their clocks say about "held or not", and reads only what two sides don't share.
 
-**2. Lines made, renamed and deleted** (Tasks 2 to 5)
+**2. Lines made, renamed and deleted** ✅ (2026-11-14; Tasks 2 to 5)
 - `opalro line new`, `line rename`, `line delete`, and `save --line` from a line, each one diary step ([decision 158](decisions/158-making-renaming-and-deleting-lines.md)); `undo` says what came back without naming a save that was never made.
 - *Done when:* each works from the command line with `--json`, `line delete` asks exactly when nothing else holds the line's saves, and undo, redo and `tidy` treat the steps as any other.
 
-**3. Tags** (Tasks 6 to 9)
+**3. Tags** ✅ (2026-11-14; Tasks 6 to 9)
 - `opalro tag` makes, lists, moves and deletes tags; a tag's name is taken where a save is asked for; `history` and `show` name them ([decision 159](decisions/159-tags.md)).
 - *Done when:* moving and deleting ask first, an imported tag's name and message are shown escaped, and a project with 100,000 tags stays quick.
 
-**4. Git's words** (Task 10)
+**4. Git's words** ✅ (2026-11-14; Task 10)
 - `checkout -b`, `switch -c`, `branch -m`, `branch -d` and `tag -d` run Opalro's commands; `branch <name>` is still explained.
 
-**5. Proof** (Tasks 11 and 12)
+**5. Proof** ✅ (2026-11-14; Tasks 11 and 12)
 - The model test makes, renames and deletes lines and tags among its random steps; the ancestry walk is compared with `git rev-list` on every imported repository.
 
 **6. Docs, red team, review and merge** (Tasks 13 to 15)

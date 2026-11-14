@@ -262,6 +262,28 @@ What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opal
 | Before selling in Quebec, the owner's | A French version of the user agreement: Quebec's Charter of the French Language, as Bill 96 amended it, generally expects a standard-form contract offered in Quebec to be given in French first ([decision 156](../decisions/156-the-user-agreements-blanks-filled-by-the-owner.md); not legal advice). |
 | Later, by the guide | The guide assumes a desktop: on a bare Linux there may be no editor for `config.toml` (ubuntu:22.04 and debian:12 have none), and Windows Server Core has no Explorer for "Extract All" or the Start menu. The release rehearsal does those steps from the shell ([the final builds' rulings](2026-11-12-v0.1-final-rulings.md), ruling 15). A line for computers without a desktop would cover them. |
 
+## Deferred by milestone 7 (2026-11-14)
+
+What lines and tags left: the "Deferred" list of [the milestone's rulings](2026-11-14-milestone-7-rulings.md#deferred), then the small points the task reviews put off. None loses data.
+
+| By | Item |
+|---|---|
+| The owner's call | Short names made only of the letters k to z. A line or tag named `x`, `try` or `tmp` can also be the start of a save's change ID, and then `goto` refuses the name as meaning both ([decision 068](../decisions/068-a-goto-target-that-names-both.md)); `line new` makes such names easy. Counting text as the start of a change ID only from 4 letters on, which is what screens show, would make names of 1 to 3 letters safe. It changes what `goto` takes (decision 055), so it was left as it is ([decision 161](../decisions/161-what-building-milestone-7-refined.md); the rulings' "Please confirm" 9). |
+| If real projects need it | A save with a great many tags makes one very long `history` row. No cap was added: the cost is bounded by the tag list itself (decision 161; ruling 21). |
+| Later, with repair | A damaged tag list stops every command that resolves a name, `history` and `show` included, so no read-only view of the saves is left. A way to go on without tags, or to drop a damaged tag list, belongs with repair (decision 161; ruling 20). |
+| Later, if asked for | `opalro tag v1.0 3f9a0c2e` takes the second word as the message, as [decision 159](../decisions/159-tags.md) chose. A hint when that word itself names a save would catch the Git habit. |
+| Measure, before milestone 8 | An index of how deep each save is, if the walk's measured cost asks for it: a long-lived line combined in late makes the walk read back to where it parted ([decision 160](../decisions/160-whether-a-save-is-in-anothers-history.md), decision 161; ruling 9). A cache with a format of its own, so a decision of its own. |
+| Later, by the guide | A stored name that starts with `-` (only an import brings one) needs `--` on the command line (`opalro line delete -- -gone`), which neither the guide nor a command-line test shows. The name check also tells of a bad character or a name too long before it tells of the dash. |
+| Space only | The tag list is stored again when an undo brings back a list the store already holds. An import skips such copies (`has_good_copy`); a tag step could too. |
+| Should do | `opalro tag --yes` with no name quietly lists the tags, where it could say that `--yes` needs a tag. |
+| Should do | The model test has no server lines, so a server line holding a line's saves is tested only in the engine (`a_server_line_holds_a_line_too`). |
+| Should do | The ancestry walk clones a save's parents each time it passes marks on (`ancestry.rs`), which could be avoided; and no test shows that a save the walk can't read stops it with that error. |
+| Should do | When the line and tag commands can't read back the save they name, they name it by 12 hex digits (and `null` in `--json`) without saying why, as `goto` does (`save_named`, in `main.rs`). |
+| Should do | `opalro help line`'s forms: `help.rs` would leave out a form's option that has only a short name or no help text (none does today); `cli.rs` accepts a `Forms` section on any command's page; and the test of the forms collapses spaces, so it doesn't hold the indent of the `--yes` line. |
+| Should do | `opalro tag`: the list cuts a message to nothing when a very long name leaves no room on a narrow terminal; when the second look at the project that words a question can't be opened, the question names saves by 12 hex digits without saying why; the test of a tag step after a stopped `goto` checks the `--json` document's warnings, not what a person sees; and the test of the questions' escaping plants a hostile tag name, not a hostile save message. |
+| Should do | Reading the tag list: a pack damaged while the tag list is read is told as damage without naming the tag list; no test reaches the case of a tag list whose fingerprint doesn't match; and the test that `history` and `show` stop there checks that the `--json` error has no `saves`, which means nothing for `show`, `goto` and `tag`, whose documents never have one. |
+| Should do | The model test grew by about 440 lines for lines and tags (`crates/opal-vcs/tests/model.rs`); its line and tag helpers could move to a module of their own. |
+
 ## For the owner to decide
 
 - ~~The line-ending stop never asks~~ (kept 2026-11-04 in decision 039's review: the hint names both ways on, and a question could offer only saving the CRLF files, since Bolt never runs Git). From milestone 2's build, 2026-11-03. [Decision 039](../decisions/039-first-save-after-import.md) says the stop offers two ways on, and that without a terminal it names the flag; Bolt never asks, even in a terminal: the hint always offers both ways. Confirm, or ask for a question in a terminal.
@@ -276,6 +298,7 @@ What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opal
 - ~~Decisions 027 to 029 were made by Claude while the owner was away; each can be reversed in part or whole.~~ Reviewed 2026-11-02: all three kept.
 - Milestone 5's please-confirm list ([rulings](2026-11-08-milestone-5-rulings.md#please-confirm), 17 items: decisions 082 to 098 and the calls made while building). Not read yet when milestone 6 started (2026-11-09), so nothing in it is confirmed or reversed. [Milestone 6's rulings file](2026-11-10-milestone-6-rulings.md#carried-from-milestone-5-not-yet-read) carries the list unchanged, and decisions 082 to 098 stand until the owner reverses one with a new record.
 - Milestone 6's please-confirm list for presets and polish ([rulings](2026-11-10-milestone-6-rulings.md#please-confirm), 37 items: the license first, then decisions 113 to 127, the red team's rulings, the third speed gate on the two halves together, and the calls made while building). Not read yet when milestone 6 was merged; decisions 113 to 127 stand until the owner reverses one with a new record. The speed half has [its own list](2026-11-10-milestone-6-speed-rulings.md#please-confirm).
+- Milestone 7's please-confirm list for lines and tags ([rulings](2026-11-14-milestone-7-rulings.md#please-confirm), 9 items: decisions 157 to 161, made while the owner was away). Decisions 157 to 161 stand until the owner reverses one with a new record.
 
 ## Should do (minor review findings, verbatim from the task reviews)
 
