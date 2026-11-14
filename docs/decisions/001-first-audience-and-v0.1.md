@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 1
+- **Refined by:** [decision 157](157-v0.2-in-four-milestones.md) (v0.2 in four milestones, and what it leaves out)
 
 ## Context
 

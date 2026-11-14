@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 12
-- **Refined by:** [decision 033](033-git-branches-to-lines.md) (server lines exist from v0.1, filled by a Git import; server names follow the line-name rules); [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in shared records; imported annotated tags keep their Git bytes); [decision 055](055-lines-in-v0.1.md) (lines in v0.1); [decision 121](121-format-1-freezes-at-v0.1.md) (line names stay compared by Unicode's lowercase mapping when format 1 freezes)
+- **Refined by:** [decision 033](033-git-branches-to-lines.md) (server lines exist from v0.1, filled by a Git import; server names follow the line-name rules); [decision 034](034-tags-kept-and-shared.md) (tags and server lines live in shared records; imported annotated tags keep their Git bytes); [decision 055](055-lines-in-v0.1.md) (lines in v0.1); [decision 121](121-format-1-freezes-at-v0.1.md) (line names stay compared by Unicode's lowercase mapping when format 1 freezes); [decision 157](157-v0.2-in-four-milestones.md) (v0.2's milestones; moving saves between lines waits until after v0.2); [decision 158](158-making-renaming-and-deleting-lines.md) (making, renaming and deleting lines); [decision 159](159-tags.md) (making, moving and deleting tags); [decision 160](160-whether-a-save-is-in-anothers-history.md) (history through every parent)
 
 ## Context
 

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 17
-- **Refined by:** [decision 021](021-v0.1-command-scope.md) (the v0.1 command set); [decision 054](054-partial-saves.md) (partial saves name files, folders and patterns); [decision 058](058-changes-line-by-line.md) (`bolt changes` with the `similar` crate); [decision 072](072-undo-list-and-undo-to.md) (`undo --list` and `undo --to`); [decision 116](116-gits-words-as-shortcuts.md) (Git's words as shortcuts); [decision 117](117-what-json-covers-at-v0.1.md) (what `--json` covers at v0.1); [decision 120](120-the-terminal-ui.md) (the terminal UI); [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (`--debug` waits until after v0.1)
+- **Refined by:** [decision 021](021-v0.1-command-scope.md) (the v0.1 command set); [decision 054](054-partial-saves.md) (partial saves name files, folders and patterns); [decision 058](058-changes-line-by-line.md) (`bolt changes` with the `similar` crate); [decision 072](072-undo-list-and-undo-to.md) (`undo --list` and `undo --to`); [decision 116](116-gits-words-as-shortcuts.md) (Git's words as shortcuts); [decision 117](117-what-json-covers-at-v0.1.md) (what `--json` covers at v0.1); [decision 120](120-the-terminal-ui.md) (the terminal UI); [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (`--debug` waits until after v0.1); [decision 158](158-making-renaming-and-deleting-lines.md) (`line new`, `line rename` and `line delete`); [decision 159](159-tags.md) (`tag`)
 
 ## Context
 
