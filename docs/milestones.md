@@ -481,4 +481,5 @@ Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-de
 - The model test makes, renames and deletes lines and tags among its random steps; the ancestry walk is compared with `git rev-list` on every imported repository.
 
 **6. Docs, red team, review and merge** (Tasks 13 to 15)
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT17 (2 Medium, 3 Low) and RT18 on its fixes (1 Medium, 5 Low), every finding fixed ([decisions 162](decisions/162-red-team-m7-rulings.md) and [163](decisions/163-red-team-m7-session-2-rulings.md); [security.md](security.md) §6).
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
