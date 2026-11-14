@@ -253,6 +253,16 @@ mod tests {
         seen
     }
 
+    /// How saves are dated against their parents.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Clock {
+        /// Each save later than its parents.
+        Forwards,
+        Random,
+        /// Each save earlier than its parents: every save is looked at before its children.
+        Backwards,
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
         #[test]
@@ -263,7 +273,7 @@ mod tests {
             ),
             tip in any::<prop::sample::Index>(),
             others in prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
-            ordered in any::<bool>(),
+            clock in prop_oneof![Just(Clock::Forwards), Just(Clock::Random), Just(Clock::Backwards)],
         ) {
             let parents: Vec<Vec<usize>> = shape
                 .iter()
@@ -280,7 +290,14 @@ mod tests {
                 .iter()
                 .zip(&shape)
                 .enumerate()
-                .map(|(n, (p, (_, t)))| (p.clone(), if ordered { n as i64 } else { *t }))
+                .map(|(n, (p, (_, t)))| {
+                    let time = match clock {
+                        Clock::Forwards => n as i64,
+                        Clock::Random => *t,
+                        Clock::Backwards => -(n as i64),
+                    };
+                    (p.clone(), time)
+                })
                 .collect();
             let tip = tip.index(saves.len());
             let others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
@@ -293,7 +310,7 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let other_ids: Vec<Id> = others.iter().map(|&o| ids[o]).collect();
             let got = only_in(&repo, ids[tip], &other_ids).unwrap();
-            if ordered {
+            if clock == Clock::Forwards {
                 prop_assert_eq!(got, oracle);
             } else {
                 prop_assert_eq!(got == 0, oracle == 0);
