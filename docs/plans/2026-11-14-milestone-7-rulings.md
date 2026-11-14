@@ -1,0 +1,95 @@
+# Milestone 7 ("Lines and tags"): rulings
+
+The owner asked for v0.2 to be started while they were away, with Claude working alone. This file collects the calls made while planning and building milestone 7. It has three parts:
+
+- **Please confirm:** the calls that most change what Opalro does. Each can be reversed.
+- **Every ruling, as made:** each ruling as it was written in the build's ledger when it was made, task by task, with its reason and what it costs if it is wrong.
+- **Deferred:** what this milestone left for later, and where each item went.
+
+The decisions themselves are records [157](../decisions/157-v0.2-in-four-milestones.md) to [161](../decisions/161-what-building-milestone-7-refined.md). Each says "Decided by Claude, at the owner's request while the owner was away. The owner can reverse any part."
+
+**Branch:** `milestone-7`, from `v0.2`. Nothing was merged into `main`, which stays what v0.1 is released from.
+
+## Please confirm
+
+1. **v0.2 is four milestones, built on a branch of its own** ([157](../decisions/157-v0.2-in-four-milestones.md)): lines and tags, then combining where nothing conflicts, then conflicts, then `who` and the release. `main` isn't touched until you say so. Left out of v0.2: moving saves between lines (Git's rebase and cherry-pick), guessing that a changed file was also moved, merge programs, and a combined save where moving the line forward would do.
+2. **`opalro line new <name>` moves you onto the new line** ([158](../decisions/158-making-renaming-and-deleting-lines.md)). Git's `branch <name>` stays where it is; that is the classic way to save on the wrong branch, so Opalro doesn't copy it, and doesn't run `branch <name>` as a shortcut either.
+3. **`opalro line delete` asks only when nothing else holds the line's saves** (158, [161](../decisions/161-what-building-milestone-7-refined.md)). "Holds" means another line, a tag or a server line has the line's newest save in its history. Where you stand doesn't count, and shelves don't. Without a terminal it stops and names `--yes`. Undo brings the line back for the 30 days of the undo window.
+4. **Tags** ([159](../decisions/159-tags.md)): a new tag's name follows the line-name rules; another save is tagged with `--save <save>`, not a second bare word; moving and deleting a tag ask first; a tag's name works wherever a save is asked for, after lines and server lines and before IDs.
+5. **A new line's or tag's name can't start with `-`** (161). It would read as an option ever after. Names that came in from Git still work.
+6. **A message typed for a tag that is already there is left as it was** (161), and Opalro says so. Changing a tag's message means deleting it and making it again.
+7. **When the tag list can't be read, the commands that need it stop** (161), `history` and `show` included, with the damage message every other damage has. The alternative was to go on without tags and warn.
+8. **How Opalro tells whether a save is in another's history** ([160](../decisions/160-whether-a-save-is-in-anothers-history.md), 161): one walk, no index. Whether a line is held is exact whatever the saves' clocks say. The count shown in `line delete`'s question is exact unless some save is older than its parent, and then it can only be too high. The walk can read a long way back when a long-lived line was combined in late; an index of depths would fix that and is left until measurements ask for it.
+9. **Not changed, for you to weigh:** a line or tag named only with the letters k to z (`x`, `try`, `tmp`) can also be the start of a save's change ID, and then `goto` refuses the name as meaning both ([decision 068](../decisions/068-a-goto-target-that-names-both.md)). `line new` makes such names easy now. Counting text as the start of a change ID only from 4 letters on would make short names safe.
+
+## Every ruling, as made
+
+**Before the build (the plan's own check)**
+
+1. `LineError::Kept` doesn't say whether the question was asked. The command line's confirm closure notes whether it asked: asked and answered no prints `Nothing was deleted.` (exit 0); not asked is the error naming `--yes`. Cost if wrong: one more field on `Kept`.
+2. The plan's test for `tidy` said "undo twice (the tidy step, then the delete)" without checking that `tidy` records a step. The implementer undoes as many steps as it takes. (It takes one: `tidy` records none.)
+3. The plan's expected undo lines assumed an order of their parts. The parts come in the order the code gives them; the test pins what is printed once the wrongly named save is gone.
+
+**Task 1: the ancestry walk**
+
+4. The implementer planted a mistake (each save's marks spread only once) and the plan's property test still passed. Keep its pinned test and add clocks that run backwards to the property test. The plan's generator was too weak to catch the one subtle mistake the walk can make.
+5. That still caught the mistake in few cases, as the implementer measured and explained: in about half the cases the generator now puts the tip under a save of the others.
+6. The first review found that the walk kept reading after the answer was settled when the tip is held. The finding was right and the plan's wording was the defect: the answer is 0 as soon as the tip gains the others' mark, and shared saves spread too while a one-mark save is waiting. Cost if wrong: one more round.
+7. With the early answer, the second spreading seemed to guard nothing decision 160 promises, so each save was made to spread once. **Wrong, and reversed by the next ruling.**
+8. The implementer's probe showed saves dated alike break the count, and that with one spreading a tie where two lines parted sends the tip's mark alone to the project's first save. The second spreading came back, with one more stop clause: the walk also goes on while the newest waiting save isn't earlier than the earliest counted one. The property test gained a clock of ties with exact equality. The implementer's simulation of 300,000 histories found no counterexample, and the re-review re-derived the proof against the code.
+9. The re-review noted that a save only the others have keeps the walk going whatever its date, so a long-lived line combined in late makes the walk read back to where it parted. Accepted for now: it is the price of "0 exactly when held, whatever the clocks", Git's own search has the same cost without its index, and decision 160 leaves the index until measurements ask for it.
+
+**Task 2: lines, in the engine**
+
+10. `delete_line`'s holders are other lines' newest saves, tags' saves and server lines' saves; not where the project stands, not shelves.
+11. The review found that a refused line step after a stopped switch lost the warnings about what finishing that switch left unwritten. Fixed: they reach the caller on every path.
+
+**Task 3: `save --line` from a line**
+
+12. Three small points from the review went to the implementer at once: an amend that names a new line is refused by the engine too ("An amend replaces the newest save of your line, so it can't start a new line."); the JSON spec's stale sentence; a missing test.
+
+**Task 4: the line commands**
+
+13. `opalro help line` listed `--yes` as an option of `opalro line`, which refuses it. A form's option is shown with its form; the page has a `Forms` section, and a test holds it.
+
+**Task 5: undo's words**
+
+14. The review doubted what `undo` prints after a save that started a line. Settled by a test, not by argument: the code names the save and says its changes show as unsaved, which is right.
+
+**Task 6: tags, in the engine**
+
+15. A refused tag name said "a line name can only hold…". It now speaks of a tag's name.
+
+**Task 7: `opalro tag`**
+
+16. The second, read-only look at the project that words a question is opened only when a question is really asked, under the lock, so it can't show an older view.
+17. The `Moved` line names the old place by its ID alone.
+18. A message given for a tag already at that save is left as it was (decision 159: nothing to do), and the command says so: `Its message was left as it is.` A silently dropped message is unfriendly. Cost if wrong: one line to remove.
+19. A test failed at random: its line was named `x`, and one save in sixteen has a change ID starting with `x`, which makes `goto x` refuse the name. The milestone's tests were given names that can't read as the start of an ID. The rule itself (decision 068) wasn't changed: see "Please confirm" 9.
+
+**Task 9: tags in `history` and `show`**
+
+20. With a tag list that can't be read, `history` and `show` stop before printing anything, as `goto` and the rest already do through the resolver. Cost if wrong: with a damaged tag list no read-only view of the saves is left.
+21. No cap on how many tags a row shows; the cost is bounded by the tag list itself.
+22. The error for an unreadable tag list was `object … is not in the store`, with no hint. It is now told as damage, by name, from one place (`Repository::tag_list`); the hint every damage error shares stays as v0.1 has it.
+23. `undo --to` then said the cause twice. It reads the tag list record itself at that place, so its line is as it was before this milestone.
+
+**Task 10: Git's words**
+
+24. `opalro checkout -b -` made a line named `-`. A new line's or tag's name can't start with `-`; the stored rules and imported names are untouched. Cost if wrong: one rule to drop.
+25. The first-use hints for `checkout`, `switch` and `branch` gained a second line, since each word now runs more than one Opalro command.
+
+**Task 12: the walk against Git**
+
+26. Every test pins how many pairs of tips it compared, and the nightly one fails if it compared none. The nightly clone of Git's own repository is left as cloned: the tips come from server lines as well as lines. A small generated history with a commit dated before its parent runs the weaker form of the check on every push.
+
+## Deferred
+
+Each of these is a row in the [follow-ups](2026-11-01-milestone-1-follow-ups.md), under "Deferred by milestone 7".
+
+- Short names made only of the letters k to z, against the start of a change ID (for the owner; "Please confirm" 9).
+- A save with a great many tags makes one very long `history` row.
+- A damaged tag list stops every command that resolves a name; going on without tags, or dropping a damaged tag list, belongs with repair.
+- `opalro tag v1.0 3f9a0c2e` takes the second word as the message; a hint when that word names a save would catch the Git habit.
+- An index of how deep each save is, if the walk's measured cost asks for it.
+- Smaller points the reviews left: a stored name that starts with `-` needs `--` on the command line, which the guide doesn't show; the tag list is stored again when an undo brings back a list the store already holds; `opalro tag --yes` with no name quietly lists; the model test has no server lines.

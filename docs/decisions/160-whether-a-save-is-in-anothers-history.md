@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 7 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (combining starts from the common starting point); [decision 158](158-making-renaming-and-deleting-lines.md) (`line delete` asks when nothing else holds the line's saves)
+- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (the answer as soon as the save is reached; saves dated alike; what the walk costs)
 
 ## Context
 

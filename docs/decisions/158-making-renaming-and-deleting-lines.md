@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 7 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (lines are movable names in the diary; renaming or deleting one is an undoable step); [decision 017](017-commands-and-output.md) (`line new`, `line rename`, `line delete`); [decision 055](055-lines-in-v0.1.md) (on a line, `save --line` was refused until v0.2); [decision 116](116-gits-words-as-shortcuts.md) (Git's words for these)
+- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (a new name can't start with `-`; who holds a line's saves; `save --line` with nothing to save; how `help line` lists its forms)
 
 ## Context
 
