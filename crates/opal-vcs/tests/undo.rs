@@ -160,6 +160,29 @@ fn undoing_a_new_line_names_no_save() {
 }
 
 #[test]
+fn undoing_a_save_that_started_a_line_names_the_save() {
+    let env = project(&[("a.txt", "a\n")]);
+    let main = short(&env);
+    write(&env, "a.txt", "A\n");
+    ok(&env, &["save", "--line", "wall-run", "Try wall running"]);
+    let made = short(&env);
+    assert_eq!(
+        ok(&env, &["undo"]),
+        format!(
+            "Undid save {made} \"Try wall running\": line wall-run is gone, back on main at \
+             {main}; its changes show as unsaved.\n"
+        )
+    );
+    assert_eq!(
+        ok(&env, &["redo"]),
+        format!(
+            "Redid save {made} \"Try wall running\": wall-run is at {made} again, on wall-run at \
+             {made} again.\n"
+        )
+    );
+}
+
+#[test]
 fn undoing_a_rename_and_a_delete_say_what_came_back() {
     let env = project(&[("a.txt", "a\n")]);
     let id = short(&env);
