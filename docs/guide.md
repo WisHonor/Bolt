@@ -1097,7 +1097,7 @@ Now `opalro line` lists both lines, and `opalro goto main` and `opalro goto wall
 opalro line
 ```
 
-**Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case.
+**Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case. A new name can't start with `-`, so it never reads as an option.
 
 **Making, renaming and deleting a line.** `opalro line new <name>` starts a line at the save you're on, without saving: your unsaved changes stay, and your next save goes on the new line. `opalro line rename <old> <new>` renames a line, and `opalro line rename <new>` the one you're on; the saves already made keep the old name as the line they were made on. `opalro line delete <name>` deletes a line, but not the one you're on.
 

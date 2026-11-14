@@ -347,6 +347,28 @@ fn checkout_b_with_a_starting_point_is_explained() {
 }
 
 #[test]
+fn a_new_lines_name_cant_start_with_a_dash() {
+    let env = project();
+    let before = head(&env);
+    for (args, name) in [
+        (&["checkout", "-b", "-"][..], "-"),
+        (&["line", "new", "--", "-x"], "-x"),
+    ] {
+        let out = run(&env, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let said = text(&out.stderr);
+        assert!(
+            said.contains(&format!(
+                "`{name}` can't be a line's name: a line name cannot start with -."
+            )),
+            "{said}"
+        );
+    }
+    assert_eq!(head(&env), before);
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
 fn branch_m_renames() {
     let env = project();
     ok(&env, &["branch", "-m", "wall-run"]);

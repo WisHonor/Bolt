@@ -260,6 +260,13 @@ pub(crate) fn check_new_name(
         name: name.to_owned(),
         reason: name_reason(e, "a line name"),
     })?;
+    // It would read as an option. Only new names: a stored one may still start with `-`.
+    if name.starts_with('-') {
+        return Err(NameError::Bad {
+            name: name.to_owned(),
+            reason: "a line name cannot start with -".into(),
+        });
+    }
     // No two lines are alike, so the one found is the only one.
     if let Some(taken) = line_named_alike(&state.lines, name)
         && Some(taken) != renaming

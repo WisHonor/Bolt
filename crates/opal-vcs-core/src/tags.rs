@@ -200,6 +200,13 @@ fn check_new_name(list: &TagList, state: &State, name: &str) -> Result<(), TagEr
         name: name.to_owned(),
         reason: name_reason(e, "a tag's name"),
     })?;
+    // It would read as an option. Only new names: a stored one may still start with `-`.
+    if name.starts_with('-') {
+        return Err(TagError::BadName {
+            name: name.to_owned(),
+            reason: "a tag's name cannot start with -".into(),
+        });
+    }
     let folded = fold_line_name(name);
     if let Some(taken) = list.tags.keys().find(|t| fold_line_name(t) == folded) {
         return Err(TagError::Alike {
@@ -438,6 +445,33 @@ mod tests {
         );
         assert_eq!(line.hint().as_deref(), Some("Choose another name."));
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn a_new_tags_name_cant_start_with_a_dash_but_a_stored_one_still_works() {
+        let (_dir, mut repo, start, two) = two_saves();
+        let head = repo.head().unwrap();
+        for name in ["-", "-x", "--yes"] {
+            let bad = tagged(&mut repo, name, None, None, true).0.unwrap_err();
+            assert!(
+                matches!(&bad, TagError::BadName { reason, .. }
+                    if reason == "a tag's name cannot start with -"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(repo.head().unwrap(), head);
+        // One an import brought in still moves and deletes.
+        plant(&mut repo, &one("-old", start, "", vec![]));
+        let (done, _) = tagged(&mut repo, "-old", None, Some(two), true);
+        assert_eq!(
+            done.unwrap(),
+            Tagged::Moved {
+                from: start,
+                to: two
+            }
+        );
+        deleted(&mut repo, "-old", true).0.unwrap();
+        assert!(tags(&repo).is_empty());
     }
 
     #[test]

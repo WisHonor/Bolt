@@ -3082,6 +3082,31 @@ mod tests {
     }
 
     #[test]
+    fn a_new_line_from_a_save_can_t_start_with_a_dash() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("-x"),
+            only: None,
+            amend: false,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(&refused, Err(SaveError::Name(NameError::Bad { reason, .. }))
+                if reason == "a line name cannot start with -"),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
     fn an_amend_that_goes_no_further_keeps_its_line_s_list_and_no_other() {
         const KEY: [u8; 32] = [7; 32];
         let (dir, mut repo) = project();

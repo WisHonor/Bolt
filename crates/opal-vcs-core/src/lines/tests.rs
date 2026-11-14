@@ -162,6 +162,36 @@ fn a_new_lines_name_is_checked() {
 }
 
 #[test]
+fn a_new_name_cant_start_with_a_dash_but_a_stored_one_still_works() {
+    let (_dir, mut repo, s) = project();
+    for name in ["-", "-x", "--yes"] {
+        let bad = made(&mut repo, name).unwrap_err();
+        assert!(
+            matches!(&bad, LineError::Name(NameError::Bad { reason, .. })
+                if reason == "a line name cannot start with -"),
+            "{bad:?}"
+        );
+        let bad = renamed(&mut repo, Some("main"), name).unwrap_err();
+        assert!(
+            matches!(bad, LineError::Name(NameError::Bad { .. })),
+            "{bad:?}"
+        );
+    }
+    // One an import brought in still renames and deletes.
+    set(&mut repo, None, |st| {
+        st.lines.insert("-old".into(), s);
+        st.lines.insert("-gone".into(), s);
+    });
+    renamed(&mut repo, Some("-old"), "side").unwrap();
+    let (done, _) = deleted(&mut repo, "-gone", true);
+    done.unwrap();
+    assert_eq!(
+        state(&repo).lines.keys().collect::<Vec<_>>(),
+        ["main", "side"]
+    );
+}
+
+#[test]
 fn a_rename_keeps_the_project_on_the_line() {
     let (_dir, mut repo, s) = project();
     let done = renamed(&mut repo, None, "trunk").unwrap();
