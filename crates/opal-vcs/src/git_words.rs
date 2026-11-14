@@ -48,7 +48,7 @@ const RESTORE: &str = "`opalro discard <paths>` throws away the unsaved changes 
 const COMMIT: &str = "To save every change: `opalro save \"message\"`\n\
                       To save only some files and folders: `opalro save \"message\" <paths>`";
 const NEW_LINE: &str = "`opalro line new <name>` makes a new line where you are and moves onto it.\n\
-     To start it somewhere else, go there first: `opalro goto <save>`";
+                        To start it somewhere else, go there first: `opalro goto <save>`";
 const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files too.\n\
                      `opalro unshelf` brings the newest back, `opalro unshelf <number>` another.\n\
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
@@ -267,7 +267,10 @@ pub fn hint(word: &str) -> Option<&'static str> {
             "in Opalro, stash is shelf, which takes new files too: opalro shelf\n\
              A shelf keeps the number `opalro shelf --list` shows, counted from 1."
         }
-        "branch" => "in Opalro, branch is line: opalro line",
+        "branch" => {
+            "in Opalro, branch is line: opalro line\n\
+             With -d, it is `opalro line delete`; with -m, `opalro line rename`."
+        }
         "fsck" => "in Opalro, fsck is verify: opalro verify",
         "gc" => "in Opalro, gc is tidy: opalro tidy",
         _ => return None,

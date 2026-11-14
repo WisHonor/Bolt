@@ -1198,7 +1198,7 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git branch -m [<old>] <new>` | `opalro line rename [<old>] <new>` | runs; also `--move` |
 | `git branch -d <name>` | `opalro line delete <name>` | runs; also `--delete` |
 | `git branch -D <name>` | `opalro line delete <name> --yes` | runs |
-| `git tag` | `opalro tag` | the same word; `tag -d <name>` runs `tag --delete <name>` |
+| `git tag` | `opalro tag` | the same word; `tag -d <name>` runs `tag --delete <name>`. Git's `tag <name> <commit>` isn't Opalro's form: a second word is the tag's message, and another save is tagged with `--save <save>` |
 | `git fsck` | `opalro verify` | runs |
 | `git gc` | `opalro tidy` | runs |
 | `git restore` | `opalro discard <paths>` | explained, never run |

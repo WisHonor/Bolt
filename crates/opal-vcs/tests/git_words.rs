@@ -369,6 +369,35 @@ fn a_new_lines_name_cant_start_with_a_dash() {
 }
 
 #[test]
+fn the_forms_that_must_not_run_change_nothing() {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["tag", "v1.0"]);
+    let tags = || doc(&run(&env, &["tag", "--json"]).stdout)["tags"].clone();
+    let (before, lines_before, tags_before) = (head(&env), lines(&env), tags());
+    for args in [
+        &["branch", "-d", "main", "side"][..],
+        &["branch", "-M", "main", "side"],
+        &["checkout", "-B", "side"],
+        &["switch", "-C", "side"],
+        &["tag", "-d", "v1.0", "v2.0"],
+        &["tag", "-l"],
+    ] {
+        let out = run(&env, args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(head(&env), before, "{args:?}");
+    }
+    assert_eq!(lines(&env), lines_before);
+    assert_eq!(tags(), tags_before);
+}
+
+#[test]
 fn branch_m_renames() {
     let env = project();
     ok(&env, &["branch", "-m", "wall-run"]);
