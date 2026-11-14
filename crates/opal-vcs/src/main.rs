@@ -103,7 +103,8 @@ enum Command {
     /// Show your unsaved changes line by line, in these files and folders or everywhere; or what
     /// a save changed.
     Changes {
-        /// The save to show, by line name, change ID or fingerprint, against its first parent.
+        /// The save to show, by line name, tag, change ID or fingerprint, against its first
+        /// parent.
         #[arg(long, value_name = "SAVE")]
         save: Option<String>,
         /// Only these files and folders.
@@ -114,7 +115,7 @@ enum Command {
     History,
     /// Show one save.
     Show {
-        /// The save, by line name, change ID or fingerprint; the one you're at if left out.
+        /// The save, by line name, tag, change ID or fingerprint; the one you're at if left out.
         save: Option<String>,
     },
     /// List the lines, marking the one you're on, then the server lines; or make, rename or
@@ -141,7 +142,7 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
+    /// Go to a line, or to a save: by line name, line@server, tag, change ID or fingerprint.
     Goto {
         /// The line or save to go to.
         target: String,

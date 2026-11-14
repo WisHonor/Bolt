@@ -1,8 +1,10 @@
 //! `opalro tag`: making, listing, moving and deleting tags.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use opal_core::diary::{Action, DiaryEntry, Position, Tag, TagList};
 use opal_core::id::Id;
 use opal_core::journal::Journal;
+use opal_core::pack::ObjectKind;
 use opal_core::repo::Repository;
 
 mod support;
@@ -419,6 +421,96 @@ fn a_tag_step_after_a_stopped_goto_finishes_it_first() {
     assert_eq!(doc["warnings"][0]["kind"], "switch_finished", "{doc}");
     assert_eq!(tags(&env)[0].1, saved);
     assert!(!env.root().join(".opalro/state/journal").exists());
+}
+
+#[test]
+fn goto_takes_a_tags_name_and_lands_at_its_save_not_on_a_line() {
+    let (env, a, _) = tagged_then_saved();
+    let (shown, said) = run(&env, &["goto", "v1"], 0);
+    assert!(shown.starts_with("Switched to save "), "{shown}");
+    assert!(shown.contains(" \"A\". You are not on a line."), "{shown}");
+    assert_eq!(said, "");
+    assert_eq!(env.state().1.position, Position::AtSave(a));
+    assert_eq!(
+        std::fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "a"
+    );
+}
+
+#[test]
+fn show_and_changes_save_take_a_tags_name() {
+    let (env, a, _) = tagged_then_saved();
+    let shown = json(&env, &["show", "v1"], 0);
+    assert_eq!(shown["save"]["id"], a.to_hex(), "{shown}");
+    let (changed, _) = run(&env, &["changes", "--save", "v1"], 0);
+    assert!(changed.contains("a.txt"), "{changed}");
+    let (_, said) = run(&env, &["show", "v2"], 1);
+    assert!(
+        said.contains("No save, line or ID matches \"v2\"."),
+        "{said}"
+    );
+}
+
+#[test]
+fn tag_save_takes_a_tags_name() {
+    let (env, a, _) = tagged_then_saved();
+    let (shown, _) = run(&env, &["tag", "v1-copy", "--save", "v1"], 0);
+    assert!(shown.ends_with(" \"A\" as v1-copy.\n"), "{shown}");
+    assert_eq!(tags(&env)[1].1, a);
+}
+
+/// Gives the save `at` the tags `names`, written as one step through Opalro's own library.
+fn plant_tags(env: &Env, names: impl Iterator<Item = String>, at: Id) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let tag = Tag {
+        save: at,
+        message: String::new(),
+        git_tags: vec![],
+    };
+    let list = TagList {
+        tags: names.map(|name| (name, tag.clone())).collect(),
+    };
+    let mut packs = repo.new_packs().unwrap();
+    let mut state = entry.state.clone();
+    state.tags = Some(
+        packs
+            .add_record(ObjectKind::TagList, &list.encode())
+            .unwrap(),
+    );
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "tag".into(),
+        who: entry.who,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, packs, &diary).unwrap();
+}
+
+#[test]
+fn a_hundred_thousand_tags_are_listed_and_searched_in_time() {
+    let (env, a, _) = tagged_then_saved();
+    // One short of the most a project holds, so that one more can still be made.
+    plant_tags(&env, (1..100_000).map(|i| format!("v{i:06}")), a);
+    assert_eq!(tags(&env).len(), 99_999);
+    for args in [
+        &["tag"][..],
+        &["goto", "v050000"],
+        &["history"],
+        &["tag", "one-more"],
+    ] {
+        let mut cmd = env.opal_process_in(env.root());
+        cmd.args(args);
+        let ended = support::run_limited(cmd, 20);
+        eprintln!("{args:?}: {:.2} s", ended.secs);
+        assert_eq!(ended.code, Some(0), "{args:?}: {ended:?}");
+    }
+    assert_eq!(tags(&env).len(), 100_000);
+    assert_eq!(env.state().1.position, Position::AtSave(a));
 }
 
 /// `opalro args --json`, which must succeed; its document, masked.

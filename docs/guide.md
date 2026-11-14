@@ -546,7 +546,7 @@ Each row is the change ID, when the save was made, who made it, and the first li
 
 ### `opalro goto`
 
-Go to another line or save. Name a line, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint.
+Go to another line or save. Name a line, a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint. A tag takes you to its save, not onto a line.
 
 ```sh
 opalro goto main
@@ -778,7 +778,7 @@ opalro save "Add a draft"
 
 ### `opalro show`
 
-Show everything about one save: the one you're at, or one you name by line, change ID or fingerprint.
+Show everything about one save: the one you're at, or one you name by line, tag, change ID or fingerprint.
 
 ```sh
 opalro show
