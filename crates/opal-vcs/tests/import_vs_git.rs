@@ -14,8 +14,8 @@ use opal_core::names::holdable_here;
 use opal_core::repo::Repository;
 use opal_core::save::Person;
 use support::{
-    Env, assert_matches_git, assert_matches_git_counting, copy_dir, git, git_with_input, text,
-    top_folder,
+    Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting, copy_dir,
+    git, git_with_input, text, top_folder,
 };
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
@@ -117,6 +117,8 @@ fn everyday_history_matches_git() {
     env.import();
     // Git wrote every commit itself, so each save rebuilds its commit from its own fields.
     assert_eq!(assert_matches_git(env.root()), 0);
+    // Nine lines across the merges: held ones, ones that hold some, and ones parted at a fork.
+    assert_eq!(assert_ancestry_matches_git(env.root()), 64);
     // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
     // later one in byte order takes a suffix.
     let (repo, state) = env.state();
@@ -148,6 +150,7 @@ fn everyday_history_matches_git() {
         .assert()
         .success();
     assert_eq!(assert_matches_git(detached.path()), 0);
+    assert_ancestry_matches_git(detached.path());
 }
 
 #[test]
@@ -242,6 +245,7 @@ fn unusual_commits_match_git() {
     env.git(&["update-ref", "refs/heads/main", &last]);
     env.import();
     let counted = assert_matches_git_counting(env.root());
+    assert_ancestry_matches_git(env.root());
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
     assert_eq!(counted.headers, 8);
@@ -287,6 +291,7 @@ fn packed_and_loose_objects_match_git() {
     );
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_ancestry_matches_git(env.root());
 }
 
 #[test]
@@ -329,6 +334,7 @@ fn sha256_repositories_match_git() {
     env.git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_ancestry_matches_git(env.root());
 }
 
 #[test]
@@ -364,6 +370,7 @@ fn optional_git_files_are_ignored() {
     assert!(!git_dir.join("refs/heads/main").exists());
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_ancestry_matches_git(env.root());
 }
 
 #[test]
@@ -392,6 +399,7 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
     env.git(&["update-ref", "refs/heads/main", &commit]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_ancestry_matches_git(env.root());
 
     // What Git would write out here: each name this system can hold. Where letter case doesn't
     // count, the second of the twins is written over the first.
@@ -462,6 +470,23 @@ fn a_real_repository_matches_git() {
     // Its .git copied, so the clone stays as it was and the test can run again.
     let work = tempfile::tempdir().unwrap();
     copy_dir(&Path::new(&clone).join(".git"), &work.path().join(".git"));
+    // A clone has one branch of its own; the server's others become branches too, so the ancestry
+    // walk has pairs of lines to compare.
+    let fetched = text(&git(
+        work.path(),
+        &[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3)",
+            "refs/remotes/origin",
+        ],
+    ));
+    for branch in fetched.lines().filter(|&branch| branch != "HEAD") {
+        let (local, remote) = (
+            format!("refs/heads/{branch}"),
+            format!("refs/remotes/origin/{branch}"),
+        );
+        git(work.path(), &["update-ref", &local, &remote]);
+    }
     let who = Person {
         name: "Test".into(),
         email: "test@example.com".into(),
@@ -501,6 +526,7 @@ fn a_real_repository_matches_git() {
          ({:.1} s to compare).",
         began.elapsed().as_secs_f64()
     );
+    assert_ancestry_matches_git(work.path());
 }
 
 /// The most memory this process has held, as Linux reports it (VmHWM). Other systems need a

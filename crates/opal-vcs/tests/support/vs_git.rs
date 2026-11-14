@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::time::{Duration, Instant};
 
+use opal_core::ancestry::only_in;
 use opal_core::diary::{MAX_TAG_MESSAGE_BYTES, Position};
 use opal_core::git::{GitId, HashKind, ObjectType, object_id, rebuild_commit};
 use opal_core::id::Id;
@@ -304,6 +306,77 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
         headers,
         odd_people,
     }
+}
+
+/// Asserts that `only_in(newest of a, [newest of b])` counts what `git rev-list --count a ^b`
+/// does, for up to 64 ordered pairs of the lines in `dir`, taken in name order. Where some commit is
+/// dated before a parent the walk may count too many, though never too few and never a held line
+/// as holding some, so only that is asserted there. Returns how many pairs it compared.
+pub fn assert_ancestry_matches_git(dir: &Path) -> usize {
+    let repo = Repository::open(dir).unwrap();
+    let state = repo.current().unwrap().1.state;
+    let tips: Vec<(&String, Id, String)> = state
+        .lines
+        .iter()
+        .map(|(name, tip)| {
+            let save = repo.store().save(tip, false).unwrap();
+            let commit = std::str::from_utf8(&save.extra[EXTRA_GIT_COMMIT]).unwrap();
+            (name, *tip, commit.to_owned())
+        })
+        .collect();
+    let n = tips.len();
+    let pairs: Vec<(usize, usize)> = (0..n)
+        .flat_map(|a| (0..n).filter(move |&b| b != a).map(move |b| (a, b)))
+        .take(64)
+        .collect();
+    let exact = !dated_before_a_parent(dir);
+    let (mut walking, mut equal) = (Duration::ZERO, 0);
+    for &(a, b) in &pairs {
+        let ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) = (&tips[a], &tips[b]);
+        let began = Instant::now();
+        let ours = only_in(&repo, *a_tip, &[*b_tip]).unwrap();
+        walking += began.elapsed();
+        let not_b = format!("^{b_commit}");
+        let counted = text(&git(dir, &["rev-list", "--count", a_commit, &not_b]));
+        let theirs: u64 = counted.trim().parse().unwrap();
+        let at = format!("only_in({a_name}, [{b_name}]) is {ours} where Git counts {theirs}");
+        if exact {
+            assert_eq!(ours, theirs, "{at}");
+        } else {
+            assert_eq!(ours == 0, theirs == 0, "{at}");
+            assert!(ours >= theirs, "{at}");
+        }
+        equal += usize::from(ours == theirs);
+    }
+    let took = walking.as_secs_f64() * 1000.0;
+    if exact {
+        println!(
+            "The ancestry walk matches git rev-list on {} pairs of lines ({took:.1} ms walking).",
+            pairs.len()
+        );
+    } else {
+        println!(
+            "The ancestry walk on {} pairs of lines, where some commit is dated before a parent: \
+             {equal} equal to git rev-list's count, the rest higher ({took:.1} ms walking).",
+            pairs.len()
+        );
+    }
+    pairs.len()
+}
+
+/// Whether any commit's committer date is earlier than one of its parents'.
+fn dated_before_a_parent(dir: &Path) -> bool {
+    let log = text(&git(dir, &["log", "--all", "HEAD", "--format=%H %ct %P"]));
+    let rows: Vec<Vec<&str>> = log
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    let time: HashMap<&str, i64> = rows
+        .iter()
+        .map(|row| (row[0], row[1].parse().unwrap()))
+        .collect();
+    rows.iter()
+        .any(|row| row[2..].iter().any(|parent| time[parent] > time[row[0]]))
 }
 
 /// `git cat-file --batch`, asked for one object at a time.

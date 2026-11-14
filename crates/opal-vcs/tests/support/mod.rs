@@ -6,7 +6,7 @@ pub mod corpus;
 mod vs_git;
 
 #[allow(unused_imports)]
-pub use vs_git::{assert_matches_git, assert_matches_git_counting};
+pub use vs_git::{assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting};
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
