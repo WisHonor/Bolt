@@ -65,7 +65,6 @@ fn the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves() {
 }
 
 #[test]
-#[ignore = "RT18-2: line delete doesn't name a tag whose save's older saves can't be read"]
 fn line_delete_names_a_tag_whose_history_cant_be_read() {
     let env = with_line("feat");
     // A tag at a save that is in the store, whose parent isn't.

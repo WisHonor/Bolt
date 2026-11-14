@@ -1,5 +1,6 @@
 //! Lines made, renamed and deleted, and what `goto` can be pointed at (decision 055).
 
+use std::collections::HashSet;
 use std::io;
 
 use crate::ancestry::only_in;
@@ -227,7 +228,11 @@ pub fn delete_line(
         let saves: Vec<Id> = holders.iter().map(|(_, id)| *id).collect();
         let only_here = match only_in(repo, save, &saves) {
             Ok(n) => n,
-            Err(e) => return Err(unreadable_holder(repo, &holders).unwrap_or(e).into()),
+            Err(e) => {
+                return Err(unreadable_history(repo, name, save, &holders)
+                    .unwrap_or(e)
+                    .into());
+            }
         };
         if only_here > 0 && !confirm(name, only_here) {
             return Err(LineError::Kept {
@@ -267,25 +272,59 @@ fn holders<'a>(
     lines.chain(tags).chain(servers).collect()
 }
 
-/// The first of `holders` whose own save can't be read, as damage naming it; looked for only
-/// once the walk has failed.
-fn unreadable_holder(repo: &Repository, holders: &[(Holder<'_>, Id)]) -> Option<RepoError> {
-    holders.iter().find_map(
-        |(holder, id)| match repo.store().save(id, repo.signatures_allowed()) {
-            Err(
-                e @ (StoreError::Missing(_)
-                | StoreError::WrongKind { .. }
-                | StoreError::Decode(_)
-                | StoreError::Pack(PackError::FingerprintMismatch { .. })),
-            ) => Some(RepoError::Damaged {
-                detail: format!("{} names a save that can't be read: {e}", holder.shown()),
-            }),
-            _ => None,
-        },
-    )
+/// The first of `holders`, or else line `deleting` at `tip`, whose history through every parent
+/// holds a save that can't be read, as damage naming it. Looked for only once the walk has
+/// failed; each save is read at most once.
+fn unreadable_history(
+    repo: &Repository,
+    deleting: &str,
+    tip: Id,
+    holders: &[(Holder<'_>, Id)],
+) -> Option<RepoError> {
+    let mut seen = HashSet::new();
+    let starts = (holders.iter())
+        .map(|(holder, id)| (Some(holder), *id))
+        .chain([(None, tip)]);
+    for (holder, start) in starts {
+        let mut next = vec![start];
+        while let Some(id) = next.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match repo.store().save(&id, repo.signatures_allowed()) {
+                Ok(save) => next.extend(save.parents),
+                Err(
+                    e @ (StoreError::Missing(_)
+                    | StoreError::WrongKind { .. }
+                    | StoreError::Decode(_)
+                    | StoreError::Pack(PackError::FingerprintMismatch { .. })),
+                ) => {
+                    let detail = match holder {
+                        Some(h) if id == start => {
+                            format!("{} names a save that can't be read: {e}", h.shown())
+                        }
+                        Some(h) => {
+                            format!(
+                                "{} names a save whose history can't be read: {e}",
+                                h.shown()
+                            )
+                        }
+                        None => format!(
+                            "line {}'s history can't be read: {e}",
+                            escape(deleting, false)
+                        ),
+                    };
+                    return Some(RepoError::Damaged { detail });
+                }
+                // Not damage: the walk's own error says it.
+                Err(_) => return None,
+            }
+        }
+    }
+    None
 }
 
-/// What holds a line's saves, as [`unreadable_holder`]'s damage names it.
+/// What holds a line's saves, as [`unreadable_history`]'s damage names it.
 enum Holder<'a> {
     Line(&'a str),
     Tag(&'a str),

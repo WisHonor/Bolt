@@ -518,6 +518,15 @@ fn plant_state(env: &Env, change: impl FnOnce(&mut opal_core::diary::State, &mut
 /// `line delete side`, with and without `--yes`, must stop on damage naming `holder` and change
 /// nothing.
 fn delete_stops_naming(env: &Env, holder: &str) {
+    delete_stops_saying(
+        env,
+        &format!("{holder} names a save that can't be read: object "),
+    );
+}
+
+/// `line delete side`, with and without `--yes`, must stop with an error holding `says` and
+/// change nothing: neither the diary nor the packs.
+fn delete_stops_saying(env: &Env, says: &str) {
     let before = env.standing();
     for args in [
         &["line", "delete", "side"][..],
@@ -525,12 +534,7 @@ fn delete_stops_naming(env: &Env, holder: &str) {
     ] {
         let (shown, said) = run(env, args, 1);
         assert_eq!(shown, "", "{args:?}");
-        assert!(
-            said.contains(&format!(
-                "{holder} names a save that can't be read: object "
-            )),
-            "{args:?}: {said}"
-        );
+        assert!(said.contains(says), "{args:?}: {said}");
         assert!(
             said.contains("hint: Nothing was changed. Ask for help before trying to repair it."),
             "{args:?}: {said}"
@@ -574,6 +578,112 @@ fn line_delete_names_a_line_or_server_line_whose_save_cant_be_read() {
         state.server_lines = Some(id);
     });
     delete_stops_naming(&env, "the server line main@origin");
+}
+
+/// A save in the store whose parent isn't, a copy of main's newest otherwise; and that parent.
+fn orphan_save(env: &Env) -> (Id, Id) {
+    use opal_core::id::ChangeId;
+    use opal_core::save::Save;
+    let (repo, state) = env.state();
+    let tip = repo.store().save(&state.lines["main"], false).unwrap();
+    drop(repo);
+    let missing = Id::from_hex(&"5".repeat(64)).unwrap();
+    let mut orphan = None;
+    support::add_pack(env.root(), |pack| {
+        let save = Save {
+            parents: vec![missing],
+            change_id: ChangeId::random().unwrap(),
+            message: "orphan".into(),
+            ..tip
+        };
+        orphan = Some(pack.add_record(ObjectKind::Save, &save.encode()).unwrap());
+    });
+    (orphan.unwrap(), missing)
+}
+
+/// The damage message whose detail is `detail`, then the store's words for `missing`.
+fn history_damage(detail: &str, missing: Id) -> String {
+    format!(
+        "error: This project's Opalro data looks damaged: {detail}: object {missing} is not in \
+         the store.\n"
+    )
+}
+
+#[test]
+fn line_delete_names_a_tag_whose_older_saves_cant_be_read() {
+    let env = with_a_line_of_its_own();
+    let (orphan, missing) = orphan_save(&env);
+    env.plant_tags(["ghost".to_owned()].into_iter(), orphan);
+    let says = history_damage(
+        "the tag ghost names a save whose history can't be read",
+        missing,
+    );
+    delete_stops_saying(&env, &says);
+    // The same two saves further back: a save on top of the orphan.
+    let env = with_a_line_of_its_own();
+    let (orphan, _) = orphan_save(&env);
+    let mut later = None;
+    let (repo, _) = env.state();
+    let above = repo.store().save(&orphan, false).unwrap();
+    drop(repo);
+    support::add_pack(env.root(), |pack| {
+        let save = opal_core::save::Save {
+            parents: vec![orphan],
+            message: "later".into(),
+            ..above
+        };
+        later = Some(pack.add_record(ObjectKind::Save, &save.encode()).unwrap());
+    });
+    env.plant_tags(["ghost".to_owned()].into_iter(), later.unwrap());
+    delete_stops_saying(&env, &says);
+}
+
+#[test]
+fn line_delete_names_a_line_or_server_line_whose_older_saves_cant_be_read() {
+    let env = with_a_line_of_its_own();
+    let (orphan, missing) = orphan_save(&env);
+    plant_state(&env, |state, _| {
+        state.lines.insert("broken".into(), orphan);
+    });
+    delete_stops_saying(
+        &env,
+        &history_damage(
+            "the line broken names a save whose history can't be read",
+            missing,
+        ),
+    );
+
+    let env = with_a_line_of_its_own();
+    let (orphan, missing) = orphan_save(&env);
+    plant_state(&env, |state, packs| {
+        let servers = ServerLines {
+            servers: [("origin".to_owned(), [("main".to_owned(), orphan)].into())].into(),
+        };
+        let id = packs
+            .add_record(ObjectKind::ServerLines, &servers.encode())
+            .unwrap();
+        state.server_lines = Some(id);
+    });
+    delete_stops_saying(
+        &env,
+        &history_damage(
+            "the server line main@origin names a save whose history can't be read",
+            missing,
+        ),
+    );
+}
+
+#[test]
+fn line_delete_names_the_deleted_lines_own_history_when_no_holders_holds_it() {
+    let env = with_a_line_of_its_own();
+    let (orphan, missing) = orphan_save(&env);
+    plant_state(&env, |state, _| {
+        state.lines.insert("side".into(), orphan);
+    });
+    delete_stops_saying(
+        &env,
+        &history_damage("line side's history can't be read", missing),
+    );
 }
 
 #[test]

@@ -731,3 +731,48 @@ fn a_refused_line_step_still_tells_what_finishing_a_stopped_goto_left() {
     assert!(kinds.contains(&SWITCH_FINISHED), "{told:?}");
     assert!(kinds.contains(&NOT_WRITTEN_HERE), "{told:?}");
 }
+
+/// Stores a copy of `like` whose parent isn't in the store, and gives it.
+fn orphan(repo: &mut Repository, like: Id) -> Id {
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    let save = Save {
+        parents: vec![Id::from_hex(&"5".repeat(64)).unwrap()],
+        change_id: ChangeId::random().unwrap(),
+        message: "orphan".into(),
+        ..repo.store().save(&like, false).unwrap()
+    };
+    let mut packs = repo.new_packs().unwrap();
+    let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    entry.parent = Some(head);
+    entry.command = "save".into();
+    entry.folder_change = None;
+    repo.commit(&lock, packs, &entry).unwrap();
+    id
+}
+
+#[test]
+fn a_thousand_tags_whose_history_cant_be_read_are_looked_through_once() {
+    let (_dir, mut repo, _, two) = two_of_its_own();
+    let lost = orphan(&mut repo, two);
+    let names: Vec<String> = (0..1000).map(|i| format!("t{i:04}")).collect();
+    let list = tags(&names.iter().map(|n| (n.as_str(), lost)).collect::<Vec<_>>());
+    set(&mut repo, Some(&list), |_| {});
+    let head = repo.head().unwrap();
+    let before = repo.store().saves_read();
+    let (done, asked) = deleted(&mut repo, "b", true);
+    let read = repo.store().saves_read() - before;
+    let e = done.unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "This project's Opalro data looks damaged: the tag t0000 names a save whose history \
+             can't be read: object {} is not in the store.",
+            "5".repeat(64)
+        )
+    );
+    assert!(asked.is_empty());
+    assert_eq!(repo.head().unwrap(), head);
+    // The walk and the look read the four saves there are, each at most twice.
+    assert!(read <= 8, "{read}");
+}
