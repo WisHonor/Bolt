@@ -41,21 +41,27 @@ fn a_server_lines_name_means_the_same_save_in_goto_and_show() {
     env.git(&["update-ref", "refs/remotes/origin/main", &one]);
     env.git(&["tag", "main@origin", &two]);
     env.import();
-    let (repo, state) = env.state();
-    let tag = repo.tag_list(&state).unwrap().tags["main@origin"].save;
-    drop(repo);
-    let (code, said, doc) = shown(&env, "main@origin");
-    assert_ne!(
-        doc["save"]["id"],
-        tag.to_hex(),
-        "show main@origin showed the tag's save: {said}"
-    );
     // The server line and the tag are at two saves, so both commands refuse the name alike.
     let (shown_code, _, shown_said) = run(&env, &["show", "main@origin"]);
     let (goto_code, _, goto_said) = run(&env, &["goto", "main@origin"]);
-    assert_eq!((code, shown_code, goto_code), (Some(1), Some(1), Some(1)));
+    assert_eq!((shown_code, goto_code), (Some(1), Some(1)));
     assert!(shown_said.contains("server line"), "{shown_said}");
     assert_eq!(shown_said, goto_said);
+}
+
+#[test]
+fn show_takes_a_server_lines_name_as_goto_does() {
+    let env = Env::new();
+    let one = env.commit("a.txt", "one", "one");
+    env.commit("a.txt", "two", "two");
+    env.git(&["update-ref", "refs/remotes/origin/main", &one]);
+    env.import();
+    let (repo, state) = env.state();
+    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    drop(repo);
+    let (code, said, doc) = shown(&env, "main@origin");
+    assert_eq!(code, Some(0), "{said}");
+    assert_eq!(doc["save"]["id"], server.to_hex(), "{doc}");
 }
 
 #[test]

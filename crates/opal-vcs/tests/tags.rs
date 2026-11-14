@@ -435,6 +435,14 @@ fn an_odd_tags_name_is_shown_between_quotes() {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&name), "{listed}");
+        let history = json(&env, &["history"], 0);
+        assert!(
+            history["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({"name": name, "save": at.to_hex()})),
+            "{history}"
+        );
         assert!(
             json(&env, &["show"], 0)["tags"]
                 .as_array()
@@ -663,6 +671,8 @@ fn history_json_leaves_out_a_tag_off_the_listed_line() {
 fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
     let env = project();
     let at = tip(&env);
+    // On another line, so that `goto main` has somewhere to go.
+    run(&env, &["line", "new", "side"], 0);
     // The state names a tag list that no pack holds.
     let mut repo = Repository::open(env.root()).unwrap();
     let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
@@ -686,7 +696,19 @@ fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
                    object ";
     let hint = "Nothing was changed. Ask for help before trying to repair it.";
     let id = at.to_hex();
-    for args in [&["history"][..], &["show"], &["goto", &id[..12]], &["tag"]] {
+    let before = env.standing();
+    // A line's name reads the tag list too, to see whether a tag elsewhere shares it.
+    let commands = [
+        &["history"][..],
+        &["show"],
+        &["goto", &id[..12]],
+        &["tag"],
+        &["goto", "main"],
+        &["show", "main"],
+        &["changes", "--save", "main"],
+        &["tag", "rel-1", "--save", "main"],
+    ];
+    for args in commands {
         let (shown, said) = run(&env, args, 1);
         assert_eq!(shown, "", "{args:?}: {said}");
         assert!(
@@ -701,6 +723,8 @@ fn history_and_show_stop_at_a_tag_list_that_cannot_be_read() {
         assert_eq!(doc["error"]["hint"], hint, "{args:?}: {doc}");
         assert_eq!(doc.get("saves"), None, "{args:?}: {doc}");
     }
+    assert_eq!(env.standing(), before);
+    assert_eq!(env.state().1.position, Position::OnLine("side".into()));
 }
 
 #[test]

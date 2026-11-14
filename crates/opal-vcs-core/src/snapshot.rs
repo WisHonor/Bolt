@@ -219,7 +219,8 @@ pub enum SaveError {
     AmendNewLine,
     #[error("{}", shown_too(by))]
     AmendShared {
-        /// Who else shows the save: `line x`, `server line y@origin` or `tag v1`.
+        /// Who else shows the save, each as shown, escaped: `line x`, `server line y@origin` or
+        /// `tag v1`.
         by: Vec<String>,
     },
 }
@@ -320,7 +321,7 @@ fn lfs_pointers_in_folder(paths: &[String], count: u64) -> String {
 
 /// Names the first few of those that show the save an amend would replace, and counts the rest.
 fn shown_too(by: &[String]) -> String {
-    let mut named: Vec<String> = by.iter().take(NAMED).map(|b| escape(b, false)).collect();
+    let mut named: Vec<String> = by.iter().take(NAMED).cloned().collect();
     let more = by.len().saturating_sub(NAMED);
     if more > 0 {
         named.push(format!("{more} more"));
@@ -727,11 +728,12 @@ pub(crate) fn shown_elsewhere(
 ) -> Result<Vec<String>, SaveError> {
     let mut by: Vec<String> = lines_reaching(repo, cache, state, line, id, &save.change_id)?
         .into_iter()
-        .map(|name| format!("line {name}"))
+        .map(|name| format!("line {}", escape(name, false)))
         .collect();
     for (server, lines) in &repo.server_lines(state)?.servers {
         for (name, &tip) in lines {
             if tip == id {
+                let (name, server) = (escape(name, false), escape(server, false));
                 by.push(format!("server line {name}@{server}"));
             }
         }
@@ -2918,9 +2920,6 @@ mod tests {
             SaveError::LfsPointersInFolder {
                 paths: vec!["fine".into(), hostile()],
                 count: 2,
-            },
-            SaveError::AmendShared {
-                by: vec!["line fine".into(), format!("tag {HOSTILE}")],
             },
         ] {
             assert_hostile_text_escaped(&e.to_string());

@@ -221,24 +221,13 @@ pub fn delete_line(
         if entry.state.position == Position::OnLine(name.to_owned()) {
             return Err(LineError::OnIt(name.to_owned()));
         }
-        // Where the project stands holds nothing: it moves on with the next goto.
-        let mut holders: Vec<Id> = entry
-            .state
-            .lines
-            .iter()
-            .filter(|(line, _)| *line != name)
-            .map(|(_, id)| *id)
-            .collect();
         let tags = repo.tag_list(&entry.state)?;
-        holders.extend(tags.tags.values().map(|tag| tag.save));
         let servers = repo.server_lines(&entry.state)?;
-        holders.extend(servers.servers.values().flat_map(|l| l.values().copied()));
-        let only_here = match only_in(repo, save, &holders) {
+        let holders = holders(&entry.state, name, &tags, &servers);
+        let saves: Vec<Id> = holders.iter().map(|(_, id)| *id).collect();
+        let only_here = match only_in(repo, save, &saves) {
             Ok(n) => n,
-            Err(e) => {
-                let named = unreadable_holder(repo, &entry.state, name, &tags, &servers);
-                return Err(named.unwrap_or(e).into());
-            }
+            Err(e) => return Err(unreadable_holder(repo, &holders).unwrap_or(e).into()),
         };
         if only_here > 0 && !confirm(name, only_here) {
             return Err(LineError::Kept {
@@ -258,15 +247,14 @@ pub fn delete_line(
     })
 }
 
-/// The first line other than `deleting`, tag or server line whose own save can't be read, as
-/// damage naming it; looked for only once the walk has failed.
-fn unreadable_holder(
-    repo: &Repository,
-    state: &State,
+/// What holds the saves of line `deleting`, each with its save: every other line, every tag and
+/// every server line. Where the project stands holds nothing: it moves on with the next goto.
+fn holders<'a>(
+    state: &'a State,
     deleting: &str,
-    tags: &TagList,
-    servers: &ServerLines,
-) -> Option<RepoError> {
+    tags: &'a TagList,
+    servers: &'a ServerLines,
+) -> Vec<(Holder<'a>, Id)> {
     let lines = (state.lines.iter())
         .filter(|(line, _)| *line != deleting)
         .map(|(line, id)| (Holder::Line(line), *id));
@@ -276,8 +264,14 @@ fn unreadable_holder(
             .iter()
             .map(move |(line, id)| (Holder::Server(line, server), *id))
     });
-    lines.chain(tags).chain(servers).find_map(|(holder, id)| {
-        match repo.store().save(&id, repo.signatures_allowed()) {
+    lines.chain(tags).chain(servers).collect()
+}
+
+/// The first of `holders` whose own save can't be read, as damage naming it; looked for only
+/// once the walk has failed.
+fn unreadable_holder(repo: &Repository, holders: &[(Holder<'_>, Id)]) -> Option<RepoError> {
+    holders.iter().find_map(
+        |(holder, id)| match repo.store().save(id, repo.signatures_allowed()) {
             Err(
                 e @ (StoreError::Missing(_)
                 | StoreError::WrongKind { .. }
@@ -287,11 +281,11 @@ fn unreadable_holder(
                 detail: format!("{} names a save that can't be read: {e}", holder.shown()),
             }),
             _ => None,
-        }
-    })
+        },
+    )
 }
 
-/// What holds a line's saves, named in [`unreadable_holder`]'s damage.
+/// What holds a line's saves, as [`unreadable_holder`]'s damage names it.
 enum Holder<'a> {
     Line(&'a str),
     Tag(&'a str),

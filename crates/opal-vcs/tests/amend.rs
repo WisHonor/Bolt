@@ -235,6 +235,18 @@ fn amend_of_a_save_a_server_line_or_tag_names_is_refused() {
 }
 
 #[test]
+fn amend_refused_for_tags_shows_an_odd_tags_name_between_quotes() {
+    let env = project(&[("a.txt", "a\n")]);
+    let names = ["say \"hi\" now".to_owned(), "v\u{7}".to_owned()];
+    env.plant_tags(names.into_iter(), main_tip(&env));
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    let named = "error: Opalro can't amend this save: tag \"say \\\"hi\\\" now\" and tag \"v\\x07\" \
+                 show it too, and two saves you can see would then share one change ID.\n";
+    assert!(err.starts_with(named), "{err}");
+}
+
+#[test]
 fn amend_stops_at_the_line_ending_check_after_an_import() {
     let env = Env::new();
     env.commit("a.txt", "one\ntwo\n", "First");
