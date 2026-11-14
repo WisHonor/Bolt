@@ -1207,7 +1207,8 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge`, `rebase`, `cherry-pick`, `blame` | coming later in v0.2 | explained |
+| `git merge`, `blame` | coming later in v0.2 | explained |
+| `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
 

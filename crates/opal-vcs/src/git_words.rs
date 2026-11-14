@@ -54,6 +54,8 @@ const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files t
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
 const LATER: &str = "Combining lines and seeing who changed each line arrive later in v0.2.\n\
                      Until then, `opalro history` lists the saves on your line.";
+const MOVE_SAVES: &str = "Opalro can't move saves from one line to another yet; that comes after v0.2.\n\
+                          `opalro save --amend` replaces your newest save; `opalro undo` steps back.";
 const SYNC: &str = "Syncing with a server arrives in Opalro v0.3.\n\
                     Until then, `opalro import` brings a Git repository here into Opalro.";
 const REVERT: &str = "Opalro's word for this is `opalro reverse <save>`, which arrives in v0.3.\n\
@@ -124,7 +126,8 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         "restore" => Typed::Explain(RESTORE),
         "rm" | "mv" => Typed::Explain(RM_MV),
         "reset" => Typed::Explain(RESET),
-        "merge" | "rebase" | "cherry-pick" | "blame" => Typed::Explain(LATER),
+        "merge" | "blame" => Typed::Explain(LATER),
+        "rebase" | "cherry-pick" => Typed::Explain(MOVE_SAVES),
         "clone" | "fetch" | "pull" | "push" | "remote" => Typed::Explain(SYNC),
         "revert" => Typed::Explain(REVERT),
         "clean" => Typed::Explain(CLEAN),
@@ -424,8 +427,8 @@ mod tests {
         }
     }
 
-    const EXPLANATIONS: [&str; 11] = [
-        ADD, RM_MV, RESET, RESTORE, COMMIT, NEW_LINE, STASH, LATER, SYNC, REVERT, CLEAN,
+    const EXPLANATIONS: [&str; 12] = [
+        ADD, RM_MV, RESET, RESTORE, COMMIT, NEW_LINE, STASH, LATER, MOVE_SAVES, SYNC, REVERT, CLEAN,
     ];
 
     #[test]
@@ -603,8 +606,11 @@ mod tests {
         ] {
             assert_eq!(explained(typed), STASH, "{typed}");
         }
-        for word in ["merge", "rebase", "cherry-pick", "blame"] {
+        for word in ["merge", "blame"] {
             assert_eq!(explained(word), LATER);
+        }
+        for word in ["rebase", "cherry-pick"] {
+            assert_eq!(explained(word), MOVE_SAVES);
         }
         for word in ["clone", "fetch", "pull", "push", "remote"] {
             assert_eq!(explained(word), SYNC);

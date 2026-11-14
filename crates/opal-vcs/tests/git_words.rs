@@ -296,6 +296,12 @@ fn each_explained_word_explains() {
         let said = explained(&env, &["stash", sub]);
         assert!(said.contains("opalro unshelf"), "{said}");
     }
+    // Moving saves between lines isn't promised for v0.2.
+    for word in ["rebase", "cherry-pick"] {
+        let said = explained(&env, &[word, "x"]);
+        assert!(said.contains("after v0.2"), "{word}: {said}");
+        assert!(said.contains("opalro save --amend"), "{word}: {said}");
+    }
 }
 
 /// The project's lines, and the one it is on.
