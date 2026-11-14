@@ -45,8 +45,8 @@ pub enum TagError {
     #[error("\"{}\" can't be a tag's name: {reason}.", escape(name, false))]
     BadName { name: String, reason: String },
     #[error(
-        "There is already a tag named \"{}\", and two tags can't differ only by letter case.",
-        escape(taken, false)
+        "There is already a tag named {}, and two tags can't differ only by letter case.",
+        shown_name(taken)
     )]
     Alike { name: String, taken: String },
     #[error(
@@ -87,6 +87,18 @@ impl TagError {
             TagError::Repo(e) => e.hint(),
         }
     }
+}
+
+/// A stored tag's name as text shows it: as it is when it fits the rules for line names, and
+/// otherwise between double quotes, escaped, with `\` and `"` marked so its end can't be forged.
+#[must_use]
+pub fn shown_name(name: &str) -> String {
+    if validate_line_name(name).is_ok() {
+        return name.to_owned();
+    }
+    // Marked before escaping, so a `\` that `escape` writes is never doubled.
+    let marked = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escape(&marked, false))
 }
 
 /// Tags `save`, or the save the project is on. `confirm` is asked before a tag moves.
@@ -262,6 +274,18 @@ mod tests {
     use crate::undo::{StepRequest, undo};
     use std::collections::BTreeMap;
 
+    #[test]
+    fn an_odd_name_is_shown_between_quotes_with_its_end_marked() {
+        assert_eq!(shown_name("v1.0"), "v1.0");
+        assert_eq!(shown_name("release/2026-11"), "release/2026-11");
+        assert_eq!(shown_name("a b"), "\"a b\"");
+        assert_eq!(shown_name("a\"b"), "\"a\\\"b\"");
+        assert_eq!(shown_name("a\\b"), "\"a\\\\b\"");
+        assert_eq!(shown_name("v1\u{202e}ateb"), "\"v1\\u{202e}ateb\"");
+        assert_eq!(shown_name("a\u{1b}b"), "\"a\\x1bb\"");
+        assert_eq!(shown_name(""), "\"\"");
+    }
+
     fn who() -> Person {
         Person {
             name: "Ada".into(),
@@ -433,7 +457,7 @@ mod tests {
         );
         assert_eq!(
             alike.to_string(),
-            "There is already a tag named \"v1.0\", and two tags can't differ only by letter case."
+            "There is already a tag named v1.0, and two tags can't differ only by letter case."
         );
         assert_eq!(alike.hint().as_deref(), Some("Choose another name."));
 

@@ -303,7 +303,7 @@ impl Holder<'_> {
     fn shown(&self) -> String {
         match self {
             Holder::Line(line) => format!("the line {}", escape(line, false)),
-            Holder::Tag(tag) => format!("the tag {}", escape(tag, false)),
+            Holder::Tag(tag) => format!("the tag {}", crate::tags::shown_name(tag)),
             Holder::Server(line, server) => format!(
                 "the server line {}@{}",
                 escape(line, false),

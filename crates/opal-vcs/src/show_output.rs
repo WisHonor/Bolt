@@ -55,7 +55,7 @@ pub fn write_head(out: &mut dyn Write, head: &Head, count: usize, now: i64) -> i
     writeln!(out, "    Line         {line}")?;
     if !tags.is_empty() {
         let names: Vec<String> = (tags.iter())
-            .map(|t| s.paint(Role::Line, &escape(t, false)))
+            .map(|t| s.paint(Role::Line, &opal_core::tags::shown_name(t)))
             .collect();
         writeln!(out, "    Tags         {}", names.join(", "))?;
     }

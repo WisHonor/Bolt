@@ -738,7 +738,7 @@ pub(crate) fn shown_elsewhere(
     }
     for (name, tag) in &repo.tag_list(state)?.tags {
         if tag.save == id {
-            by.push(format!("tag {name}"));
+            by.push(format!("tag {}", crate::tags::shown_name(name)));
         }
     }
     Ok(by)

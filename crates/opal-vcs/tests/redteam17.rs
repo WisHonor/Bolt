@@ -103,7 +103,6 @@ fn a_tag_at_a_missing_save_is_named_when_it_stops_line_delete() {
 }
 
 #[test]
-#[ignore = "RT17-4: the hint to delete a tag prints its stored name unquoted"]
 fn the_hint_to_delete_a_tag_quotes_its_name() {
     let env = project();
     let tip = env.state().1.lines["main"];
@@ -119,7 +118,6 @@ fn the_hint_to_delete_a_tag_quotes_its_name() {
 }
 
 #[test]
-#[ignore = "RT17-5: a tag's name can put a line's mark on another save in history"]
 fn a_tags_name_cannot_put_a_lines_mark_on_another_save() {
     let env = project();
     let (repo, state) = env.state();

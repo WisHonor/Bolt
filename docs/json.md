@@ -468,7 +468,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | Field | Type | Meaning |
 |---|---|---|
 | `opalro_json` | number | `1` |
-| `tags` | list of object | Each tag as `{"name": string, "save": 64 hex digits, "message": string}`, in name order (byte order). `message` is the tag's whole message, as it is; `""` if it has none. `[]` if the project has no tags. |
+| `tags` | list of object | Each tag as `{"name": string, "save": 64 hex digits, "message": string}`, in name order (byte order), the name as it is stored, never quoted as the text output may show it. `message` is the tag's whole message, as it is; `""` if it has none. `[]` if the project has no tags. |
 | `warnings` | list | See §4. |
 
 ### `opalro tag <name> --json`
@@ -486,7 +486,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `opalro tag --delete --json`
 
-`opalro tag --delete <name>` deletes a tag; `opalro undo` brings it back. In a terminal Opalro asks first; with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking. A tag that isn't there fails the command (exit code 1).
+`opalro tag --delete <name>` deletes a tag; `opalro undo` brings it back. In a terminal Opalro asks first; with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking: `To delete it, run the same command with --yes.`, never the tag's name, which an import may have made any text. A tag that isn't there fails the command (exit code 1).
 
 | Field | Type | Meaning |
 |---|---|---|

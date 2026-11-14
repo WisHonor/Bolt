@@ -300,13 +300,17 @@ fn tag_delete_without_a_terminal_stops() {
         "{said}"
     );
     assert!(
-        said.contains("hint: To delete it: opalro tag --delete v1 --yes"),
+        said.contains("\nhint: To delete it, run the same command with --yes.\n"),
         "{said}"
     );
     let doc = json(&env, &["tag", "--delete", "v1"], 1);
     assert_eq!(
         doc["error"]["message"],
         "Opalro asks before it deletes a tag, and can't with --json."
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "To delete it, run the same command with --yes."
     );
     assert_eq!(env.standing(), before);
     assert_eq!(tags(&env).len(), 1);
@@ -359,8 +363,14 @@ fn an_imported_tags_name_and_message_are_escaped() {
         let out = env.opalro().args(args).output().unwrap();
         let said = text(&out.stdout) + &text(&out.stderr);
         support::assert_escaped(&said, &format!("{args:?}"));
-        assert!(said.contains("v1\\u{202e}ateb"), "{args:?}: {said}");
     }
+    let (said, _) = run(&env, &["tag", name], 0);
+    assert!(
+        said.starts_with("Tag \"v1\\u{202e}ateb\" is already "),
+        "{said}"
+    );
+    let (shown, _) = run(&env, &["tag"], 0);
+    assert!(shown.contains("  \"v1\\u{202e}ateb\"  "), "{shown}");
     let (shown, _) = run(&env, &["tag"], 0);
     assert!(shown.contains("\"Red \\x1b[31mhere\"\n"), "{shown}");
     assert!(!shown.contains("Second line"), "{shown}");
@@ -377,7 +387,7 @@ fn an_imported_tags_questions_are_escaped() {
     let (code, shown, said) = asked(&env, &["tag", "--delete", name], "n\n");
     assert_eq!(code, Some(0), "{said}");
     assert!(
-        said.starts_with("Delete tag v1\\u{202e}ateb, at save "),
+        said.starts_with("Delete tag \"v1\\u{202e}ateb\", at save "),
         "{said}"
     );
     support::assert_escaped(&(shown + &said), "the delete question");
@@ -386,11 +396,139 @@ fn an_imported_tags_questions_are_escaped() {
     let (code, shown, said) = asked(&env, &["tag", name], "n\n");
     assert_eq!(code, Some(0), "{said}");
     assert!(
-        said.starts_with("Tag v1\\u{202e}ateb is at save "),
+        said.starts_with("Tag \"v1\\u{202e}ateb\" is at save "),
         "{said}"
     );
     assert!(said.contains("Move it to save "), "{said}");
     support::assert_escaped(&(shown + &said), "the move question");
+}
+
+/// Names no line could have, each able to forge its own end unquoted, and how each is shown.
+const ODD: [(&str, &str); 6] = [
+    ("v1 b", "\"v1 b\""),
+    ("v9]  [main", "\"v9]  [main\""),
+    ("a, b", "\"a, b\""),
+    ("say \"hi\"", "\"say \\\"hi\\\"\""),
+    ("a\\b", "\"a\\\\b\""),
+    ("bell\u{7}", "\"bell\\x07\""),
+];
+
+#[test]
+fn an_odd_tags_name_is_shown_between_quotes() {
+    let env = project();
+    let at = tip(&env);
+    for (name, shown) in ODD {
+        env.plant_tags([name.to_owned(), "v1.0".to_owned()].into_iter(), at);
+        let (list, _) = run(&env, &["tag"], 0);
+        assert!(list.contains(&format!("\n  {shown}  ")), "{list}");
+        // A name that fits the rules for line names is shown as it is.
+        assert!(list.contains("\n  v1.0  "), "{list}");
+        let (history, _) = run(&env, &["history"], 0);
+        assert!(history.contains(&format!("  [tag {shown}]")), "{history}");
+        assert!(history.contains("  [tag v1.0]"), "{history}");
+        let (shown_save, _) = run(&env, &["show"], 0);
+        let row = shown_save.lines().find(|l| l.contains("Tags ")).unwrap();
+        assert!(row.contains(shown), "{row}");
+        // `--json` gives the stored name.
+        let listed = json(&env, &["tag"], 0);
+        let names: Vec<&str> = (listed["tags"].as_array().unwrap().iter())
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&name), "{listed}");
+        assert!(
+            json(&env, &["show"], 0)["tags"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(name))
+        );
+        let (deleted, _) = run(&env, &["tag", "--delete", name, "--yes"], 0);
+        assert!(
+            deleted.starts_with(&format!("Deleted tag {shown}, which was at save ")),
+            "{deleted}"
+        );
+    }
+}
+
+#[test]
+fn an_odd_tags_name_is_quoted_where_a_move_is_refused() {
+    let (env, a, _) = tagged_then_saved();
+    let (name, shown) = ODD[1];
+    env.plant_tags([name.to_owned()].into_iter(), a);
+    let (_, said) = run(&env, &["tag", name], 1);
+    assert!(
+        said.contains(&format!("error: Tag {shown} is at another save, ")),
+        "{said}"
+    );
+    let (moved, _) = run(&env, &["tag", name, "--yes"], 0);
+    assert!(
+        moved.starts_with(&format!("Moved tag {shown} to save ")),
+        "{moved}"
+    );
+    let (already, _) = run(&env, &["tag", name], 0);
+    assert!(
+        already.starts_with(&format!("Tag {shown} is already at save ")),
+        "{already}"
+    );
+}
+
+#[test]
+fn the_hint_to_delete_a_tag_carries_no_name() {
+    let env = project();
+    let name = "v1; touch pwned";
+    env.plant_tags([name.to_owned()].into_iter(), tip(&env));
+    let (_, said) = run(&env, &["tag", "--delete", name], 1);
+    let hint = said.lines().find(|l| l.starts_with("hint:")).unwrap();
+    assert_eq!(hint, "hint: To delete it, run the same command with --yes.");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_odd_tags_name_is_quoted_in_the_questions() {
+    let (env, a, _) = tagged_then_saved();
+    for (name, shown) in ODD {
+        env.plant_tags([name.to_owned()].into_iter(), a);
+        let (code, _, said) = asked(&env, &["tag", "--delete", name], "n\n");
+        assert_eq!(code, Some(0), "{said}");
+        assert!(
+            said.starts_with(&format!("Delete tag {shown}, at save ")),
+            "{said}"
+        );
+        let (code, _, said) = asked(&env, &["tag", name], "n\n");
+        assert_eq!(code, Some(0), "{said}");
+        assert!(
+            said.starts_with(&format!("Tag {shown} is at save ")),
+            "{said}"
+        );
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_fits_a_long_odd_tags_name_in_60_columns() {
+    let env = project();
+    env.overwrite("a.txt", "b");
+    run(&env, &["save", &"A long message ".repeat(10)], 0);
+    // Long, and longer still as shown, though the row has room for it whole.
+    let name = "rc 7, \"final\"";
+    env.plant_tags([name.to_owned()].into_iter(), tip(&env));
+    let out = env
+        .opalro()
+        .arg("history")
+        .env("OPALRO_FAKE_TERMINAL", "60")
+        .env("OPALRO_ASCII", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let shown = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let row = shown.lines().find(|l| l.contains("[tag ")).unwrap();
+    assert!(
+        row.ends_with("  [main]  [tag \"rc 7, \\\"final\\\"\"]"),
+        "{row}"
+    );
+    for row in shown.lines() {
+        assert!(row.chars().count() <= 60, "{row:?}");
+    }
 }
 
 #[test]

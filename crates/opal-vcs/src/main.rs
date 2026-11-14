@@ -1438,7 +1438,7 @@ fn history_to(
             title: escape(s.message.lines().next().unwrap_or_default(), false),
             lines: heads.remove(id).unwrap_or_default(),
             tags: (tags_at.remove(id).unwrap_or_default().iter())
-                .map(|name| escape(name, false))
+                .map(|name| tags::shown_name(name))
                 .collect(),
         };
         listed.add(out, row)?;
@@ -1830,7 +1830,7 @@ fn tag_command(
             return Err(Failure {
                 message: format!(
                     "Tag {} is at another save, {was}, and Opalro can't ask whether to move it {}.",
-                    escape(&name, false),
+                    tags::shown_name(&name),
                     unasked(json)
                 ),
                 hint: Some("To move it, run the same command with --yes.".into()),
@@ -1889,16 +1889,14 @@ fn tag_delete_command(
     drop(confirm);
     let (save, mut warnings) = match done {
         Err(TagError::NotDeleted { .. }) if asked.get() => return nothing_changed(repo, noticed),
-        Err(TagError::NotDeleted { name }) => {
+        Err(TagError::NotDeleted { .. }) => {
             return Err(Failure {
                 message: format!(
                     "Opalro asks before it deletes a tag, and can't {}.",
                     unasked(json)
                 ),
-                hint: Some(format!(
-                    "To delete it: opalro tag --delete {} --yes",
-                    escape(&name, false)
-                )),
+                // Never the name: a stored one may be anything, and a pasted hint runs it.
+                hint: Some("To delete it, run the same command with --yes.".into()),
                 printed: false,
             });
         }

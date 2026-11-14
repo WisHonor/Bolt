@@ -1,6 +1,7 @@
 //! What `opalro tag` shows people. `at` names a save as [`crate::goto_output::at_save`] does.
 
 use opal_core::diary::TagList;
+use opal_core::tags::shown_name;
 use opal_core::text::escape;
 
 use crate::output;
@@ -8,7 +9,7 @@ use crate::style::{self, Role};
 
 /// A tag's name, blue like a line's, on `s`.
 pub fn named(s: style::Screen, tag: &str) -> String {
-    s.paint(Role::Line, &escape(tag, false))
+    s.paint(Role::Line, &shown_name(tag))
 }
 
 /// The tags in name order: each name, 12 hex digits of its save, and its message's first line.
@@ -17,7 +18,7 @@ pub fn list(tags: &TagList) -> String {
         return "No tags: opalro tag <name> names the save you're at.\n".to_owned();
     }
     let s = style::out();
-    let names: Vec<String> = tags.tags.keys().map(|n| escape(n, false)).collect();
+    let names: Vec<String> = tags.tags.keys().map(|n| shown_name(n)).collect();
     let wide = names.iter().map(|n| style::columns(n)).max().unwrap_or(0);
     let mut text = format!(
         "{}:\n\n",

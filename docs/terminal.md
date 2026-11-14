@@ -306,7 +306,7 @@ Saves on line main, newest first:
 ```
 
 - **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back. When the first save can't be read, stdout gets nothing, not even the heading; when a later one can't, the rows before it are printed, then the error.
-- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is, then `[tag <name>]` for each tag at it, in name order; every tag is listed, however many a save has. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped, the line and tag names too), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
+- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is, then `[tag <name>]` for each tag at it, in name order, the name shown as `opalro tag` shows it (between quotes when it doesn't fit the rules for line names), and measured as shown; every tag is listed, however many a save has. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped, the line and tag names too), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
 - **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line and tag names blue.
 
 ### `opalro show`
@@ -424,11 +424,11 @@ On the server (origin):
 | Deleted | `Deleted tag <tag>, which was at save <id> "<message>".` | `Changed your mind? opalro undo` |
 | A question answered no | `Nothing was changed.` | |
 | A move with no terminal and no `--yes` | stdout gets nothing; `error: Tag <tag> is at another save, <old id>, and Opalro can't ask whether to move it without a terminal.` (`… with --json.`); `hint: To move it, run the same command with --yes.` | |
-| A delete with no terminal and no `--yes` | `error: Opalro asks before it deletes a tag, and can't without a terminal.` (`… with --json.`); `hint: To delete it: opalro tag --delete <tag> --yes` | |
+| A delete with no terminal and no `--yes` | `error: Opalro asks before it deletes a tag, and can't without a terminal.` (`… with --json.`); `hint: To delete it, run the same command with --yes.` (no hint carries a tag's name inside a command: an imported one may be any text, and a pasted hint would run it) | |
 
 - **The questions,** on stderr, as §10 asks one: moving a tag that is at another save asks `Tag <tag> is at save <old id> "<message>".`, then `Move it to save <id> "<message>"? [y/N] `; deleting one asks `Delete tag <tag>, at save <id> "<message>"? [y/N] `. With `--yes` neither is asked.
 - A save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
-- A tag's name and message can be any text a Git import brought in, so both are escaped wherever they are shown, and the list shows only a message's first line.
+- A tag's name and message can be any text a Git import brought in, so both are escaped wherever they are shown, and the list shows only a message's first line. A name that fits the rules for line names is shown as it is; any other is shown between double quotes, escaped, with each `"` inside it written `\"` and each `\` written `\\`, so that its end can't be forged (`"v9]  [main"`, `"a, b"`). This holds wherever a tag's name is text: the list, the outcome lines, the questions, `history`'s `[tag …]` marks, `show`'s `Tags` row and the messages; `--json` gives the name as it is stored.
 - **Colour:** `Tagged`, `Moved` and `Deleted` green and bold, tag names blue like line names, IDs magenta and bold, the list's fingerprints blue.
 
 ### `opalro undo` and `opalro redo`
