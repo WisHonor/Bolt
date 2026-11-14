@@ -8,12 +8,11 @@ use crate::repo::{RepoError, Repository};
 
 const TIP: u8 = 1;
 const OTHERS: u8 = 2;
-const BOTH: u8 = TIP | OTHERS;
 
 struct Node {
     marks: u8,
-    /// The marks its parents were last given; 0 before that.
-    spread: u8,
+    /// Has given its marks to its parents. Each save does so once, when popped.
+    spread: bool,
     time: i64,
     parents: Vec<Id>,
 }
@@ -21,7 +20,7 @@ struct Node {
 impl Node {
     /// One side's mark not yet passed on. Shared saves only spread while one of these is left.
     fn one_side_waiting(&self) -> bool {
-        self.marks != self.spread && self.marks != BOTH
+        !self.spread && (self.marks == TIP || self.marks == OTHERS)
     }
 }
 
@@ -29,8 +28,7 @@ struct Walk<'r> {
     repo: &'r Repository,
     tip: Id,
     nodes: HashMap<Id, Node>,
-    /// Newest first: every node whose marks aren't all spread, and stale entries skipped when
-    /// popped.
+    /// Newest first: every node not yet spread, and stale entries skipped when popped.
     heap: BinaryHeap<(i64, Id)>,
     /// How many nodes are `one_side_waiting`.
     waiting: usize,
@@ -48,7 +46,7 @@ impl Walk<'_> {
                     .save(&id, self.repo.signatures_allowed())?;
                 e.insert(Node {
                     marks: 0,
-                    spread: 0,
+                    spread: false,
                     time: save.saver.time_ms,
                     parents: save.parents,
                 })
@@ -60,7 +58,9 @@ impl Walk<'_> {
         let before = node.one_side_waiting();
         node.marks |= marks;
         self.waiting = self.waiting - usize::from(before) + usize::from(node.one_side_waiting());
-        self.heap.push((node.time, id));
+        if !node.spread {
+            self.heap.push((node.time, id));
+        }
         Ok(id == self.tip && node.marks & OTHERS != 0)
     }
 }
@@ -88,12 +88,11 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
         let Some(node) = walk.nodes.get_mut(&id) else {
             continue;
         };
-        if node.marks == node.spread {
+        if node.spread {
             continue;
         }
-        // A mark that arrives late spreads again, to correct what the first one reached.
         let before = node.one_side_waiting();
-        node.spread = node.marks;
+        node.spread = true;
         walk.waiting -= usize::from(before);
         let (marks, parents) = (node.marks, node.parents.clone());
         for parent in parents {
@@ -187,8 +186,8 @@ mod tests {
     }
 
     #[test]
-    fn a_mark_that_arrives_late_spreads_again() {
-        // The held save is older than the tip, so the tip spreads before the other mark reaches it.
+    fn a_held_tip_dated_after_its_holder_is_still_held() {
+        // The holder is older than the tip, so the tip spreads before the holder's mark reaches it.
         let (_dir, mut repo) = project();
         let ids = plant(
             &mut repo,
