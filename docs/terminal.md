@@ -396,6 +396,7 @@ On the server (origin):
 | The question, answered no | `Nothing was deleted.` | | |
 | No terminal and no `--yes` | stdout gets nothing; `error: Line <line> holds 3 saves that no other line or tag has, and Opalro can't ask whether to delete it without a terminal.` (`… with --json.`) | `hint: To delete it: opalro line delete <line> --yes` | |
 
+- **A holder that can't be read:** when the save another line, a tag or a server line names can't be read as a save (missing from the store, or another kind of object), the walk can't tell what that holder keeps, so nothing is deleted, `--yes` or not. The error is the damage message naming it: `error: This project's Opalro data looks damaged: the tag ghost names a save that can't be read: …` (`the line <line> …`, `the server line <line>@<server> …`), with the hint all damage gets.
 - **The question** comes only when no other line, tag or server line has the line's newest save in its history. On stderr, as §10 asks one: `Line <line> holds 3 saves that no other line or tag has.`, then `Delete it? [y/N] `. With `--yes` it isn't asked.
 - The save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
 - **Colour:** `Started`, `Renamed` and `Deleted` green and bold, line names blue, IDs magenta and bold.

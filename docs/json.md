@@ -451,7 +451,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `opalro line delete --json`
 
-`opalro line delete <name>` takes the name away; the line's saves stay stored, and `opalro undo` brings the line back for as long as the undo window lasts. The line the project is on can't be deleted (exit code 1). When no other line, no tag and no server line has the line's newest save in its history, the line holds saves nothing else shows: in a terminal Opalro asks first, and with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking.
+`opalro line delete <name>` takes the name away; the line's saves stay stored, and `opalro undo` brings the line back for as long as the undo window lasts. The line the project is on can't be deleted (exit code 1). When no other line, no tag and no server line has the line's newest save in its history, the line holds saves nothing else shows: in a terminal Opalro asks first, and with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking. When the save another line, a tag or a server line names can't be read, the command fails as damage (exit code 1) whose `error.message` names that holder (`the tag ghost names a save that can't be read: …`), deleting nothing, with or without `--yes`.
 
 | Field | Type | Meaning |
 |---|---|---|

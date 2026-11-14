@@ -3,12 +3,16 @@
 use std::io;
 
 use crate::ancestry::only_in;
-use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
+use crate::diary::{
+    Action, DiaryEntry, Position, ServerLines, State, TagList, line_named_alike, validate_line_name,
+};
 use crate::encoding::DecodeError;
 use crate::history::{ResolveError, find, tip_of};
 use crate::id::Id;
+use crate::pack::PackError;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
+use crate::store::StoreError;
 use crate::switch::{self, Earlier, SwitchError};
 use crate::text::escape;
 use crate::warning::Warning;
@@ -229,7 +233,13 @@ pub fn delete_line(
         holders.extend(tags.tags.values().map(|tag| tag.save));
         let servers = repo.server_lines(&entry.state)?;
         holders.extend(servers.servers.values().flat_map(|l| l.values().copied()));
-        let only_here = only_in(repo, save, &holders)?;
+        let only_here = match only_in(repo, save, &holders) {
+            Ok(n) => n,
+            Err(e) => {
+                let named = unreadable_holder(repo, &entry.state, name, &tags, &servers);
+                return Err(named.unwrap_or(e).into());
+            }
+        };
         if only_here > 0 && !confirm(name, only_here) {
             return Err(LineError::Kept {
                 line: name.to_owned(),
@@ -246,6 +256,61 @@ pub fn delete_line(
             warnings: told(earlier),
         })
     })
+}
+
+/// The first line other than `deleting`, tag or server line whose own save can't be read, as
+/// damage naming it; looked for only once the walk has failed.
+fn unreadable_holder(
+    repo: &Repository,
+    state: &State,
+    deleting: &str,
+    tags: &TagList,
+    servers: &ServerLines,
+) -> Option<RepoError> {
+    let lines = (state.lines.iter())
+        .filter(|(line, _)| *line != deleting)
+        .map(|(line, id)| (Holder::Line(line), *id));
+    let tags = tags.tags.iter().map(|(n, tag)| (Holder::Tag(n), tag.save));
+    let servers = servers.servers.iter().flat_map(|(server, lines)| {
+        lines
+            .iter()
+            .map(move |(line, id)| (Holder::Server(line, server), *id))
+    });
+    lines.chain(tags).chain(servers).find_map(|(holder, id)| {
+        match repo.store().save(&id, repo.signatures_allowed()) {
+            Err(
+                e @ (StoreError::Missing(_)
+                | StoreError::WrongKind { .. }
+                | StoreError::Decode(_)
+                | StoreError::Pack(PackError::FingerprintMismatch { .. })),
+            ) => Some(RepoError::Damaged {
+                detail: format!("{} names a save that can't be read: {e}", holder.shown()),
+            }),
+            _ => None,
+        }
+    })
+}
+
+/// What holds a line's saves, named in [`unreadable_holder`]'s damage.
+enum Holder<'a> {
+    Line(&'a str),
+    Tag(&'a str),
+    /// A line and its server.
+    Server(&'a str, &'a str),
+}
+
+impl Holder<'_> {
+    fn shown(&self) -> String {
+        match self {
+            Holder::Line(line) => format!("the line {}", escape(line, false)),
+            Holder::Tag(tag) => format!("the tag {}", escape(tag, false)),
+            Holder::Server(line, server) => format!(
+                "the server line {}@{}",
+                escape(line, false),
+                escape(server, false)
+            ),
+        }
+    }
 }
 
 /// The one check of a new line's name. `renaming` is the line being renamed, left out of the

@@ -1,8 +1,9 @@
 //! Saving away from a line, and `opalro line`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use opal_core::diary::Position;
+use opal_core::diary::{Position, ServerLines};
 use opal_core::id::Id;
+use opal_core::pack::{ObjectKind, PackSet};
 use opal_core::repo::Repository;
 
 mod support;
@@ -491,6 +492,100 @@ fn line_rename_with_one_name_renames_the_current_line() {
     let doc = lines_now(&env);
     assert_eq!(doc["position"], serde_json::json!({"line": "trunk"}));
     assert_eq!(doc["lines"], serde_json::json!(["trunk"]));
+}
+
+/// Writes the current state as `change` leaves it, as one step through Opalro's own library.
+fn plant_state(env: &Env, change: impl FnOnce(&mut opal_core::diary::State, &mut PackSet)) {
+    use opal_core::diary::{Action, DiaryEntry};
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let mut state = entry.state.clone();
+    change(&mut state, &mut packs);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "test".into(),
+        who: entry.who,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, packs, &diary).unwrap();
+}
+
+/// `line delete side`, with and without `--yes`, must stop on damage naming `holder` and change
+/// nothing.
+fn delete_stops_naming(env: &Env, holder: &str) {
+    let before = env.standing();
+    for args in [
+        &["line", "delete", "side"][..],
+        &["line", "delete", "side", "--yes"],
+    ] {
+        let (shown, said) = run(env, args, 1);
+        assert_eq!(shown, "", "{args:?}");
+        assert!(
+            said.contains(&format!(
+                "{holder} names a save that can't be read: object "
+            )),
+            "{args:?}: {said}"
+        );
+        assert!(
+            said.contains("hint: Nothing was changed. Ask for help before trying to repair it."),
+            "{args:?}: {said}"
+        );
+        assert_eq!(env.standing(), before, "{args:?}");
+    }
+    assert!(lines_now(env)["lines"].to_string().contains("side"));
+}
+
+#[test]
+fn line_delete_names_a_tag_whose_save_cant_be_read() {
+    let env = with_a_line_of_its_own();
+    let missing = Id::from_hex(&"7".repeat(64)).unwrap();
+    env.plant_tags(["ghost".to_owned()].into_iter(), missing);
+    delete_stops_naming(&env, "the tag ghost");
+    // A tag at an object that isn't a save: the folder listing of main's save.
+    let (repo, state) = env.state();
+    let listing = repo.store().save(&state.lines["main"], false).unwrap().root;
+    drop(repo);
+    env.plant_tags(["ghost".to_owned()].into_iter(), listing);
+    delete_stops_naming(&env, "the tag ghost");
+}
+
+#[test]
+fn line_delete_names_a_line_or_server_line_whose_save_cant_be_read() {
+    let missing = Id::from_hex(&"7".repeat(64)).unwrap();
+    let env = with_a_line_of_its_own();
+    plant_state(&env, |state, _| {
+        state.lines.insert("broken".into(), missing);
+    });
+    delete_stops_naming(&env, "the line broken");
+
+    let env = with_a_line_of_its_own();
+    plant_state(&env, |state, packs| {
+        let servers = ServerLines {
+            servers: [("origin".to_owned(), [("main".to_owned(), missing)].into())].into(),
+        };
+        let id = packs
+            .add_record(ObjectKind::ServerLines, &servers.encode())
+            .unwrap();
+        state.server_lines = Some(id);
+    });
+    delete_stops_naming(&env, "the server line main@origin");
+}
+
+#[test]
+fn a_line_another_line_holds_is_deleted_though_a_tag_cant_be_read() {
+    // The walk answers from main before it reads the tag's save.
+    let env = project();
+    run(&env, &["line", "new", "side"], 0);
+    run(&env, &["goto", "main"], 0);
+    let missing = Id::from_hex(&"7".repeat(64)).unwrap();
+    env.plant_tags(["ghost".to_owned()].into_iter(), missing);
+    run(&env, &["line", "delete", "side"], 0);
+    assert_eq!(lines_now(&env)["lines"], serde_json::json!(["main"]));
 }
 
 #[test]

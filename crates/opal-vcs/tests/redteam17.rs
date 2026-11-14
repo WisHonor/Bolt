@@ -84,7 +84,6 @@ fn a_name_that_is_both_a_line_and_a_tag_is_not_taken_silently_for_the_line() {
 }
 
 #[test]
-#[ignore = "RT17-3: one tag at a save the store lacks stops line delete, without naming the tag"]
 fn a_tag_at_a_missing_save_is_named_when_it_stops_line_delete() {
     let env = project();
     env.opalro()
