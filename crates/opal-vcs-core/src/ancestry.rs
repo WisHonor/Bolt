@@ -1,7 +1,7 @@
 //! Which saves one line has in its history that others don't, following every parent.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::id::Id;
 use crate::repo::{RepoError, Repository};
@@ -11,16 +11,68 @@ const OTHERS: u8 = 2;
 
 struct Node {
     marks: u8,
-    /// Has given its marks to its parents. Each save does so once, when popped.
-    spread: bool,
+    /// The marks it last gave its parents; 0 before that.
+    spread: u8,
     time: i64,
     parents: Vec<Id>,
 }
 
 impl Node {
-    /// One side's mark not yet passed on. Shared saves only spread while one of these is left.
+    /// Has marks its parents haven't been given yet.
+    fn waiting(&self) -> bool {
+        self.marks != self.spread
+    }
+
     fn one_side_waiting(&self) -> bool {
-        !self.spread && (self.marks == TIP || self.marks == OTHERS)
+        self.waiting() && (self.marks == TIP || self.marks == OTHERS)
+    }
+
+    /// Gained a mark after spreading, so what it gave before needs correcting.
+    fn correcting(&self) -> bool {
+        self.waiting() && self.spread != 0
+    }
+}
+
+/// What decides whether the walk must go on, kept up to date as nodes change.
+#[derive(Default)]
+struct Tally {
+    one_side_waiting: usize,
+    correcting: usize,
+    /// The times of the saves counted so far (marked by the tip alone), with how many share each.
+    counted: BTreeMap<i64, usize>,
+}
+
+impl Tally {
+    fn add(&mut self, node: &Node) {
+        self.one_side_waiting += usize::from(node.one_side_waiting());
+        self.correcting += usize::from(node.correcting());
+        if node.marks == TIP {
+            *self.counted.entry(node.time).or_default() += 1;
+        }
+    }
+
+    fn remove(&mut self, node: &Node) {
+        self.one_side_waiting -= usize::from(node.one_side_waiting());
+        self.correcting -= usize::from(node.correcting());
+        if node.marks == TIP
+            && let Some(n) = self.counted.get_mut(&node.time)
+        {
+            *n -= 1;
+            if *n == 0 {
+                self.counted.remove(&node.time);
+            }
+        }
+    }
+
+    /// Whether a waiting save of this time must still spread. A shared save older than every
+    /// counted one can't sit above any of them when no save is older than its parent.
+    fn must_go_on(&self, time: i64) -> bool {
+        self.one_side_waiting > 0
+            || self.correcting > 0
+            || self
+                .counted
+                .first_key_value()
+                .is_some_and(|(&t, _)| time >= t)
     }
 }
 
@@ -28,10 +80,9 @@ struct Walk<'r> {
     repo: &'r Repository,
     tip: Id,
     nodes: HashMap<Id, Node>,
-    /// Newest first: every node not yet spread, and stale entries skipped when popped.
+    /// Newest first: every waiting node, and stale entries skipped when met.
     heap: BinaryHeap<(i64, Id)>,
-    /// How many nodes are `one_side_waiting`.
-    waiting: usize,
+    tally: Tally,
 }
 
 impl Walk<'_> {
@@ -46,7 +97,7 @@ impl Walk<'_> {
                     .save(&id, self.repo.signatures_allowed())?;
                 e.insert(Node {
                     marks: 0,
-                    spread: false,
+                    spread: 0,
                     time: save.saver.time_ms,
                     parents: save.parents,
                 })
@@ -55,12 +106,10 @@ impl Walk<'_> {
         if node.marks | marks == node.marks {
             return Ok(false);
         }
-        let before = node.one_side_waiting();
+        self.tally.remove(node);
         node.marks |= marks;
-        self.waiting = self.waiting - usize::from(before) + usize::from(node.one_side_waiting());
-        if !node.spread {
-            self.heap.push((node.time, id));
-        }
+        self.tally.add(node);
+        self.heap.push((node.time, id));
         Ok(id == self.tip && node.marks & OTHERS != 0)
     }
 }
@@ -73,7 +122,7 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
         tip,
         nodes: HashMap::new(),
         heap: BinaryHeap::new(),
-        waiting: 0,
+        tally: Tally::default(),
     };
     walk.mark(tip, TIP)?;
     for &other in others {
@@ -81,19 +130,19 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
             return Ok(0);
         }
     }
-    while walk.waiting > 0 {
-        let Some((_, id)) = walk.heap.pop() else {
+    while let Some(&(time, id)) = walk.heap.peek() {
+        let Some(node) = walk.nodes.get_mut(&id).filter(|n| n.waiting()) else {
+            walk.heap.pop();
+            continue;
+        };
+        if !walk.tally.must_go_on(time) {
             break;
-        };
-        let Some(node) = walk.nodes.get_mut(&id) else {
-            continue;
-        };
-        if node.spread {
-            continue;
         }
-        let before = node.one_side_waiting();
-        node.spread = true;
-        walk.waiting -= usize::from(before);
+        walk.heap.pop();
+        // A mark gained after spreading is passed on too.
+        walk.tally.remove(node);
+        node.spread = node.marks;
+        walk.tally.add(node);
         let (marks, parents) = (node.marks, node.parents.clone());
         for parent in parents {
             if walk.mark(parent, marks)? {
@@ -194,6 +243,79 @@ mod tests {
             &[(vec![], 1000), (vec![0], 3000), (vec![1], 2000)],
         );
         assert_eq!(only_in(&repo, ids[1], &[ids[2]]).unwrap(), 0);
+    }
+
+    /// `k` saves of their own first, so that each history's IDs, and so its tie order, differ.
+    fn filler(k: usize) -> Vec<(Vec<usize>, i64)> {
+        (0..k).map(|_| (vec![], 0)).collect()
+    }
+
+    #[test]
+    fn saves_dated_alike_are_still_counted_right() {
+        // Q <- P <- X and P <- Y, all at once; X has itself alone.
+        let mut orders = HashSet::new();
+        for k in 0..16 {
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k);
+            let q = saves.len();
+            let (p, x, y) = (q + 1, q + 2, q + 3);
+            saves.extend([(vec![], 5), (vec![q], 5), (vec![p], 5), (vec![p], 5)]);
+            let ids = plant(&mut repo, &saves);
+            assert_eq!(only_in(&repo, ids[x], &[ids[y]]).unwrap(), 1, "history {k}");
+            orders.insert(ids[p] > ids[y]);
+        }
+        assert_eq!(orders.len(), 2, "both tie orders");
+    }
+
+    #[test]
+    fn a_shared_save_dated_like_a_counted_one_still_passes_its_marks_on() {
+        // A <- B, both at once, and C after them with parents [A, B]. B is held, so only C
+        // counts; B must still tell A, though nothing waits with one mark when A has spread.
+        let mut orders = HashSet::new();
+        for k in 0..16 {
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k);
+            let a = saves.len();
+            let (b, c) = (a + 1, a + 2);
+            saves.extend([(vec![], 5), (vec![a], 5), (vec![a, b], 6)]);
+            let ids = plant(&mut repo, &saves);
+            assert_eq!(only_in(&repo, ids[c], &[ids[b]]).unwrap(), 1, "history {k}");
+            orders.insert(ids[a] > ids[b]);
+        }
+        assert_eq!(orders.len(), 2, "both tie orders");
+    }
+
+    #[test]
+    fn a_tie_where_two_lines_parted_does_not_run_to_the_start() {
+        let mut orders = HashSet::new();
+        for k in 0..16 {
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k);
+            let first = saves.len();
+            chain_after(&mut saves, None, 300, 0);
+            let parted = first + 250;
+            let from = saves[parted].1;
+            // The other side starts at the very time they parted.
+            let mut other = parted;
+            let other_first = saves.len();
+            for later in [0, 20_000, 40_000] {
+                saves.push((vec![other], from + later));
+                other = saves.len() - 1;
+            }
+            saves.push((vec![parted], from + 30_000));
+            let tip = saves.len() - 1;
+            let ids = plant(&mut repo, &saves);
+            let before = repo.store().saves_read();
+            assert_eq!(
+                only_in(&repo, ids[tip], &[ids[other]]).unwrap(),
+                1,
+                "history {k}"
+            );
+            let read = repo.store().saves_read() - before;
+            assert!(read <= 12, "history {k}: {read} saves read");
+            orders.insert(ids[parted] > ids[other_first]);
+        }
+        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     #[test]
@@ -319,6 +441,8 @@ mod tests {
         Random,
         /// Each save earlier than its parents: every save is looked at before its children.
         Backwards,
+        /// Each save as late as its newest parent, often to the millisecond.
+        Ties,
     }
 
     proptest! {
@@ -331,14 +455,24 @@ mod tests {
             ),
             tip in any::<prop::sample::Index>(),
             others in prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
-            clock in prop_oneof![Just(Clock::Forwards), Just(Clock::Random), Just(Clock::Backwards)],
+            clock in prop_oneof![
+                Just(Clock::Forwards),
+                Just(Clock::Random),
+                Just(Clock::Backwards),
+                Just(Clock::Ties),
+            ],
             // Random times of a chain of new saves after the tip, its last one held by the others.
             under in prop::option::of(prop::collection::vec(0..1000i64, 1..=3)),
         ) {
-            let dated = |n: usize, t: i64| match clock {
-                Clock::Forwards => n as i64,
+            // The time of the next save after `saves`, with these parents.
+            let dated = |saves: &[(Vec<usize>, i64)], parents: &[usize], t: i64| match clock {
+                Clock::Forwards => saves.len() as i64,
                 Clock::Random => t,
-                Clock::Backwards => -(n as i64),
+                Clock::Backwards => -(saves.len() as i64),
+                Clock::Ties => {
+                    let newest = parents.iter().map(|&p| saves[p].1).max().unwrap_or(0);
+                    newest + i64::from(t % 4 == 0)
+                }
             };
             let mut parents: Vec<Vec<usize>> = shape
                 .iter()
@@ -351,19 +485,19 @@ mod tests {
                     set.into_iter().collect()
                 })
                 .collect();
-            let mut saves: Vec<(Vec<usize>, i64)> = parents
-                .iter()
-                .zip(&shape)
-                .enumerate()
-                .map(|(n, (p, (_, t)))| (p.clone(), dated(n, *t)))
-                .collect();
+            let mut saves: Vec<(Vec<usize>, i64)> = Vec::new();
+            for (p, (_, t)) in parents.iter().zip(&shape) {
+                let time = dated(&saves, p, *t);
+                saves.push((p.clone(), time));
+            }
             let tip = tip.index(saves.len());
             let mut others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
             if let Some(times) = under {
                 let mut parent = tip;
                 for t in times {
                     parents.push(vec![parent]);
-                    saves.push((vec![parent], dated(saves.len(), t)));
+                    let time = dated(&saves, &[parent], t);
+                    saves.push((vec![parent], time));
                     parent = saves.len() - 1;
                 }
                 others.push(parent);
@@ -377,7 +511,7 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let other_ids: Vec<Id> = others.iter().map(|&o| ids[o]).collect();
             let got = only_in(&repo, ids[tip], &other_ids).unwrap();
-            if clock == Clock::Forwards {
+            if matches!(clock, Clock::Forwards | Clock::Ties) {
                 prop_assert_eq!(got, oracle);
             } else {
                 prop_assert_eq!(got == 0, oracle == 0);
