@@ -1,6 +1,6 @@
 # Milestone 1 follow-ups
 
-> Items the milestone 1 reviews and its red-team fixes deferred (2026-11-01 and 2026-11-02), and the ones milestones 2, 3, 4 and 5 deferred in their turn (2026-11-03, 2026-11-06, 2026-11-07 and 2026-11-09), and milestone 6's presets and polish (2026-11-10). Each later milestone's plan must pull in the ones that apply to it. The "must do" items are load-bearing: forgetting them causes a security or data bug. Done items are struck through, with the date.
+> Items the milestone 1 reviews and its red-team fixes deferred (2026-11-01 and 2026-11-02), and the ones milestones 2, 3, 4 and 5 deferred in their turn (2026-11-03, 2026-11-06, 2026-11-07 and 2026-11-09), and milestone 6's presets and polish (2026-11-10), and milestone 7's lines and tags (2026-11-14). Each later milestone's plan must pull in the ones that apply to it. The "must do" items are load-bearing: forgetting them causes a security or data bug. Done items are struck through, with the date.
 
 ## Must do
 
@@ -262,7 +262,7 @@ What the rename to Opalro left ([decision 150](../decisions/150-the-name-is-opal
 | Before selling in Quebec, the owner's | A French version of the user agreement: Quebec's Charter of the French Language, as Bill 96 amended it, generally expects a standard-form contract offered in Quebec to be given in French first ([decision 156](../decisions/156-the-user-agreements-blanks-filled-by-the-owner.md); not legal advice). |
 | Later, by the guide | The guide assumes a desktop: on a bare Linux there may be no editor for `config.toml` (ubuntu:22.04 and debian:12 have none), and Windows Server Core has no Explorer for "Extract All" or the Start menu. The release rehearsal does those steps from the shell ([the final builds' rulings](2026-11-12-v0.1-final-rulings.md), ruling 15). A line for computers without a desktop would cover them. |
 
-## Deferred by milestone 7 (2026-11-14)
+## Deferred by milestone 7 (lines and tags, 2026-11-14)
 
 What lines and tags left: the "Deferred" list of [the milestone's rulings](2026-11-14-milestone-7-rulings.md#deferred), then the small points the task reviews put off. None loses data.
 
@@ -270,7 +270,9 @@ What lines and tags left: the "Deferred" list of [the milestone's rulings](2026-
 |---|---|
 | The owner's call | Short names made only of the letters k to z. A line or tag named `x`, `try` or `tmp` can also be the start of a save's change ID, and then `goto` refuses the name as meaning both ([decision 068](../decisions/068-a-goto-target-that-names-both.md)); `line new` makes such names easy. Counting text as the start of a change ID only from 4 letters on, which is what screens show, would make names of 1 to 3 letters safe. It changes what `goto` takes (decision 055), so it was left as it is ([decision 161](../decisions/161-what-building-milestone-7-refined.md); the rulings' "Please confirm" 9). |
 | If real projects need it | A save with a great many tags makes one very long `history` row. No cap was added: the cost is bounded by the tag list itself (decision 161; ruling 21). |
-| Later, with repair | A damaged tag list stops every command that resolves a name, `history` and `show` included, so no read-only view of the saves is left. A way to go on without tags, or to drop a damaged tag list, belongs with repair (decision 161; ruling 20). |
+| Later, with repair | A damaged tag list stops every command that resolves a name, `history` and `show` included, so no read-only view of the saves is left. Since the red team's fixes, reading a line's name reads the tag list too (to refuse a name that is both a line and a tag, [decision 162](../decisions/162-red-team-m7-rulings.md)), so a tag list that can't be read now stops `goto <line>` as well, where before it stopped only a name that came to a tag or an ID. A way to go on without tags, or to drop a damaged tag list, belongs with repair (decision 161; ruling 20). |
+| Later, with the import | The import doesn't say, when it runs, that a branch and a tag share a name at two commits; the refusal says it the first time the name is used ([decision 162](../decisions/162-red-team-m7-rulings.md)). A line in the import's summary would tell it at once. |
+| The owner's call | The questions before moving or deleting a tag don't say how many saves only that tag was holding, as `line delete`'s question does; they always ask, so nothing goes unasked, but they say less (RT17's suspicion, [decision 162](../decisions/162-red-team-m7-rulings.md)). |
 | Later, if asked for | `opalro tag v1.0 3f9a0c2e` takes the second word as the message, as [decision 159](../decisions/159-tags.md) chose. A hint when that word itself names a save would catch the Git habit. |
 | Measure, before milestone 8 | An index of how deep each save is, if the walk's measured cost asks for it: a long-lived line combined in late makes the walk read back to where it parted ([decision 160](../decisions/160-whether-a-save-is-in-anothers-history.md), decision 161; ruling 9). A cache with a format of its own, so a decision of its own. |
 | Later, by the guide | A stored name that starts with `-` (only an import brings one) needs `--` on the command line (`opalro line delete -- -gone`), which neither the guide nor a command-line test shows. The name check also tells of a bad character or a name too long before it tells of the dash. |

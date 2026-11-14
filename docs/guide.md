@@ -1373,7 +1373,7 @@ opalro status --json
 opalro history --json
 ```
 
-A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
+A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
 
 Every command ends with one of three exit codes:
 
