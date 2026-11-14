@@ -1,0 +1,199 @@
+//! RT18 probes, second batch: the faked terminal, and many tags.
+#![cfg(feature = "fault-injection")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::time::Instant;
+
+use opal_core::diary::{Action, DiaryEntry, Tag, TagList};
+use opal_core::id::Id;
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+
+mod support;
+use support::{Env, text};
+
+fn term(env: &Env, args: &[&str], width: &str, color: bool) -> (Option<i32>, String, String) {
+    let mut cmd = env.opalro();
+    cmd.args(args)
+        .env("OPALRO_FAKE_TERMINAL", width)
+        .env("OPALRO_ASCII", "1")
+        .write_stdin("n\n");
+    if !color {
+        cmd.env("NO_COLOR", "1");
+    }
+    let out = cmd.output().unwrap();
+    let r = (out.status.code(), text(&out.stdout), text(&out.stderr));
+    eprintln!(
+        "$ opalro {} [{width}]\n  code {:?}\n  out: {:?}\n  err: {:?}",
+        args.join(" "),
+        r.0,
+        r.1,
+        r.2
+    );
+    r
+}
+
+fn timed(env: &Env, args: &[&str]) {
+    let inner = env.opal_process_in(env.root());
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg("/work/redteam/attacks17/rss.py")
+        .arg(inner.get_program())
+        .args(args)
+        .current_dir(env.root());
+    for (k, v) in inner.get_envs() {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+    let out = cmd.output().unwrap();
+    eprintln!("$ opalro {}: {}", args.join(" "), text(&out.stdout).trim());
+    let start = Instant::now();
+    let out = env.opalro().args(args).output().unwrap();
+    eprintln!(
+        "$ opalro {} -> {:?} in {:?}; err {}",
+        args.join(" "),
+        out.status.code(),
+        start.elapsed(),
+        text(&out.stderr).chars().take(300).collect::<String>()
+    );
+}
+
+fn project() -> Env {
+    let env = Env::empty();
+    env.opalro().args(["start", "--preset", "custom"]).assert().success();
+    env.overwrite("a.txt", "a");
+    env.opalro().args(["save", "A"]).assert().success();
+    env
+}
+
+fn plant_list(env: &Env, list: &TagList) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let mut state = entry.state.clone();
+    state.tags = Some(packs.add_record(ObjectKind::TagList, &list.encode()).unwrap());
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "tag".into(),
+        who: entry.who,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, packs, &diary).unwrap();
+}
+
+#[test]
+fn rt18_q1_forged_marks() {
+    let env = project();
+    let (repo, state) = env.state();
+    let first = repo.store().save(&state.lines["main"], false).unwrap().parents[0];
+    drop(repo);
+    let names = [
+        "x]  [main]  [tag y",
+        "a, b",
+        "\\",
+        "   ",
+        "\u{200c}",
+        "\u{200d}",
+        "\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}\u{4e2d}\u{6587}",
+    ];
+    env.plant_tags(names.iter().map(|s| (*s).to_owned()), first);
+    term(&env, &["history"], "60", false);
+    term(&env, &["history"], "60", true);
+    term(&env, &["tag"], "60", false);
+    term(&env, &["show", "x]  [main]  [tag y"], "60", false);
+    term(&env, &["tag", "--delete", "x]  [main]  [tag y"], "60", false);
+    term(&env, &["tag", "x]  [main]  [tag y"], "60", false);
+}
+
+#[test]
+fn rt18_q2_show_hint_off_line() {
+    let env = project();
+    env.opalro().args(["line", "new", "feat"]).assert().success();
+    env.overwrite("a.txt", "f");
+    env.opalro().args(["save", "F"]).assert().success();
+    env.opalro().args(["tag", "rel"]).assert().success();
+    env.opalro().args(["goto", "main"]).assert().success();
+    let (_, _, said) = term(&env, &["show", "rel"], "80", false);
+    let hinted = said.split("opalro ").last().unwrap().trim().to_owned();
+    let words: Vec<&str> = hinted.split_whitespace().collect();
+    term(&env, &words, "80", false);
+}
+
+#[test]
+fn rt18_q3_many_tags_with_big_messages() {
+    let env = project();
+    env.opalro().args(["line", "new", "feat"]).assert().success();
+    env.overwrite("a.txt", "f");
+    env.opalro().args(["save", "F"]).assert().success();
+    env.opalro().args(["goto", "main"]).assert().success();
+    let tip = env.state().1.lines["main"];
+    let message = "m".repeat(64 * 1024 - 16);
+    let list = TagList {
+        tags: (0..7_900)
+            .map(|i| {
+                (
+                    format!("t{i:06}"),
+                    Tag {
+                        save: tip,
+                        message: message.clone(),
+                        git_tags: vec![],
+                    },
+                )
+            })
+            .collect(),
+    };
+    plant_list(&env, &list);
+    drop(list);
+    timed(&env, &["goto", "main"]);
+    timed(&env, &["show", "main", "--json"]);
+    timed(&env, &["tag", "--json"]);
+    timed(&env, &["history", "--json"]);
+    timed(&env, &["line", "delete", "feat", "--yes"]);
+}
+
+#[test]
+fn rt18_q4_many_holders_after_failure() {
+    let env = project();
+    env.opalro().args(["line", "new", "feat"]).assert().success();
+    env.overwrite("a.txt", "f");
+    env.opalro().args(["save", "F"]).assert().success();
+    env.opalro().args(["goto", "main"]).assert().success();
+    let (repo, state) = env.state();
+    let tip = repo.store().save(&state.lines["main"], false).unwrap();
+    drop(repo);
+    let missing = Id::from_hex(&"5".repeat(64)).unwrap();
+    let mut planted = None;
+    support::add_pack(env.root(), |pack| {
+        let save = opal_core::save::Save {
+            parents: vec![missing],
+            change_id: opal_core::id::ChangeId::random().unwrap(),
+            message: "orphan".into(),
+            ..tip
+        };
+        planted = Some(pack.add_record(ObjectKind::Save, &save.encode()).unwrap());
+    });
+    env.plant_tags((0..100_000).map(|i| format!("t{i:06}")), planted.unwrap());
+    timed(&env, &["line", "delete", "feat", "--yes"]);
+}
+
+#[test]
+fn rt18_q5_goto_hint_loops() {
+    let env = project();
+    let (repo, state) = env.state();
+    let tip = state.lines["main"];
+    let first = repo.store().save(&tip, false).unwrap().parents[0];
+    drop(repo);
+    env.opalro().args(["line", "new", "v1"]).assert().success();
+    env.opalro().args(["goto", "main"]).assert().success();
+    env.plant_tags(["v1".to_owned()].into_iter(), first);
+    term(&env, &["goto", "v1"], "80", false);
+    let line_hex = tip.to_hex()[..12].to_owned();
+    term(&env, &["goto", &line_hex], "80", false);
+    let out = env.opalro().args(["goto", &line_hex]).output().unwrap();
+    eprintln!("plain: {} {}", text(&out.stdout), text(&out.stderr));
+}

@@ -1,0 +1,51 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.95s
+     Running tests/rt18_explore2.rs (target/debug/deps/rt18_explore2-fab08d154f23aed5)
+
+running 4 tests
+test rt18_q1_forged_marks ... $ opalro history [60]
+  code Some(0)
+  out: "Saves on line main, newest first:\n\n> putv  just now  Test  A  [main]\n  kvon  just now  Test  ...  [tag \"   \"]  [tag \"\\\\\"]  [tag \"a, b\"]  [tag \"x]  [main]  [tag y\"]  [tag \"\u{200c}\"]  [tag \"\u{200d}\"]  [tag 中文中文中文中文中文中文中文中文中文中文]\n"
+  err: ""
+$ opalro history [60]
+  code Some(0)
+  out: "Saves on line \u{1b}[34mmain\u{1b}[0m, newest first:\n\n\u{1b}[1m>\u{1b}[0m \u{1b}[1;35mputv\u{1b}[0m  \u{1b}[2mjust now\u{1b}[0m  \u{1b}[2mTest\u{1b}[0m  A  [\u{1b}[34mmain\u{1b}[0m]\n  \u{1b}[1;35mkvon\u{1b}[0m  \u{1b}[2mjust now\u{1b}[0m  \u{1b}[2mTest\u{1b}[0m  ...  [tag \u{1b}[34m\"   \"\u{1b}[0m]  [tag \u{1b}[34m\"\\\\\"\u{1b}[0m]  [tag \u{1b}[34m\"a, b\"\u{1b}[0m]  [tag \u{1b}[34m\"x]  [main]  [tag y\"\u{1b}[0m]  [tag \u{1b}[34m\"\u{200c}\"\u{1b}[0m]  [tag \u{1b}[34m\"\u{200d}\"\u{1b}[0m]  [tag \u{1b}[34m中文中文中文中文中文中文中文中文中文中文\u{1b}[0m]\n"
+  err: ""
+$ opalro tag [60]
+  code Some(0)
+  out: "7 tags:\n\n  \"   \"                 6c090ff8645e\n  \"\\\\\"                  6c090ff8645e\n  \"a, b\"                6c090ff8645e\n  \"x]  [main]  [tag y\"  6c090ff8645e\n  \"\u{200c}\"                   6c090ff8645e\n  \"\u{200d}\"                   6c090ff8645e\n  中文中文中文中文中文中文中文中文中文中文  6c090ff8645e\n"
+  err: ""
+$ opalro show x]  [main]  [tag y [60]
+  code Some(0)
+  out: "Save kvon \"Start project\"\n\n    Author       Test <test@example.com>, 2026-11-14 11:31 +00:00  (just now)\n    Saved by     Test <test@example.com>, 2026-11-14 11:31 +00:00  (just now)\n    Line         main\n    Tags         \"   \", \"\\\\\", \"a, b\", \"x]  [main]  [tag y\", \"\u{200c}\", \"\u{200d}\", 中文中文中文中文中文中文中文中文中文中文\n    Fingerprint  6c090ff8645e8b393732e23aee7c3379af4887d4098bcf5ad119e24709154e8b\n\nNo files changed.\n"
+  err: ""
+$ opalro tag --delete x]  [main]  [tag y [60]
+  code Some(0)
+  out: "Nothing was changed.\n"
+  err: "Delete tag \"x]  [main]  [tag y\", at save kvon \"Start project\"? [y/N] "
+$ opalro tag x]  [main]  [tag y [60]
+  code Some(0)
+  out: "Nothing was changed.\n"
+  err: "Tag \"x]  [main]  [tag y\" is at save kvon \"Start project\".\nMove it to save putv \"A\"? [y/N] "
+ok
+test rt18_q2_show_hint_off_line ... $ opalro show rel [80]
+  code Some(0)
+  out: "Save ryzq \"F\"\n\n    Author       Test <test@example.com>, 2026-11-14 11:31 +00:00  (just now)\n    Saved by     Test <test@example.com>, 2026-11-14 11:31 +00:00  (just now)\n    Line         feat\n    Tags         rel\n    After        633adc3aa19c \"A\"\n    Fingerprint  16bce5657356c66fe59ae08f55c6b02c94df2d5108eb8dcb6c45f2f60815f595\n\n1 file changed:\n\n    modified  a.txt  1 B -> 1 B\n"
+  err: "\nNext: see its lines with: opalro changes --save ryzq\n"
+$ opalro changes --save ryzq [80]
+  code Some(1)
+  out: ""
+  err: "error: No save, line or ID matches \"ryzq\".\n\nhint: See your saves with: opalro history\n"
+ok
+test rt18_q3_many_tags_with_big_messages ... $ opalro goto main -> Some(0) in 1.322913561s; err 
+$ opalro show main --json -> Some(0) in 1.92677493s; err 
+$ opalro tag --json -> Some(0) in 18.633236318s; err 
+$ opalro history --json -> Some(0) in 2.232082742s; err 
+$ opalro line delete feat --yes -> Some(0) in 1.29041171s; err 
+ok
+test rt18_q4_many_holders_after_failure ... $ opalro line delete feat --yes -> Some(1) in 1.433922777s; err error: object 5555555555555555555555555555555555555555555555555555555555555555 is not in the store
+
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.78s
+

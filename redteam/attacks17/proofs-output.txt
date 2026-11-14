@@ -1,0 +1,89 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.20s
+     Running tests/redteam18.rs (target/debug/deps/redteam18-3363b7cfd1fbeaa0)
+
+running 6 tests
+test a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save ... FAILED
+test gotos_advice_to_keep_saving_on_a_line_can_be_followed ... FAILED
+test line_delete_names_a_tag_whose_history_cant_be_read ... FAILED
+test the_command_shows_hint_gives_finds_the_save_shown ... FAILED
+test the_hint_to_bring_back_a_shelf_carries_no_stored_label_in_a_command ... FAILED
+test the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves ... FAILED
+
+failures:
+
+---- a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save stdout ----
+
+thread 'a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save' (3223) panicked at crates/opal-vcs/tests/redteam18.rs:113:5:
+the first save's row reads as if line main were at it:
+Saves on line main, newest first:
+
+> llsm  just now  Test  A  [main]
+  rrll  just now  Test  Start project  [tag "x]  [main]  [tag y"]
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- gotos_advice_to_keep_saving_on_a_line_can_be_followed stdout ----
+
+thread 'gotos_advice_to_keep_saving_on_a_line_can_be_followed' (3241) panicked at crates/opal-vcs/tests/redteam18.rs:169:9:
+assertion `left == right` failed: goto said `opalro goto v1` keeps saving on v1, and that is refused:
+Switched to save lvwp "F". You are not on a line.
+
+    1 file written.
+    Saving here asks for a new line's name.
+    To keep saving on v1: opalro goto v1
+
+error: "v1" is the name of a line and also of a tag at another save (line 2d8ccd0cc055, tag a6f10ccb3a44), so Opalro didn't pick either.
+
+hint: To reach one of them, type its ID as shown here. To reach the line by another name: opalro line rename <old> <new>
+
+  left: Some(1)
+ right: Some(0)
+
+---- line_delete_names_a_tag_whose_history_cant_be_read stdout ----
+
+thread 'line_delete_names_a_tag_whose_history_cant_be_read' (3298) panicked at crates/opal-vcs/tests/redteam18.rs:91:5:
+line delete --yes stopped on the tag's unreadable history without naming the tag: error: object 5555555555555555555555555555555555555555555555555555555555555555 is not in the store
+
+
+---- the_command_shows_hint_gives_finds_the_save_shown stdout ----
+
+thread 'the_command_shows_hint_gives_finds_the_save_shown' (3341) panicked at crates/opal-vcs/tests/redteam18.rs:145:5:
+assertion `left == right` failed: show suggested `opalro changes --save nxrn`, which failed: error: No save, line or ID matches "nxrn".
+
+hint: See your saves with: opalro history
+
+  left: Some(1)
+ right: Some(0)
+
+---- the_hint_to_bring_back_a_shelf_carries_no_stored_label_in_a_command stdout ----
+
+thread 'the_hint_to_bring_back_a_shelf_carries_no_stored_label_in_a_command' (3412) panicked at crates/opal-vcs/tests/redteam18.rs:211:5:
+the hint is a shell command with the stored label unquoted: error: Shelf 1; touch pwned can't come back here, so nothing was changed.
+Your unsaved changes, or files Opalro ignores, are where it would write:
+  a.txt
+
+hint: Save, shelve or discard your changes there, and move ignored files somewhere else, then run opalro unshelf 1; touch pwned (a new shelf would be the newest).
+
+
+---- the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves stdout ----
+
+thread 'the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves' (3450) panicked at crates/opal-vcs/tests/redteam18.rs:61:5:
+assertion `left == right` failed: the refusal said to type 77cad87afb0c, and goto refused it: error: No save, line or ID matches "77cad87afb0c".
+
+hint: See your saves with: opalro history
+
+  left: Some(1)
+ right: Some(0)
+
+
+failures:
+    a_quoted_tag_name_cannot_put_a_lines_mark_on_another_save
+    gotos_advice_to_keep_saving_on_a_line_can_be_followed
+    line_delete_names_a_tag_whose_history_cant_be_read
+    the_command_shows_hint_gives_finds_the_save_shown
+    the_hint_to_bring_back_a_shelf_carries_no_stored_label_in_a_command
+    the_ids_a_server_line_or_tag_refusal_gives_reach_both_saves
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.87s
+
+error: test failed, to rerun pass `-p opal-vcs --test redteam18`

@@ -1,0 +1,33 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.36s
+     Running tests/rt18_explore2.rs (target/debug/deps/rt18_explore2-fab08d154f23aed5)
+
+running 2 tests
+test rt18_q3_many_tags_with_big_messages ... $ opalro goto main: code 0 in 1.19s, peak 1026048 KiB; b''
+$ opalro goto main -> Some(0) in 1.129676549s; err 
+$ opalro show main --json: code 0 in 1.80s, peak 1026092 KiB; b''
+$ opalro show main --json -> Some(0) in 1.706550696s; err 
+$ opalro tag --json: code 0 in 16.27s, peak 2051116 KiB; b''
+$ opalro tag --json -> Some(0) in 17.61273657s; err 
+$ opalro history --json: code 0 in 1.26s, peak 1025152 KiB; b''
+$ opalro history --json -> Some(0) in 1.181011005s; err 
+$ opalro line delete feat --yes: code 0 in 1.20s, peak 1025664 KiB; b''
+$ opalro line delete feat --yes -> Some(1) in 135.260636ms; err error: There is no line named "feat".
+
+hint: See the lines with: opalro line
+
+ok
+test rt18_q5_goto_hint_loops ... $ opalro goto v1 [80]
+  code Some(1)
+  out: ""
+  err: "error: \"v1\" is the name of a line and also of a tag at another save (line\n       7d1f82011e48, tag 06163f315798), so Opalro didn't pick either.\n\nhint: To reach one of them, type its ID as shown here. To reach the line by\n      another name: opalro line rename <old> <new>\n"
+$ opalro goto 7d1f82011e48 [80]
+  code Some(0)
+  out: "Switched to save stmx \"A\". You are not on a line.\n\n    No file needed changing.\n    Saving here asks for a new line's name.\n    To keep saving on main: opalro goto main\n"
+  err: "\nChanged your mind? opalro undo\n"
+plain: Already at save stmx "A".
+ 
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 47.39s
+

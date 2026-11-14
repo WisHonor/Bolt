@@ -1,0 +1,205 @@
+   Compiling opal-vcs-platform v0.1.0 (/work/crates/opal-vcs-platform)
+   Compiling opal-vcs-core v0.1.0 (/work/crates/opal-vcs-core)
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.74s
+     Running tests/rt18_explore.rs (target/debug/deps/rt18_explore-3037ec8fc1e4ab1c)
+
+running 6 tests
+test rt18_p1_server_line_ahead_and_tag ... $ opalro goto main@origin
+  code Some(1)
+  out: 
+  err: error: "main@origin" is the name of a server line and also of a tag at another save (server line a46fcd059c02, tag 6e8817737a13), so Opalro didn't pick either.
+
+hint: To reach one of them, type its ID as shown here.
+
+$ opalro goto a46fcd059c02
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "a46fcd059c02".
+
+hint: See your saves with: opalro history
+
+$ opalro goto a46fcd059c021a33a8aba324bd5639180fb317b4de0461bcee8d50a5d9d8f74e
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "a46fcd059c021a33a8aba324bd5639180fb317b4de0461bcee8d50a5d9d8f74e".
+
+hint: See your saves with: opalro history
+
+$ opalro show a46fcd059c02
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "a46fcd059c02".
+
+hint: See your saves with: opalro history
+
+ok
+test rt18_p2_line_and_tag_off_lines ... $ opalro goto v1
+  code Some(1)
+  out: 
+  err: error: "v1" is the name of a line and also of a tag at another save (line 40f39b958c13, tag 97eb67134f86), so Opalro didn't pick either.
+
+hint: To reach one of them, type its ID as shown here. To reach the line by another name: opalro line rename <old> <new>
+
+$ opalro goto 97eb67134f86
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "97eb67134f86".
+
+hint: See your saves with: opalro history
+
+$ opalro goto 97eb67134f866448f5cb65e849c5dd0719083130b441ec1d3039a2904205250e
+  code Some(1)
+  out: 
+  err: error: No save, line or ID matches "97eb67134f866448f5cb65e849c5dd0719083130b441ec1d3039a2904205250e".
+
+hint: See your saves with: opalro history
+
+$ opalro tag
+  code Some(0)
+  out: 1 tag:
+
+  v1  97eb67134f86
+
+  err: 
+$ opalro line rename v1 v1-branch
+  code Some(0)
+  out: Renamed line v1 to v1-branch.
+
+    Saves already made keep v1 as the line they were made on.
+
+  err: 
+$ opalro show v1
+  code Some(0)
+  out: Save qxqr "two"
+
+    Author       Ada Lovelace <ada@example.com>, 2026-11-14 11:28 +00:00  (just now)
+    Saved by     Test <test@example.com>, 2026-11-14 11:28 +00:00  (just now)
+    Line         none
+    Tags         v1
+    After        40f39b958c13 "one"
+    Fingerprint  97eb67134f866448f5cb65e849c5dd0719083130b441ec1d3039a2904205250e
+
+1 file changed:
+
+    modified  a.txt  3 B -> 3 B
+
+  err: 
+ok
+test rt18_p3_damaged_tag_list ... $ opalro goto main
+  code Some(1)
+  out: 
+  err: error: This project's Opalro data looks damaged: the project's tag list can't be read: object 6666666666666666666666666666666666666666666666666666666666666666 is not in the store.
+
+hint: Nothing was changed. Ask for help before trying to repair it.
+
+$ opalro history --json
+  code Some(1)
+  out: {"error":{"hint":"Nothing was changed. Ask for help before trying to repair it.","message":"This project's Opalro data looks damaged: the project's tag list can't be read: object 6666666666666666666666666666666666666666666666666666666666666666 is not in the store."},"opalro_json":1,"warnings":[]}
+
+  err: 
+$ opalro save x
+  code Some(0)
+  out: Nothing to save: no changes since your last save, mwys "F".
+
+  err: 
+$ opalro tag --delete x --yes
+  code Some(1)
+  out: 
+  err: error: This project's Opalro data looks damaged: the project's tag list can't be read: object 6666666666666666666666666666666666666666666666666666666666666666 is not in the store.
+
+hint: Nothing was changed. Ask for help before trying to repair it.
+
+$ opalro line delete feat --yes
+  code Some(1)
+  out: 
+  err: error: You're on line feat, and Opalro doesn't delete the line you're on.
+
+hint: Go to another line first: opalro goto <line>
+
+$ opalro undo
+  code Some(0)
+  out: Undid tag: the tags changed back.
+
+  err: 
+$ opalro goto main
+  code Some(0)
+  out: Switched to line main at save vovr "A".
+
+    1 file written.
+
+  err: 
+ok
+test rt18_p4_holder_with_missing_parent ... $ opalro line delete feat --yes
+  code Some(1)
+  out: 
+  err: error: object 5555555555555555555555555555555555555555555555555555555555555555 is not in the store
+
+$ opalro line delete feat --yes --json
+  code Some(1)
+  out: {"error":{"hint":null,"message":"object 5555555555555555555555555555555555555555555555555555555555555555 is not in the store"},"opalro_json":1,"warnings":[]}
+
+  err: 
+ok
+test rt18_p5_show_tag_on_other_line_hint ... $ opalro show rel
+  code Some(0)
+  out: Save qszk "F"
+
+    Author       Test <test@example.com>, 2026-11-14 11:28 +00:00  (just now)
+    Saved by     Test <test@example.com>, 2026-11-14 11:28 +00:00  (just now)
+    Line         feat
+    Tags         rel
+    After        81597d69c715 "A"
+    Fingerprint  cbbeed06ac53daffd57ed02cb6643b7f65e251299b7fb46867c6daf7f97d1c0b
+
+1 file changed:
+
+    modified  a.txt  1 B -> 1 B
+
+  err: 
+ok
+test rt18_p6_tag_named_main_elsewhere ... $ opalro goto main
+  code Some(1)
+  out: 
+  err: error: "main" is the name of a line and also of a tag at another save (line d9fba0992a67, tag 07c82d051d10), so Opalro didn't pick either.
+
+hint: To reach one of them, type its ID as shown here. To reach the line by another name: opalro line rename <old> <new>
+
+$ opalro show main
+  code Some(1)
+  out: 
+  err: error: "main" is the name of a line and also of a tag at another save (line d9fba0992a67, tag 07c82d051d10), so Opalro didn't pick either.
+
+hint: To reach one of them, type its ID as shown here. To reach the line by another name: opalro line rename <old> <new>
+
+$ opalro history
+  code Some(0)
+  out: Saves on line main, newest first:
+
+> zqky  just now  Test  A  [main]
+  xoqz  just now  Test  Start project  [tag main]
+
+  err: 
+$ opalro save x
+  code Some(0)
+  out: Nothing to save: no changes since your last save, zqky "A".
+
+  err: 
+$ opalro line
+  code Some(0)
+  out: Lines in .tmpkrRp4E:
+
+> main
+
+  err: 
+$ opalro tag
+  code Some(0)
+  out: 1 tag:
+
+  main  07c82d051d10
+
+  err: 
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.81s
+
