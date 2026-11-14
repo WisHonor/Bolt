@@ -243,37 +243,47 @@ pub fn page(root: &mut Command, name: &str) -> Option<String> {
     let usage = command.clone().render_usage().to_string();
     let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage);
     text += &format!("\n{}\n{usage}\n", s.paint(Role::Bold, "Usage"));
-    let forms: Vec<(String, String)> = command
+    // Each form with its usage, naming its own options (those the command itself doesn't take),
+    // and what it does; each own option's help under it.
+    let forms: Vec<(String, String, Vec<String>)> = command
         .get_subcommands()
         .map(|form| {
+            let own: Vec<&clap::Arg> = form
+                .get_arguments()
+                .filter(|a| {
+                    !a.is_positional() && command.get_arguments().all(|b| b.get_id() != a.get_id())
+                })
+                .collect();
+            let flags: String = own
+                .iter()
+                .filter_map(|a| a.get_long())
+                .map(|long| format!("[--{long}] "))
+                .collect();
             let usage = form.clone().render_usage().to_string();
-            let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage).to_owned();
+            let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage);
+            let helps = own
+                .iter()
+                .filter_map(|a| Some(format!("    --{}  {}", a.get_long()?, a.get_help()?)))
+                .collect();
+            let about = form.get_about().map(ToString::to_string);
             (
-                usage,
-                form.get_about()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
+                usage.replace("[OPTIONS] ", &flags),
+                about.unwrap_or_default(),
+                helps,
             )
         })
         .collect();
-    if let Some(wide) = forms.iter().map(|(usage, _)| style::columns(usage)).max() {
+    if let Some(wide) = forms.iter().map(|(usage, ..)| style::columns(usage)).max() {
         text += &format!("\n{}\n", s.paint(Role::Bold, "Forms"));
-        for (usage, does) in &forms {
+        for (usage, does, helps) in &forms {
             text += &format!("{usage:<wide$}  {does}\n");
-        }
-    }
-    // A form's options are listed with the command's own.
-    let mut with_forms = command.clone();
-    for arg in command.get_subcommands().flat_map(Command::get_arguments) {
-        let listed = with_forms
-            .get_arguments()
-            .any(|a| a.get_id() == arg.get_id());
-        if !arg.is_positional() && !listed {
-            with_forms = with_forms.arg(arg.clone());
+            for help in helps {
+                text += &format!("{help}\n");
+            }
         }
     }
     for (title, tag) in [("Arguments", "{positionals}"), ("Options", "{options}")] {
-        let rendered = with_forms
+        let rendered = command
             .clone()
             .help_template(tag)
             .term_width(0)

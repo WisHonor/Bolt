@@ -117,7 +117,7 @@ enum Command {
     },
     /// List the lines, marking the one you're on, then the server lines; or make, rename or
     /// delete one.
-    #[command(disable_help_subcommand = true)]
+    #[command(disable_help_subcommand = true, subcommand_value_name = "FORM")]
     Line {
         #[command(subcommand)]
         action: Option<LineAction>,

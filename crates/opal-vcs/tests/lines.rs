@@ -489,6 +489,9 @@ fn line_delete_deletes_a_line_another_holds_without_asking() {
     assert!(shown.ends_with(" \"A\".\n"), "{shown}");
     assert!(!said.contains("error"), "{said}");
     assert_eq!(lines_now(&env)["lines"], serde_json::json!(["main"]));
+    let (_, entry) = Repository::open(env.root()).unwrap().current().unwrap();
+    assert_eq!(entry.command, "line delete");
+    assert_eq!(entry.folder_change, None);
 }
 
 #[test]
@@ -528,10 +531,11 @@ fn line_delete_without_a_terminal_stops_and_names_yes() {
 #[test]
 fn line_delete_asks_in_a_terminal() {
     let env = with_a_line_of_its_own();
-    let asked = |input: &str| {
+    let asked_with = |extra: &[&str], input: &str| {
         let out = env
             .opalro()
             .args(["line", "delete", "x"])
+            .args(extra)
             .env("OPALRO_FAKE_TERMINAL", "80")
             .env("OPALRO_ASCII", "1")
             .env("NO_COLOR", "1")
@@ -540,7 +544,21 @@ fn line_delete_asks_in_a_terminal() {
             .unwrap();
         (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
+    let asked = |input: &str| asked_with(&[], input);
     let before = env.standing();
+    // With --json, even at a terminal, nothing is asked.
+    let (code, shown, said) = asked_with(&["--json"], "y\n");
+    assert_eq!(code, Some(1), "{said}");
+    assert!(!said.contains("Delete it?"), "{said}");
+    let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("with --json."),
+        "{doc}"
+    );
+    assert_eq!(env.standing(), before);
     let (code, shown, said) = asked("n\n");
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(shown, "Nothing was deleted.\n");
@@ -673,13 +691,28 @@ fn line_delete_json_matches_its_snapshot() {
 #[test]
 fn help_line_lists_its_forms() {
     let (shown, _) = run(&Env::empty(), &["help", "line"], 0);
-    for form in [
-        "opalro line new",
-        "opalro line rename",
-        "opalro line delete",
-    ] {
-        assert!(shown.contains(form), "{form}:\n{shown}");
-    }
+    let section = |title: &str| -> Vec<String> {
+        (shown.lines())
+            .skip_while(|l| *l != title)
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    assert_eq!(
+        section("Forms"),
+        [
+            "opalro line new <NAME> Make a new line at the save you're on, and move onto it",
+            "opalro line rename <NAME>... Rename a line: the one you're on, or the one named first",
+            "opalro line delete [--yes] <NAME> Delete a line. Its saves stay stored for the undo \
+             window",
+            "--yes Delete without asking, even when no other line or tag has its saves",
+        ],
+        "{shown}"
+    );
+    let options = section("Options");
+    assert!(!options.is_empty(), "{shown}");
+    assert!(options.iter().all(|l| !l.contains("--yes")), "{shown}");
 }
 
 #[test]

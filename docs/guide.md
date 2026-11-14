@@ -673,6 +673,8 @@ opalro line delete wall-running
 Started line wall-run at save tqwl "Eggs too".
 
     You're on it: your next save goes on wall-run.
+
+Changed your mind? opalro undo
 ```
 
 `opalro line rename trunk`, with one name, renames the line you're on. You can't delete the line you're on: go to another first. See [Lines](#8-lines) for more.

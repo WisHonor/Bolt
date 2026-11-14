@@ -2875,7 +2875,7 @@ const COMMANDS: [(&str, &[&str]); 17] = [
     ("goto", &[]),
     ("undo", &["--shelve", "--list", "--all", "--to"]),
     ("redo", &["--shelve"]),
-    ("line", &["--yes"]),
+    ("line", &[]),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),
@@ -3020,10 +3020,11 @@ fn each_commands_help_leads_with_examples_then_usage_then_options() {
         let titles: Vec<&str> = lines
             .iter()
             .copied()
-            .filter(|l| ["Examples", "Usage", "Arguments", "Options"].contains(l))
+            .filter(|l| ["Examples", "Usage", "Forms", "Arguments", "Options"].contains(l))
             .collect();
         assert!(
             titles == ["Examples", "Usage", "Options"]
+                || titles == ["Examples", "Usage", "Forms", "Options"]
                 || titles == ["Examples", "Usage", "Arguments", "Options"],
             "{help}"
         );
