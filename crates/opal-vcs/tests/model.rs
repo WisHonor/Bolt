@@ -1,17 +1,19 @@
-//! Random edits, saves, amends, switches, discards, shelves, undos and redos, applied both to a
-//! project and to a model of what its folder, saves and diary should hold (testing.md §3).
+//! Random edits, saves, amends, switches, discards, shelves, lines, tags, undos and redos,
+//! applied both to a project and to a model of what its folder, saves and diary should hold
+//! (testing.md §3).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use opal_core::diary::{self, Action, FolderChange, Position};
+use opal_core::diary::{self, Action, FolderChange, Position, Tag, TagList};
 use opal_core::diff::ChangeKind;
-use opal_core::id::Id;
-use opal_core::lines::Target;
+use opal_core::id::{Id, hash_record};
+use opal_core::lines::{self, LineError, NameError, Target};
 use opal_core::listing::EntryKind;
+use opal_core::pack::ObjectKind;
 use opal_core::presets::{self, Found, Preset};
 use opal_core::repo::Repository;
 use opal_core::save::Person;
@@ -21,6 +23,7 @@ use opal_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
 use opal_core::status::status;
 use opal_core::store::Store;
 use opal_core::switch::{SwitchError, discard, goto};
+use opal_core::tags::{self, Ask, TagError, Tagged};
 use opal_core::undo::{
     Effect, StepInfo, StepRequest, UndoError, UndoOutcome, redo, undo, undo_list, undo_to,
 };
@@ -44,6 +47,11 @@ const LABELS: [&str; 3] = ["1", "2", "3"];
 const PRESETS: [Preset; 3] = [Preset::Code, Preset::Game, Preset::Custom];
 /// How many of the steps undo can take `opalro undo --list` shows.
 const LISTED: usize = 20;
+/// Names for lines and tags, few so they often collide: alike but for case, or the other kind's.
+/// None can read as the start of a change ID or a fingerprint.
+const NAMES: [&str; 8] = [
+    "main", "side", "Side", "wall-run", "v1.0", "V1.0", "fix/a", "-x",
+];
 
 /// The modified time a write leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +121,33 @@ enum Act {
     FullStatus,
     /// Switches the rule files to a preset's, as `opalro setup --preset` does.
     Setup(Preset),
+    /// Makes a line at the save the project is on.
+    LineNew(&'static str),
+    /// Renames a line `pick` chooses, the current one, or `old`, which may be no line's.
+    LineRename {
+        pick: usize,
+        old: &'static str,
+        new: &'static str,
+    },
+    /// Deletes a line `pick` chooses, or `name`; `yes` answers the question, if asked.
+    LineDelete {
+        pick: usize,
+        name: &'static str,
+        yes: bool,
+    },
+    /// `save --line`, starting a new line.
+    SaveOnNewLine(&'static str),
+    /// Tags the save the project is on; `move_it` answers whether a tag elsewhere moves.
+    Tag {
+        name: &'static str,
+        move_it: bool,
+    },
+    /// Deletes a tag `pick` chooses, or `name`; `yes` answers the question.
+    TagDelete {
+        pick: usize,
+        name: &'static str,
+        yes: bool,
+    },
 }
 
 /// What a goto does with unsaved work first.
@@ -139,6 +174,7 @@ fn act() -> impl Strategy<Value = Act> {
         2 => Just(None),
         1 => prop::sample::select(&LABELS[..]).prop_map(Some)
     ];
+    let name = || prop::sample::select(&NAMES[..]);
     prop_oneof![
         5 => (file(), any::<u8>(), prop::sample::select(&LENGTHS[..]), when())
             .prop_map(|(p, b, n, w)| Act::Write(p, b, n, w)),
@@ -165,6 +201,15 @@ fn act() -> impl Strategy<Value = Act> {
         3 => label.prop_map(Act::Unshelf),
         1 => Just(Act::FullStatus),
         1 => prop::sample::select(&PRESETS[..]).prop_map(Act::Setup),
+        2 => name().prop_map(Act::LineNew),
+        2 => (any::<usize>(), name(), name())
+            .prop_map(|(pick, old, new)| Act::LineRename { pick, old, new }),
+        2 => (any::<usize>(), name(), any::<bool>())
+            .prop_map(|(pick, name, yes)| Act::LineDelete { pick, name, yes }),
+        2 => name().prop_map(Act::SaveOnNewLine),
+        2 => (name(), any::<bool>()).prop_map(|(name, move_it)| Act::Tag { name, move_it }),
+        2 => (any::<usize>(), name(), any::<bool>())
+            .prop_map(|(pick, name, yes)| Act::TagDelete { pick, name, yes }),
     ]
 }
 
@@ -371,10 +416,11 @@ struct Saved {
     shelf: bool,
 }
 
-/// The lines, where the project is and the shelves, newest first; saves by index.
+/// The lines, the tags, where the project is and the shelves, newest first; saves by index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct State {
     lines: BTreeMap<String, usize>,
+    tags: BTreeMap<String, usize>,
     /// The line the project is on, or `None` at the save `on`.
     line: Option<String>,
     on: usize,
@@ -435,6 +481,9 @@ impl Step {
                 found.push(Effect::ShelfGone { label, save });
             }
         }
+        if from.tags != to.tags {
+            found.push(Effect::Tags);
+        }
         found.extend(files.map(|FolderChange { from, to }| Effect::Files { from, to }));
         found
     }
@@ -473,6 +522,7 @@ impl Model {
         let message = repo.store().save(&first, false).unwrap().message;
         let state = State {
             lines: BTreeMap::from([("main".to_owned(), 0)]),
+            tags: BTreeMap::new(),
             line: Some("main".to_owned()),
             on: 0,
             shelves: Vec::new(),
@@ -519,7 +569,7 @@ fn recorded(m: &Model, s: &State) -> diary::State {
     let id = |i: &usize| m.saves[*i].id;
     diary::State {
         lines: s.lines.iter().map(|(n, i)| (n.clone(), id(i))).collect(),
-        tags: None,
+        tags: tag_list(m, &s.tags),
         position: match &s.line {
             Some(line) => Position::OnLine(line.clone()),
             None => Position::AtSave(id(&s.on)),
@@ -527,6 +577,23 @@ fn recorded(m: &Model, s: &State) -> diary::State {
         shelves: s.shelves.iter().map(|(l, i)| (l.clone(), id(i))).collect(),
         server_lines: None,
     }
+}
+
+/// The record a state's tags are kept in, none if it has none. The model's tags have no message.
+fn tag_list(m: &Model, tags: &BTreeMap<String, usize>) -> Option<Id> {
+    if tags.is_empty() {
+        return None;
+    }
+    let tag = |save: usize| Tag {
+        save: m.saves[save].id,
+        message: String::new(),
+        git_tags: Vec::new(),
+    };
+    let list = TagList {
+        tags: tags.iter().map(|(n, &s)| (n.clone(), tag(s))).collect(),
+    };
+    let flavor = ObjectKind::TagList.flavor().unwrap();
+    Some(hash_record(flavor, &list.encode()))
 }
 
 fn who() -> Person {
@@ -664,7 +731,40 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             None
         }
         Act::Save => {
-            save(repo, m);
+            save(repo, m, None);
+            None
+        }
+        Act::SaveOnNewLine(name) => {
+            save(repo, m, Some(name));
+            None
+        }
+        Act::LineNew(name) => {
+            make_line(repo, m, name);
+            None
+        }
+        Act::LineRename { pick, old, new } => {
+            let n = m.state.lines.len();
+            // One slot past the lines is `old`, the next the current line.
+            let old = match pick % (n + 2) {
+                k if k < n => m.state.lines.keys().nth(k).cloned(),
+                k if k == n => Some(old.to_owned()),
+                _ => None,
+            };
+            rename(repo, m, old, new);
+            None
+        }
+        Act::LineDelete { pick, name, yes } => {
+            let name = chosen(m.state.lines.keys(), pick, name);
+            delete_line(repo, m, &name, yes);
+            None
+        }
+        Act::Tag { name, move_it } => {
+            tag_here(repo, m, name, move_it);
+            None
+        }
+        Act::TagDelete { pick, name, yes } => {
+            let name = chosen(m.state.tags.keys(), pick, name);
+            delete_tag(repo, m, &name, yes);
             None
         }
         Act::Amend { new_message } => {
@@ -678,12 +778,13 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
         } => {
             if m.folder != *m.tip() {
                 match unsaved {
-                    Unsaved::Save => save(repo, m),
+                    Unsaved::Save => save(repo, m, None),
                     Unsaved::Discard => discard_all(repo, m),
                     Unsaved::Keep => {}
                 }
             }
-            let (target, to, line) = if by_line {
+            // Every line may have been deleted.
+            let (target, to, line) = if by_line && !m.state.lines.is_empty() {
                 let lines = &m.state.lines;
                 let (name, &to) = lines.iter().nth(pick % lines.len()).unwrap();
                 (Target::Line(name.clone()), to, Some(name.clone()))
@@ -882,14 +983,18 @@ fn set_up(repo: &mut Repository, m: &mut Model, root: &Path, preset: Preset) {
     stepped(repo, m, "setup", was, held);
 }
 
-fn save(repo: &mut Repository, m: &mut Model) {
+/// `save`, or `save --line` with `line`, which starts that line where the project is.
+fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
     let who = who();
     // A save made at a save starts a line.
-    let new_line = m
-        .state
-        .line
-        .is_none()
-        .then(|| format!("line-{}", m.new_lines));
+    let new_line = match line {
+        Some(name) => Some(name.to_owned()),
+        None => m
+            .state
+            .line
+            .is_none()
+            .then(|| format!("line-{}", m.new_lines)),
+    };
     let req = SaveRequest {
         message: Some("Save"),
         who: &who,
@@ -900,7 +1005,16 @@ fn save(repo: &mut Repository, m: &mut Model) {
         only: None,
         amend: false,
     };
-    match save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap() {
+    let done = save_folder(repo, &req, &mut |_| {}, &mut |_| true);
+    if let Some(name) = line
+        && let Some(want) = line_name_refused(m, name, None)
+    {
+        let refused = matches!(&done, Err(SaveError::Name(e)) if want.is(e, name));
+        assert!(refused, "{done:?}, not {want:?}");
+        settle(repo, m, Vec::new());
+        return;
+    }
+    match done.unwrap() {
         SaveOutcome::Saved { save_id, .. } => {
             assert_ne!(m.folder, *m.tip(), "saved with nothing changed");
             assert_eq!(saved_tree(repo.store(), save_id), m.folder);
@@ -915,7 +1029,9 @@ fn save(repo: &mut Repository, m: &mut Model) {
             });
             m.state.on = m.saves.len() - 1;
             if let Some(name) = new_line {
-                m.new_lines += 1;
+                if line.is_none() {
+                    m.new_lines += 1;
+                }
                 m.state.line = Some(name);
             }
             m.state
@@ -931,7 +1047,7 @@ fn save(repo: &mut Repository, m: &mut Model) {
     }
 }
 
-/// `save --amend`: refused at a save, and where another line shows the save.
+/// `save --amend`: refused at a save, and where another line or a tag shows the save.
 fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
     let who = who();
     let message = new_message.then_some("Amended");
@@ -991,17 +1107,316 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
     }
 }
 
-/// Whether a line other than `line` holds `save`, or a save of its change, along first parents.
+/// Whether a tag is at `save`, or a line other than `line` holds it, or a save of its change,
+/// along first parents.
 fn shown_elsewhere(m: &Model, line: &str, save: usize) -> bool {
-    let change = m.saves[save].change;
+    let (change, id) = (m.saves[save].change, m.saves[save].id);
+    m.state.tags.values().any(|&t| m.saves[t].id == id)
+        || m.state
+            .lines
+            .iter()
+            .filter(|(name, _)| *name != line)
+            .any(|(_, &tip)| {
+                std::iter::successors(Some(tip), |&s| m.saves[s].parent)
+                    .any(|s| m.saves[s].change == change)
+            })
+}
+
+/// The name `pick` chooses among `names`, or `other` in the slot past them.
+fn chosen<'a>(
+    mut names: impl ExactSizeIterator<Item = &'a String>,
+    pick: usize,
+    other: &str,
+) -> String {
+    let n = names.len();
+    names
+        .nth(pick % (n + 1))
+        .map_or_else(|| other.to_owned(), Clone::clone)
+}
+
+/// Why a new name is refused: it breaks the rules, it is alike to a name of its own kind (the one
+/// given), or it is exactly the other kind's.
+#[derive(Debug)]
+enum Refused {
+    Bad,
+    Alike(String),
+    OtherKind,
+}
+
+impl Refused {
+    /// Whether the engine refused `name` as a line's for this reason.
+    fn is(&self, e: &NameError, name: &str) -> bool {
+        match (self, e) {
+            (Refused::Bad, NameError::Bad { name: n, .. })
+            | (Refused::OtherKind, NameError::Tag { name: n }) => n == name,
+            (Refused::Alike(want), NameError::Taken { name: n, taken }) => {
+                n == name && taken == want
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the engine refused `name` as a tag's for this reason.
+    fn is_tag(&self, e: &TagError, name: &str) -> bool {
+        match (self, e) {
+            (Refused::Bad, TagError::BadName { name: n, .. })
+            | (Refused::OtherKind, TagError::Line { name: n }) => n == name,
+            (Refused::Alike(want), TagError::Alike { name: n, taken }) => {
+                n == name && taken == want
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Why `name` can't be a new line's, `renaming` aside. Every name in `NAMES` keeps the line-name
+/// rules but for the leading `-`.
+fn line_name_refused(m: &Model, name: &str, renaming: Option<&str>) -> Option<Refused> {
+    if name.starts_with('-') {
+        return Some(Refused::Bad);
+    }
+    let alike = (m.state.lines.keys())
+        .find(|l| l.to_lowercase() == name.to_lowercase() && Some(l.as_str()) != renaming);
+    if let Some(taken) = alike {
+        return Some(Refused::Alike(taken.clone()));
+    }
+    m.state
+        .tags
+        .contains_key(name)
+        .then_some(Refused::OtherKind)
+}
+
+/// Why `name` can't be a new tag's.
+fn tag_name_refused(m: &Model, name: &str) -> Option<Refused> {
+    if name.starts_with('-') {
+        return Some(Refused::Bad);
+    }
+    let alike = (m.state.tags.keys()).find(|t| t.to_lowercase() == name.to_lowercase());
+    if let Some(taken) = alike {
+        return Some(Refused::Alike(taken.clone()));
+    }
     m.state
         .lines
-        .iter()
-        .filter(|(name, _)| *name != line)
-        .any(|(_, &tip)| {
-            std::iter::successors(Some(tip), |&s| m.saves[s].parent)
-                .any(|s| m.saves[s].change == change)
-        })
+        .contains_key(name)
+        .then_some(Refused::OtherKind)
+}
+
+/// `line new`: a line at the save the project is on, which the project goes on.
+fn make_line(repo: &mut Repository, m: &mut Model, name: &str) {
+    let done = lines::new_line(repo, name, &who(), &mut |_| {});
+    if let Some(want) = line_name_refused(m, name, None) {
+        let refused = matches!(&done, Err(LineError::Name(e)) if want.is(e, name));
+        assert!(refused, "{done:?}, not {want:?}");
+        settle(repo, m, Vec::new());
+        return;
+    }
+    let made = done.unwrap();
+    assert_eq!(
+        (made.line.as_str(), made.save),
+        (name, m.saves[m.state.on].id)
+    );
+    let (was, held) = (m.state.clone(), m.folder.clone());
+    m.state.lines.insert(name.to_owned(), m.state.on);
+    m.state.line = Some(name.to_owned());
+    stepped(repo, m, "line new", was, held);
+}
+
+/// `line rename`: line `old`, or the current one, takes the name `new`; a project on it stays on
+/// it. The name it has already changes nothing.
+fn rename(repo: &mut Repository, m: &mut Model, old: Option<String>, new: &str) {
+    let done = lines::rename_line(repo, old.as_deref(), new, &who(), &mut |_| {});
+    let Some(old) = old.or_else(|| m.state.line.clone()) else {
+        assert!(matches!(done, Err(LineError::NotOnALine)), "{done:?}");
+        settle(repo, m, Vec::new());
+        return;
+    };
+    let Some(save) = m.state.lines.get(&old).copied() else {
+        assert!(
+            matches!(&done, Err(LineError::NoSuchLine(n)) if *n == old),
+            "{done:?}"
+        );
+        settle(repo, m, Vec::new());
+        return;
+    };
+    if old != new
+        && let Some(want) = line_name_refused(m, new, Some(&old))
+    {
+        let refused = matches!(&done, Err(LineError::Name(e)) if want.is(e, new));
+        assert!(refused, "{done:?}, not {want:?}");
+        settle(repo, m, Vec::new());
+        return;
+    }
+    let done = done.unwrap();
+    let told = (done.from.as_str(), done.to.as_str(), done.renamed);
+    assert_eq!(told, (old.as_str(), new, old != new));
+    let (was, held) = (m.state.clone(), m.folder.clone());
+    m.state.lines.remove(&old);
+    m.state.lines.insert(new.to_owned(), save);
+    if m.state.line.as_ref() == Some(&old) {
+        m.state.line = Some(new.to_owned());
+    }
+    stepped(repo, m, "line rename", was, held);
+}
+
+/// How many saves only line `name` holds: those in its history that no other line's newest save
+/// and no tag's save has in its own.
+fn only_here(m: &Model, name: &str) -> u64 {
+    let history = |tip: usize| std::iter::successors(Some(tip), |&s| m.saves[s].parent);
+    let held: HashSet<Id> = (m.state.lines.iter())
+        .filter(|(line, _)| *line != name)
+        .map(|(_, &tip)| tip)
+        .chain(m.state.tags.values().copied())
+        .flat_map(history)
+        .map(|s| m.saves[s].id)
+        .collect();
+    let mine: HashSet<Id> = history(m.state.lines[name])
+        .map(|s| m.saves[s].id)
+        .filter(|id| !held.contains(id))
+        .collect();
+    mine.len() as u64
+}
+
+/// `line delete`: refused for the line the project is on, and asked first when the line alone
+/// holds saves; `yes` is the answer.
+fn delete_line(repo: &mut Repository, m: &mut Model, name: &str, yes: bool) {
+    let mut asked = Vec::new();
+    let done = lines::delete_line(repo, name, &who(), &mut |_| {}, &mut |line, n| {
+        asked.push((line.to_owned(), n));
+        yes
+    });
+    let refused = |m: &mut Model, asked: Vec<(String, u64)>| {
+        assert!(asked.is_empty(), "asked {asked:?}");
+        settle(repo, m, Vec::new());
+    };
+    let Some(&tip) = m.state.lines.get(name) else {
+        assert!(
+            matches!(&done, Err(LineError::NoSuchLine(n)) if n == name),
+            "{done:?}"
+        );
+        return refused(m, asked);
+    };
+    if m.state.line.as_deref() == Some(name) {
+        assert!(
+            matches!(&done, Err(LineError::OnIt(n)) if n == name),
+            "{done:?}"
+        );
+        return refused(m, asked);
+    }
+    let only = only_here(m, name);
+    let want: Vec<(String, u64)> = (only > 0)
+        .then(|| (name.to_owned(), only))
+        .into_iter()
+        .collect();
+    assert_eq!(asked, want, "what line delete asked");
+    if only > 0 && !yes {
+        let kept = matches!(&done, Err(LineError::Kept { line, only_here })
+            if line == name && *only_here == only);
+        assert!(kept, "{done:?}");
+        settle(repo, m, Vec::new());
+        return;
+    }
+    let done = done.unwrap();
+    assert_eq!((done.save, done.only_here), (m.saves[tip].id, only));
+    let (was, held) = (m.state.clone(), m.folder.clone());
+    m.state.lines.remove(name);
+    stepped(repo, m, "line delete", was, held);
+}
+
+/// What `tag` or `delete_tag` asked: the tag's name, the save it is at, and where it would move.
+fn asked_of(ask: &Ask<'_>) -> (String, Id, Option<Id>) {
+    match *ask {
+        Ask::Move { name, from, to } => (name.to_owned(), from, Some(to)),
+        Ask::Delete { name, save } => (name.to_owned(), save, None),
+    }
+}
+
+/// `tag`: tags the save the project is on. A tag there already changes nothing; one elsewhere
+/// moves only if `move_it` answers yes.
+fn tag_here(repo: &mut Repository, m: &mut Model, name: &str, move_it: bool) {
+    let mut asked = Vec::new();
+    let done = tags::tag(repo, name, None, None, &who(), &mut |_| {}, &mut |a| {
+        asked.push(asked_of(a));
+        move_it
+    });
+    let (on, here) = (m.state.on, m.saves[m.state.on].id);
+    let at = m.state.tags.get(name).map(|&s| m.saves[s].id);
+    let want_asked: Vec<_> = at
+        .filter(|&from| from != here)
+        .map(|from| (name.to_owned(), from, Some(here)))
+        .into_iter()
+        .collect();
+    assert_eq!(asked, want_asked, "what tag asked");
+    let refusal = match at {
+        Some(save) if save == here => {
+            let already = matches!(&done, Ok((Tagged::Already { save }, _)) if *save == here);
+            assert!(already, "{done:?}");
+            true
+        }
+        Some(from) if !move_it => {
+            let kept = matches!(&done, Err(TagError::NotMoved { name: n, from: f, to })
+                if n == name && *f == from && *to == here);
+            assert!(kept, "{done:?}");
+            true
+        }
+        Some(from) => {
+            let moved = matches!(&done, Ok((Tagged::Moved { from: f, to }, _))
+                if *f == from && *to == here);
+            assert!(moved, "{done:?}");
+            false
+        }
+        None => match tag_name_refused(m, name) {
+            Some(want) => {
+                let refused = matches!(&done, Err(e) if want.is_tag(e, name));
+                assert!(refused, "{done:?}, not {want:?}");
+                true
+            }
+            None => {
+                let made = matches!(&done, Ok((Tagged::Made { save }, _)) if *save == here);
+                assert!(made, "{done:?}");
+                false
+            }
+        },
+    };
+    if refusal {
+        settle(repo, m, Vec::new());
+        return;
+    }
+    let (was, held) = (m.state.clone(), m.folder.clone());
+    m.state.tags.insert(name.to_owned(), on);
+    stepped(repo, m, "tag", was, held);
+}
+
+/// `tag --delete`, always asked first; `yes` is the answer.
+fn delete_tag(repo: &mut Repository, m: &mut Model, name: &str, yes: bool) {
+    let mut asked = Vec::new();
+    let done = tags::delete_tag(repo, name, &who(), &mut |_| {}, &mut |a| {
+        asked.push(asked_of(a));
+        yes
+    });
+    let Some(save) = m.state.tags.get(name).map(|&s| m.saves[s].id) else {
+        assert!(
+            matches!(&done, Err(TagError::NoSuchTag(n)) if n == name),
+            "{done:?}"
+        );
+        assert!(asked.is_empty(), "asked {asked:?}");
+        settle(repo, m, Vec::new());
+        return;
+    };
+    assert_eq!(
+        asked,
+        [(name.to_owned(), save, None)],
+        "what tag --delete asked"
+    );
+    if !yes {
+        let kept = matches!(&done, Err(TagError::NotDeleted { name: n }) if n == name);
+        assert!(kept, "{done:?}");
+        settle(repo, m, Vec::new());
+        return;
+    }
+    assert_eq!(done.unwrap().0, save);
+    let (was, held) = (m.state.clone(), m.folder.clone());
+    m.state.tags.remove(name);
+    stepped(repo, m, "tag", was, held);
 }
 
 /// Throws every unsaved change away.
@@ -1616,7 +2031,8 @@ fn effect_json(e: &Effect) -> Value {
         Effect::Files { from, to } => {
             json!({"kind": "files", "from": from.to_hex(), "to": to.to_hex()})
         }
-        Effect::Tags | Effect::ServerLines => panic!("the model has no tags or server lines"),
+        Effect::Tags => json!({"kind": "tags"}),
+        Effect::ServerLines => panic!("the model has no server lines"),
     }
 }
 
