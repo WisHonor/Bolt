@@ -1194,15 +1194,20 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git stash pop` | `opalro unshelf` | runs; `stash pop 2` runs `unshelf 2` |
 | `git stash list` | `opalro shelf --list` | runs |
 | `git branch` | `opalro line` | runs |
+| `git checkout -b <name>`, `git switch -c <name>` | `opalro line new <name>` | runs; also `switch --create <name>` |
+| `git branch -m [<old>] <new>` | `opalro line rename [<old>] <new>` | runs; also `--move` |
+| `git branch -d <name>` | `opalro line delete <name>` | runs; also `--delete` |
+| `git branch -D <name>` | `opalro line delete <name> --yes` | runs |
+| `git tag` | `opalro tag` | the same word; `tag -d <name>` runs `tag --delete <name>` |
 | `git fsck` | `opalro verify` | runs |
 | `git gc` | `opalro tidy` | runs |
 | `git restore` | `opalro discard <paths>` | explained, never run |
 | `git add` | nothing: `opalro save` takes every change | explained |
 | `git rm`, `git mv` | delete or move the file itself | explained |
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
-| `git checkout -b`, `git switch -c`, `git branch <name>` | `opalro goto <save>`, then `opalro save --line <name> "message"` | explained |
+| `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge`, `rebase`, `cherry-pick`, `tag`, `blame` | coming in v0.2 | explained |
+| `git merge`, `rebase`, `cherry-pick`, `blame` | coming later in v0.2 | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
 
@@ -1213,7 +1218,7 @@ Opalro has no staging step: `opalro save` saves every change, new files too.
 To save only some files, name them: `opalro save "message" <paths>`
 ```
 
-A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained.
+A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained. `checkout -b <name>` and `switch -c <name>` run only with the name alone; with a starting point they are explained, as is `branch <name>`, which in Git makes the branch and stays where you are, while `opalro line new` moves onto the new line.
 
 **What is different from Git, on purpose:**
 

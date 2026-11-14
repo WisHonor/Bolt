@@ -47,12 +47,12 @@ const RESTORE: &str = "`opalro discard <paths>` throws away the unsaved changes 
                        new files included, and `opalro undo` brings them back.";
 const COMMIT: &str = "To save every change: `opalro save \"message\"`\n\
                       To save only some files and folders: `opalro save \"message\" <paths>`";
-const NEW_LINE: &str = "In Opalro, a new line starts with a save made away from a line:\n\
-                        `opalro goto <save>`, then `opalro save --line <name> \"message\"`";
+const NEW_LINE: &str = "`opalro line new <name>` makes a new line where you are and moves onto it.\n\
+     To start it somewhere else, go there first: `opalro goto <save>`";
 const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files too.\n\
                      `opalro unshelf` brings the newest back, `opalro unshelf <number>` another.\n\
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
-const LATER: &str = "Combining lines, tags and seeing who changed each line arrive in v0.2.\n\
+const LATER: &str = "Combining lines and seeing who changed each line arrive later in v0.2.\n\
                      Until then, `opalro history` lists the saves on your line.";
 const SYNC: &str = "Syncing with a server arrives in Opalro v0.3.\n\
                     Until then, `opalro import` brings a Git repository here into Opalro.";
@@ -91,14 +91,33 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         },
         "diff" => run("diff", &["changes"], rest),
         "log" => run("log", &["history"], rest),
-        "checkout" if given().any(|a| a == "-b") => Typed::Explain(NEW_LINE),
-        "switch" if given().any(|a| a == "-c") => Typed::Explain(NEW_LINE),
+        "checkout" if given().any(|a| a.to_string_lossy().starts_with("-b")) => {
+            new_line("checkout", &["-b"], rest, run)
+        }
+        "switch"
+            if given().any(|a| {
+                let a = a.to_string_lossy();
+                a.starts_with("-c") || a.starts_with("--create")
+            }) =>
+        {
+            new_line("switch", &["-c", "--create"], rest, run)
+        }
         "checkout" => run("checkout", &["goto"], rest),
         "switch" => run("switch", &["goto"], rest),
         "stash" => stash(rest, run),
         // An option goes to `line`, which answers in its own words.
         "branch" if given().next().is_some_and(|a| !is_option(a)) => Typed::Explain(NEW_LINE),
-        "branch" => run("branch", &["line"], rest),
+        "branch" => branch(rest, run),
+        "tag" => {
+            let mut rest = rest;
+            // Git's `-d` is Opalro's `--delete`; the rest is Opalro's own word as typed.
+            if let Some(d) = rest.iter_mut().find(|a| *a != "--json")
+                && d == "-d"
+            {
+                *d = OsString::from("--delete");
+            }
+            Typed::Opalro(before.into_iter().chain([word]).chain(rest).collect())
+        }
         "fsck" => run("fsck", &["verify"], rest),
         "gc" => run("gc", &["tidy"], rest),
         "add" => Typed::Explain(ADD),
@@ -115,6 +134,51 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
 
 fn is_option(a: &OsString) -> bool {
     a.to_string_lossy().starts_with('-') && a != "-"
+}
+
+/// `checkout -b <name>` and `switch -c <name>` run `line new`, with `--json` anywhere; any other
+/// form of them, as with a starting point, is explained.
+fn new_line(
+    word: &'static str,
+    flags: &[&str],
+    mut rest: Vec<OsString>,
+    run: impl Fn(&'static str, &[&str], Vec<OsString>) -> Typed,
+) -> Typed {
+    let words: Vec<&OsString> = rest.iter().filter(|a| *a != "--json").collect();
+    let [flag, name] = words.as_slice() else {
+        return Typed::Explain(NEW_LINE);
+    };
+    if !flags.iter().any(|f| *flag == f) || is_option(name) {
+        return Typed::Explain(NEW_LINE);
+    }
+    rest.retain(|a| !flags.iter().any(|f| a == f));
+    run(word, &["line", "new"], rest)
+}
+
+/// `branch -m [<old>] <new>`, `branch -d <name>` and `branch -D <name>` run `line rename` and
+/// `line delete`, with `--json` anywhere; any other option goes to `line` as typed.
+fn branch(
+    mut rest: Vec<OsString>,
+    run: impl Fn(&'static str, &[&str], Vec<OsString>) -> Typed,
+) -> Typed {
+    let words: Vec<&OsString> = rest.iter().filter(|a| *a != "--json").collect();
+    let Some((flag, names)) = words.split_first() else {
+        return run("branch", &["line"], rest);
+    };
+    let names_only = names.iter().all(|n| !is_option(n));
+    let (opalro, yes): (&[&str], bool) = match flag.to_str().unwrap_or_default() {
+        "-m" | "--move" if (1..=2).contains(&names.len()) && names_only => {
+            (&["line", "rename"], false)
+        }
+        "-d" | "--delete" if names.len() == 1 && names_only => (&["line", "delete"], false),
+        "-D" if names.len() == 1 && names_only => (&["line", "delete"], true),
+        _ => return run("branch", &["line"], rest),
+    };
+    if let Some(at) = rest.iter().position(|a| a != "--json") {
+        rest.remove(at);
+    }
+    rest.extend(yes.then(|| OsString::from("--yes")));
+    run("branch", opalro, rest)
 }
 
 /// `stash`, `stash push`, `stash pop [number]` and `stash list` run Opalro's; anything else is
@@ -191,8 +255,14 @@ pub fn hint(word: &str) -> Option<&'static str> {
         "commit" => "in Opalro, commit is save; it takes new files too: opalro save \"message\"",
         "diff" => "in Opalro, diff is changes: opalro changes",
         "log" => "in Opalro, log is history: opalro history",
-        "checkout" => "in Opalro, checkout is goto: opalro goto <line or save>",
-        "switch" => "in Opalro, switch is goto: opalro goto <line>",
+        "checkout" => {
+            "in Opalro, checkout is goto: opalro goto <line or save>\n\
+             With -b, it is `opalro line new <name>`."
+        }
+        "switch" => {
+            "in Opalro, switch is goto: opalro goto <line>\n\
+             With -c, it is `opalro line new <name>`."
+        }
         "stash" => {
             "in Opalro, stash is shelf, which takes new files too: opalro shelf\n\
              A shelf keeps the number `opalro shelf --list` shows, counted from 1."
@@ -368,9 +438,32 @@ mod tests {
             ("stash pop", "stash", "unshelf"),
             ("stash pop 2", "stash", "unshelf 2"),
             ("stash list", "stash", "shelf --list"),
+            ("checkout -b side", "checkout", "line new side"),
+            ("switch -c side", "switch", "line new side"),
+            ("switch --create side", "switch", "line new side"),
+            (
+                "checkout --json -b side",
+                "checkout",
+                "line new --json side",
+            ),
             ("branch", "branch", "line"),
-            ("branch -d x", "branch", "line -d x"),
+            ("branch -m side", "branch", "line rename side"),
+            ("branch -m main side", "branch", "line rename main side"),
+            ("branch --move main side", "branch", "line rename main side"),
+            ("branch -d side", "branch", "line delete side"),
+            ("branch --delete side", "branch", "line delete side"),
+            ("branch -D side", "branch", "line delete side --yes"),
+            (
+                "branch -D side --json",
+                "branch",
+                "line delete side --json --yes",
+            ),
+            // Any other form goes to `line` as typed, which answers in its own words.
             ("branch -a", "branch", "line -a"),
+            ("branch -d", "branch", "line -d"),
+            ("branch -d a b", "branch", "line -d a b"),
+            ("branch -m a b c", "branch", "line -m a b c"),
+            ("branch -D side --force", "branch", "line -D side --force"),
             ("fsck", "fsck", "verify"),
             ("gc", "gc", "tidy"),
         ] {
@@ -413,6 +506,33 @@ mod tests {
         }
     }
 
+    /// `tag` is Opalro's own word: it runs as typed, with no hint, but for Git's `-d`.
+    #[test]
+    fn tag_is_opalros_own_word_and_d_is_delete() {
+        for (line, opalro) in [
+            ("tag", "tag"),
+            ("tag v1.0", "tag v1.0"),
+            ("tag v1.0 -d", "tag v1.0 -d"),
+            ("tag -d v1.0", "tag --delete v1.0"),
+            (
+                "--json tag --json -d v1.0",
+                "--json tag --json --delete v1.0",
+            ),
+            ("tag --delete v1.0", "tag --delete v1.0"),
+            ("tag -d v1.0 --yes", "tag --delete v1.0 --yes"),
+        ] {
+            let Typed::Opalro(args) = typed(line) else {
+                panic!("{line}")
+            };
+            let back: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(back.join(" "), opalro, "{line}");
+        }
+        assert_eq!(hint("tag"), None);
+    }
+
     #[test]
     fn json_stays_where_it_was_typed() {
         assert_eq!(runs("--json commit -m x").1, "--json save -- x");
@@ -451,9 +571,21 @@ mod tests {
         for typed in ["restore", "restore --staged", "restore .", "restore -- a"] {
             assert_eq!(explained(typed), RESTORE, "{typed}");
         }
-        assert_eq!(explained("checkout -b x"), NEW_LINE);
-        assert_eq!(explained("switch -c x"), NEW_LINE);
-        assert_eq!(explained("branch x"), NEW_LINE);
+        for typed in [
+            "checkout -b side main",
+            "checkout -b",
+            "checkout -bside",
+            "checkout side -b",
+            "checkout -b -f",
+            "switch -c side main",
+            "switch --create side main",
+            "switch -cside",
+            "switch --create=side",
+            "branch side",
+            "branch side -d",
+        ] {
+            assert_eq!(explained(typed), NEW_LINE, "{typed}");
+        }
         for typed in [
             "stash apply",
             "stash drop",
@@ -471,9 +603,6 @@ mod tests {
         for word in ["merge", "rebase", "cherry-pick", "blame"] {
             assert_eq!(explained(word), LATER);
         }
-        // Opalro's own word too, so it runs as typed.
-        let typed: Vec<OsString> = ["tag", "v1"].map(OsString::from).into();
-        assert!(matches!(translate(typed.clone()), Typed::Opalro(a) if a == typed));
         for word in ["clone", "fetch", "pull", "push", "remote"] {
             assert_eq!(explained(word), SYNC);
         }

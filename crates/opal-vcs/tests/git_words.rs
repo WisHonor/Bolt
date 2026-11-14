@@ -5,6 +5,8 @@
 use std::fs;
 use std::process::Output;
 
+use serde_json::json;
+
 mod support;
 use support::{Env, changed, head, text, write};
 
@@ -235,7 +237,7 @@ fn restore_with_paths_explains_and_discards_nothing() {
 #[test]
 fn branch_with_an_option_gets_lines_own_answer() {
     let env = project();
-    let out = run(&env, &["branch", "-d", "x"]);
+    let out = run(&env, &["branch", "-a"]);
     assert_eq!(out.status.code(), Some(2));
     let said = text(&out.stderr);
     assert!(!said.contains("--line <name>"), "{said}");
@@ -296,19 +298,119 @@ fn each_explained_word_explains() {
     }
 }
 
+/// The project's lines, and the one it is on.
+fn lines(env: &Env) -> (serde_json::Value, serde_json::Value) {
+    let doc = doc(&run(env, &["line", "--json"]).stdout);
+    (doc["lines"].clone(), doc["position"]["line"].clone())
+}
+
 #[test]
-fn checkout_dash_b_and_branch_with_a_name_explain() {
+fn checkout_b_and_switch_c_start_a_line() {
+    let env = project();
+    let started = ok(&env, &["checkout", "-b", "wall-run"]);
+    assert!(
+        started.starts_with("Started line wall-run at save "),
+        "{started}"
+    );
+    assert_eq!(
+        lines(&env),
+        (json!(["main", "wall-run"]), json!("wall-run"))
+    );
+    let made = doc(&run(&env, &["switch", "--json", "-c", "side"]).stdout);
+    assert_eq!(made["line"], "side", "{made}");
+    ok(&env, &["switch", "--create", "side-2"]);
+    assert_eq!(
+        lines(&env),
+        (
+            json!(["main", "side", "side-2", "wall-run"]),
+            json!("side-2")
+        )
+    );
+}
+
+#[test]
+fn checkout_b_with_a_starting_point_is_explained() {
     let env = project();
     for args in [
-        &["checkout", "-b", "x"][..],
-        &["switch", "-c", "x"],
-        &["branch", "x"],
+        &["checkout", "-b", "side", "main"][..],
+        &["switch", "-c", "side", "main"],
+        &["switch", "--create", "side", "main"],
+        &["checkout", "-bside"],
+        &["checkout", "side", "-b"],
+        &["checkout", "-b"],
     ] {
         let said = explained(&env, args);
-        assert!(said.contains("opalro save --line <name>"), "{said}");
+        assert!(said.contains("opalro line new <name>"), "{said}");
+        assert!(said.contains("opalro goto <save>"), "{said}");
     }
-    let lines = doc(&run(&env, &["line", "--json"]).stdout);
-    assert_eq!(lines["lines"].as_array().unwrap().len(), 1, "{lines}");
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
+fn branch_m_renames() {
+    let env = project();
+    ok(&env, &["branch", "-m", "wall-run"]);
+    assert_eq!(lines(&env), (json!(["wall-run"]), json!("wall-run")));
+    ok(&env, &["branch", "--move", "wall-run", "side"]);
+    assert_eq!(lines(&env), (json!(["side"]), json!("side")));
+    ok(&env, &["branch", "-m", "side", "wall-run", "--json"]);
+    assert_eq!(lines(&env), (json!(["wall-run"]), json!("wall-run")));
+}
+
+#[test]
+fn branch_d_deletes_and_capital_d_says_yes() {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["branch", "-d", "side"]);
+    assert_eq!(lines(&env).0, json!(["main"]));
+
+    // A line with a save of its own: without a terminal, -d stops and names --yes.
+    ok(&env, &["line", "new", "side"]);
+    write(&env, "a.txt", "side\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    for flag in ["-d", "--delete"] {
+        let out = run(&env, &["branch", flag, "side"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(text(&out.stderr).contains("--yes"), "{}", text(&out.stderr));
+    }
+    assert_eq!(lines(&env).0, json!(["main", "side"]));
+    ok(&env, &["branch", "-D", "side"]);
+    assert_eq!(lines(&env).0, json!(["main"]));
+}
+
+#[test]
+fn branch_with_a_name_is_still_explained() {
+    let env = project();
+    let said = explained(&env, &["branch", "side"]);
+    assert!(said.contains("opalro line new <name>"), "{said}");
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
+fn tag_d_deletes() {
+    let env = project();
+    ok(&env, &["tag", "v1.0"]);
+    ok(&env, &["tag", "v2.0"]);
+    ok(&env, &["tag", "-d", "v1.0", "--yes"]);
+    ok(&env, &["tag", "--delete", "v2.0", "--yes"]);
+    let tags = doc(&run(&env, &["tag", "--json"]).stdout);
+    assert_eq!(tags["tags"], json!([]), "{tags}");
+    // Never `--yes` on its own: without a terminal it stops and names it.
+    ok(&env, &["tag", "v1.0"]);
+    let out = run(&env, &["tag", "-d", "v1.0"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("--yes"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn tag_goes_to_opalro_as_typed() {
+    let env = project();
+    let typed = ok(&env, &["tag", "v1.0", "First"]);
+    assert!(typed.starts_with("Tagged save "), "{typed}");
+    let listed = doc(&run(&env, &["tag", "--json"]).stdout);
+    assert_eq!(listed["tags"][0]["name"], "v1.0", "{listed}");
 }
 
 /// `opalro` on an 80-column terminal without colour.
@@ -351,8 +453,10 @@ fn the_hint_shows_once_per_word_on_a_terminal() {
     let failed = on_a_terminal(&env, &["checkout", "nowhere"]);
     assert_eq!(failed.status.code(), Some(1));
     assert!(
-        text(&failed.stderr)
-            .ends_with("\nhint: in Opalro, checkout is goto: opalro goto <line or save>\n"),
+        text(&failed.stderr).ends_with(
+            "\nhint: in Opalro, checkout is goto: opalro goto <line or save>\n      With -b, it \
+             is opalro line new <name>.\n"
+        ),
         "{}",
         text(&failed.stderr)
     );
