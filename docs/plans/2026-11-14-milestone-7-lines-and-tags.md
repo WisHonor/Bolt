@@ -92,14 +92,17 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
 
 **The walk** (decision 160). The signature and tests don't determine it, so here it is:
 
-- A node is kept per save met: `marks` (bit 1 = reached from `tip`, bit 2 = reached from `others`), `spread` (the marks it had when its parents were last given them; 0 = never), and its saver time and parents, read once when the save is first met.
+- A node is kept per save met: `marks` (bit 1 = reached from `tip`, bit 2 = reached from `others`), `spread` (the marks it had when it last gave them to its parents; 0 = never), and its saver time and parents, read once when the save is first met.
 - `tip` starts with bit 1 and each of `others` with bit 2; a save that is both starts with both.
-- A node **needs looking at** when `marks != spread`, unless it has both marks and `spread == 0` (shared, and never spread: everything under it is shared too, so it can wait forever).
-- A max-heap of `(saver time, id)` holds the nodes whose `marks != spread`. While any node needs looking at: pop the newest (skip it if its `marks == spread` by now), give its marks to each parent (a parent whose marks grew goes on the heap), and set its `spread = marks`.
+- **As soon as `tip` has bit 2, the answer is 0:** something else holds it, so it has nothing of its own. That is checked at the start and whenever a mark is given.
+- A node is **waiting** when `marks != spread`: so a save that gains a mark after it spread waits again, and passes the new mark on. A max-heap of `(saver time, id)` holds the waiting nodes. Each turn pops the newest waiting node, whatever its marks, gives its marks to each parent, and sets its `spread = marks`.
+- **The walk goes on while any of these holds:** some waiting node has exactly one mark; some waiting node has spread before (it carries a correction); or the newest waiting node is not earlier than the earliest of the saves counted so far (the nodes whose marks are exactly bit 1).
 - The answer is the number of nodes whose marks are exactly bit 1.
 - No recursion. A save that can't be read is the store's error, passed on.
 
-Why the rule about `spread`: a save first spread with one mark that later gains the other must spread again, so a late-arriving mark still corrects everything the early one touched. That keeps "0 exactly when held" true whatever the saves' times are.
+Why shared saves spread too: the other side's mark can run on alone below the place the two sides met (through an older side line that was combined in, say); the shared mark, spreading in the same newest-first order, catches up with such a run. Why the early answer: every save between one of the others and a held `tip` is a descendant of `tip`, never gets `tip`'s mark, and so always passes the others' mark on; the mark therefore reaches a held `tip` whatever the saves' times are, and the commonest question (a line already combined into another) costs a handful of reads. Why the last clause: at the end every waiting save is shared, has never spread, and is strictly older than every counted save; when no save is older than its parent, such a save can't be a descendant of a counted one, so every save between the others and a counted save has passed on all it will ever have, and the count is exact, saves dated alike included (Git keeps whole seconds, and a rebased series shares one). When some save is older than its parent the count can be too high, never too low (decision 160).
+
+(Reworded on 2026-11-14 during Task 1's review rounds: the first wording had no early answer and left a shared save that had never spread out of the walk for good; a second wording spread each save once, which a tie where two lines parted turns into a walk to the project's first save. The pinned tests in `ancestry.rs` hold each of these mistakes.)
 
 - [ ] **Step 1: Write the failing tests** in `ancestry.rs` (`#[cfg(test)] mod tests`), building saves with chosen parents and saver times the way `history.rs`'s tests build theirs:
 
