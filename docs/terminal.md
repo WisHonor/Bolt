@@ -413,7 +413,7 @@ While they write, a terminal's stderr shows the turning mark `Writing files` (§
 | Nothing to take | `Nothing to undo.` (`Nothing to redo.`; `Nothing changed: things are already as they were right after entry <entry>.` for `--to`) | | |
 | `undo --to` with `head` lost | `Made entry <entry> (<command>) the current one: on <line> at <id> "<message>". No file was changed: …` | | |
 
-- A step is named as the diary has it: its command, the save it made with its message, then what changed (`main is back at <id>`, `2 files back`, `shelf 1 is gone`; `its changes show as unsaved` for a save undone, which changes no file).
+- A step is named as the diary has it: its command, the save it made with its message, then what changed (`main is back at <id>`, `2 files back`, `shelf 1 is gone`; `its changes show as unsaved` for a save undone, which changes no file). Only `save` (an amend too) makes a save: `line new`, `line rename` and `line delete` name none, only what changed (`Undid line new: line wall-run is gone, back on main at <id>.`).
 - `undo` and `redo` end with no "Changed your mind?" line: each is the other's way back.
 - **Colour:** `Undid`, `Redid`, `Went`, `Shelved`, `Finished` and `Made` green and bold.
 

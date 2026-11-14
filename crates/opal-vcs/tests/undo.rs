@@ -136,6 +136,64 @@ fn redo_of_a_save_moves_it_forward_again() {
     assert_eq!(newest.command, "redo");
 }
 
+/// The short change ID `opalro` names the current save by.
+fn short(env: &Env) -> String {
+    json(env, &["show"])["save"]["change_id_short"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn undoing_a_new_line_names_no_save() {
+    let env = project(&[("a.txt", "a\n")]);
+    let id = short(&env);
+    ok(&env, &["line", "new", "wall-run"]);
+    assert_eq!(
+        ok(&env, &["undo"]),
+        format!("Undid line new: line wall-run is gone, back on main at {id}.\n")
+    );
+    assert_eq!(
+        ok(&env, &["redo"]),
+        format!("Redid line new: wall-run is at {id} again, on wall-run at {id} again.\n")
+    );
+}
+
+#[test]
+fn undoing_a_rename_and_a_delete_say_what_came_back() {
+    let env = project(&[("a.txt", "a\n")]);
+    let id = short(&env);
+    ok(&env, &["line", "rename", "trunk"]);
+    let said = ok(&env, &["undo"]);
+    assert!(said.starts_with("Undid line rename: "), "{said}");
+    assert!(said.contains(&format!("main is back at {id}")), "{said}");
+    assert!(said.contains("line trunk is gone"), "{said}");
+    assert!(!said.contains("unsaved"), "{said}");
+    ok(&env, &["line", "new", "x"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "delete", "x"]);
+    assert_eq!(
+        ok(&env, &["undo"]),
+        format!("Undid line delete: x is back at {id}.\n")
+    );
+}
+
+#[test]
+fn undo_list_names_the_line_steps() {
+    let env = project(&[("a.txt", "a\n")]);
+    ok(&env, &["line", "new", "x"]);
+    ok(&env, &["line", "rename", "y"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "delete", "y"]);
+    let said = ok(&env, &["undo", "--list"]);
+    for command in ["line new", "line rename", "line delete"] {
+        assert!(
+            said.lines().any(|l| l.contains(&format!("  {command}"))),
+            "{said}"
+        );
+    }
+}
+
 #[test]
 fn undo_of_a_goto_switches_back_carrying_unsaved_work() {
     let (env, _, _) = after_a_goto();

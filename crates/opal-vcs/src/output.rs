@@ -151,10 +151,10 @@ pub fn step_line(
             format!("back to entry {} ({command})", t.step.short_hex()),
         ),
     };
-    // The save a step made is the one a line moved to. `undo --to`, recorded as `undo`, makes
-    // none: it moves lines to saves that were there.
+    // The save a step made is the one a line moved to. Only `save` (an amend too) makes one: the
+    // other steps, `undo --to` among them, move lines to saves that were there.
     let made = t.effects.iter().find_map(|e| match e {
-        Effect::Line { from, to, .. } if !jump && t.entry.command != "undo" => {
+        Effect::Line { from, to, .. } if !jump && t.entry.command == "save" => {
             if redo {
                 *to
             } else {
