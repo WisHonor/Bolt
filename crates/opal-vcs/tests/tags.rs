@@ -101,10 +101,10 @@ fn tag_takes_a_message() {
 fn tag_save_tags_another_save() {
     let env = project();
     let a = tip(&env);
-    run(&env, &["line", "new", "x"], 0);
-    env.overwrite("a.txt", "x");
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "side");
     run(&env, &["save", "X"], 0);
-    let x = env.state().1.lines["x"];
+    let x = env.state().1.lines["side"];
     run(&env, &["goto", "main"], 0);
     env.overwrite("a.txt", "b");
     run(&env, &["save", "B"], 0);
@@ -112,9 +112,9 @@ fn tag_save_tags_another_save() {
     let short = history["saves"][1]["change_id_short"].as_str().unwrap();
     let (shown, _) = run(&env, &["tag", "old", "--save", short], 0);
     assert!(shown.ends_with(" \"A\" as old.\n"), "{shown}");
-    run(&env, &["tag", "on-x", "--save", "x"], 0);
+    run(&env, &["tag", "on-side", "--save", "side"], 0);
     let at: Vec<(String, Id)> = tags(&env).into_iter().map(|(n, s, _)| (n, s)).collect();
-    assert_eq!(at, [("old".to_owned(), a), ("on-x".to_owned(), x)]);
+    assert_eq!(at, [("old".to_owned(), a), ("on-side".to_owned(), x)]);
 }
 
 #[test]

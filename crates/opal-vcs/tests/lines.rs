@@ -405,11 +405,11 @@ fn lines_now(env: &Env) -> serde_json::Value {
     serde_json::from_str(&shown).unwrap()
 }
 
-/// A project on `main` with a line `x` holding one save no other line has.
+/// A project on `main` with a line `side` holding one save no other line has.
 fn with_a_line_of_its_own() -> Env {
     let env = project();
-    run(&env, &["line", "new", "x"], 0);
-    env.overwrite("a.txt", "x");
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "side");
     run(&env, &["save", "X"], 0);
     run(&env, &["goto", "main"], 0);
     env
@@ -496,11 +496,11 @@ fn line_rename_with_one_name_renames_the_current_line() {
 #[test]
 fn line_delete_deletes_a_line_another_holds_without_asking() {
     let env = project();
-    run(&env, &["line", "new", "x"], 0);
+    run(&env, &["line", "new", "side"], 0);
     run(&env, &["goto", "main"], 0);
-    let (shown, said) = run(&env, &["line", "delete", "x"], 0);
+    let (shown, said) = run(&env, &["line", "delete", "side"], 0);
     assert!(
-        shown.starts_with("Deleted line x, which was at save "),
+        shown.starts_with("Deleted line side, which was at save "),
         "{shown}"
     );
     assert!(shown.ends_with(" \"A\".\n"), "{shown}");
@@ -515,31 +515,34 @@ fn line_delete_deletes_a_line_another_holds_without_asking() {
 fn line_delete_without_a_terminal_stops_and_names_yes() {
     let env = with_a_line_of_its_own();
     let before = env.standing();
-    let (shown, said) = run(&env, &["line", "delete", "x"], 1);
+    let (shown, said) = run(&env, &["line", "delete", "side"], 1);
     assert_eq!(shown, "");
     assert!(
         said.contains(
-            "error: Line x holds 1 save that no other line or tag has, and Opalro can't ask \
+            "error: Line side holds 1 save that no other line or tag has, and Opalro can't ask \
              whether to delete it without a terminal."
         ),
         "{said}"
     );
     assert!(
-        said.contains("hint: To delete it: opalro line delete x --yes"),
+        said.contains("hint: To delete it: opalro line delete side --yes"),
         "{said}"
     );
     assert_eq!(env.standing(), before);
-    assert_eq!(lines_now(&env)["lines"], serde_json::json!(["main", "x"]));
-    let (shown, _) = run(&env, &["line", "delete", "x", "--json"], 1);
+    assert_eq!(
+        lines_now(&env)["lines"],
+        serde_json::json!(["main", "side"])
+    );
+    let (shown, _) = run(&env, &["line", "delete", "side", "--json"], 1);
     let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(
         doc["error"]["message"],
-        "Line x holds 1 save that no other line or tag has, and Opalro can't ask whether to \
+        "Line side holds 1 save that no other line or tag has, and Opalro can't ask whether to \
          delete it with --json."
     );
     assert_eq!(
         doc["error"]["hint"],
-        "To delete it: opalro line delete x --yes"
+        "To delete it: opalro line delete side --yes"
     );
     assert_eq!(env.standing(), before);
 }
@@ -551,7 +554,7 @@ fn line_delete_asks_in_a_terminal() {
     let asked_with = |extra: &[&str], input: &str| {
         let out = env
             .opalro()
-            .args(["line", "delete", "x"])
+            .args(["line", "delete", "side"])
             .args(extra)
             .env("OPALRO_FAKE_TERMINAL", "80")
             .env("OPALRO_ASCII", "1")
@@ -580,23 +583,25 @@ fn line_delete_asks_in_a_terminal() {
     assert_eq!(code, Some(0), "{said}");
     assert_eq!(shown, "Nothing was deleted.\n");
     assert!(
-        said.starts_with("Line x holds 1 save that no other line or tag has.\nDelete it? [y/N] "),
+        said.starts_with(
+            "Line side holds 1 save that no other line or tag has.\nDelete it? [y/N] "
+        ),
         "{said}"
     );
     assert_eq!(env.standing(), before);
     let (code, shown, said) = asked("y\n");
     assert_eq!(code, Some(0), "{said}");
-    assert!(shown.starts_with("Deleted line x, "), "{shown}");
+    assert!(shown.starts_with("Deleted line side, "), "{shown}");
     assert_eq!(lines_now(&env)["lines"], serde_json::json!(["main"]));
 }
 
 #[test]
 fn line_delete_yes_deletes_and_undo_brings_it_back() {
     let env = with_a_line_of_its_own();
-    let x = env.state().1.lines["x"];
-    let (shown, _) = run(&env, &["line", "delete", "x", "--yes"], 0);
+    let x = env.state().1.lines["side"];
+    let (shown, _) = run(&env, &["line", "delete", "side", "--yes"], 0);
     assert!(
-        shown.starts_with("Deleted line x, which was at save "),
+        shown.starts_with("Deleted line side, which was at save "),
         "{shown}"
     );
     assert!(
@@ -606,9 +611,9 @@ fn line_delete_yes_deletes_and_undo_brings_it_back() {
         ),
         "{shown}"
     );
-    assert!(!env.state().1.lines.contains_key("x"));
+    assert!(!env.state().1.lines.contains_key("side"));
     run(&env, &["undo"], 0);
-    assert_eq!(env.state().1.lines["x"], x);
+    assert_eq!(env.state().1.lines["side"], x);
 }
 
 /// Makes every pack of the project two days old, so that `tidy` may write them again.
@@ -627,18 +632,18 @@ fn age_packs(env: &Env) {
 #[test]
 fn a_deleted_lines_saves_survive_tidy_inside_the_undo_window() {
     let env = with_a_line_of_its_own();
-    run(&env, &["line", "delete", "x", "--yes"], 0);
+    run(&env, &["line", "delete", "side", "--yes"], 0);
     age_packs(&env);
     let (shown, _) = run(&env, &["tidy", "--json"], 0);
     let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(doc["packs_young"], 0, "{doc}");
     // `tidy` records no step, so one undo takes back the delete.
     run(&env, &["undo"], 0);
-    assert!(env.state().1.lines.contains_key("x"));
-    run(&env, &["goto", "x"], 0);
+    assert!(env.state().1.lines.contains_key("side"));
+    run(&env, &["goto", "side"], 0);
     assert_eq!(
         std::fs::read_to_string(env.root().join("a.txt")).unwrap(),
-        "x"
+        "side"
     );
     run(&env, &["verify"], 0);
 }
@@ -656,18 +661,18 @@ fn after_a_rename_history_goto_and_short_ids_still_work() {
         .as_str()
         .unwrap()
         .to_owned();
-    run(&env, &["line", "rename", "main", "trunk"], 0);
+    run(&env, &["line", "rename", "main", "trunk-line"], 0);
     let (shown, _) = run(&env, &["history"], 0);
     assert!(
-        shown.starts_with("Saves on line trunk, newest first:"),
+        shown.starts_with("Saves on line trunk-line, newest first:"),
         "{shown}"
     );
     assert!(shown.contains(&older), "{shown}");
     let (after, _) = run(&env, &["history", "--json"], 0);
     let after: serde_json::Value = serde_json::from_str(&after).unwrap();
     assert_eq!(after["saves"], history["saves"]);
-    let (shown, _) = run(&env, &["goto", "trunk"], 0);
-    assert!(shown.starts_with("Already on line trunk"), "{shown}");
+    let (shown, _) = run(&env, &["goto", "trunk-line"], 0);
+    assert!(shown.starts_with("Already on line trunk-line"), "{shown}");
     let (shown, _) = run(&env, &["show", &older, "--json"], 0);
     let shown: serde_json::Value = serde_json::from_str(&shown).unwrap();
     assert_eq!(shown["save"]["message"], "A");
@@ -702,7 +707,7 @@ fn line_rename_json_matches_its_snapshot() {
 #[test]
 fn line_delete_json_matches_its_snapshot() {
     let env = with_a_line_of_its_own();
-    insta::assert_json_snapshot!(json_of(&env, &["line", "delete", "x", "--yes"]));
+    insta::assert_json_snapshot!(json_of(&env, &["line", "delete", "side", "--yes"]));
 }
 
 #[test]

@@ -1,9 +1,9 @@
 ---
 source: crates/opal-vcs/tests/lines.rs
-expression: "json_of(&env, &[\"line\", \"delete\", \"x\", \"--yes\"])"
+expression: "json_of(&env, &[\"line\", \"delete\", \"side\", \"--yes\"])"
 ---
 {
-  "line": "x",
+  "line": "side",
   "only_here": 1,
   "opalro_json": 1,
   "save": {
@@ -16,7 +16,7 @@ expression: "json_of(&env, &[\"line\", \"delete\", \"x\", \"--yes\"])"
     "change_id": "[redacted]",
     "change_id_short": "[redacted]",
     "id": "[redacted]",
-    "line": "x",
+    "line": "side",
     "message": "X",
     "saver": {
       "email": "test@example.com",
