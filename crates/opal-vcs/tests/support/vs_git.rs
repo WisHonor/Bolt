@@ -308,20 +308,29 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
     }
 }
 
-/// Asserts that `only_in(newest of a, [newest of b])` counts what `git rev-list --count a ^b`
-/// does, for up to 64 ordered pairs of the lines in `dir`, taken in name order. Where some commit is
-/// dated before a parent the walk may count too many, though never too few and never a held line
-/// as holding some, so only that is asserted there. Returns how many pairs it compared.
-pub fn assert_ancestry_matches_git(dir: &Path) -> usize {
+/// Asserts that `only_in(a, [b])` counts what `git rev-list --count a ^b` does, for up to 64
+/// ordered pairs of tips: the lines in name order, then the server lines in name order, each
+/// standing for the commit its save records. Where a commit in the tips' history is dated before
+/// a parent the walk may count too many, though never too few and never a held tip as holding
+/// some, so only that is asserted there. Returns how many pairs it compared, and whether the
+/// counts had to be equal.
+pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool) {
     let repo = Repository::open(dir).unwrap();
     let state = repo.current().unwrap().1.state;
-    let tips: Vec<(&String, Id, String)> = state
-        .lines
-        .iter()
+    let servers = repo.server_lines(&state).unwrap().servers;
+    let mut named: Vec<(String, Id)> = state.lines.iter().map(|(n, t)| (n.clone(), *t)).collect();
+    for (server, own) in &servers {
+        named.extend(own.iter().map(|(n, t)| (format!("{server}/{n}"), *t)));
+    }
+    let tips: Vec<(String, Id, String)> = named
+        .into_iter()
         .map(|(name, tip)| {
-            let save = repo.store().save(tip, false).unwrap();
-            let commit = std::str::from_utf8(&save.extra[EXTRA_GIT_COMMIT]).unwrap();
-            (name, *tip, commit.to_owned())
+            let save = repo.store().save(&tip, false).unwrap();
+            let Some(commit) = save.extra.get(EXTRA_GIT_COMMIT) else {
+                panic!("the save of {name} records no Git commit");
+            };
+            let commit = std::str::from_utf8(commit).unwrap().to_owned();
+            (name, tip, commit)
         })
         .collect();
     let n = tips.len();
@@ -329,7 +338,15 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> usize {
         .flat_map(|a| (0..n).filter(move |&b| b != a).map(move |b| (a, b)))
         .take(64)
         .collect();
-    let exact = !dated_before_a_parent(dir);
+    if pairs.is_empty() {
+        println!("The ancestry walk has no pairs to compare.");
+        return (0, true);
+    }
+    let compared: Vec<&str> = (0..n)
+        .filter(|&i| pairs.iter().any(|&(a, b)| a == i || b == i))
+        .map(|i| tips[i].2.as_str())
+        .collect();
+    let exact = !dated_before_a_parent(dir, &compared);
     let (mut walking, mut equal) = (Duration::ZERO, 0);
     for &(a, b) in &pairs {
         let ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) = (&tips[a], &tips[b]);
@@ -351,22 +368,23 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> usize {
     let took = walking.as_secs_f64() * 1000.0;
     if exact {
         println!(
-            "The ancestry walk matches git rev-list on {} pairs of lines ({took:.1} ms walking).",
+            "The ancestry walk matches git rev-list on {} pairs of tips ({took:.1} ms walking).",
             pairs.len()
         );
     } else {
         println!(
-            "The ancestry walk on {} pairs of lines, where some commit is dated before a parent: \
+            "The ancestry walk on {} pairs of tips, where some commit is dated before a parent: \
              {equal} equal to git rev-list's count, the rest higher ({took:.1} ms walking).",
             pairs.len()
         );
     }
-    pairs.len()
+    (pairs.len(), exact)
 }
 
-/// Whether any commit's committer date is earlier than one of its parents'.
-fn dated_before_a_parent(dir: &Path) -> bool {
-    let log = text(&git(dir, &["log", "--all", "HEAD", "--format=%H %ct %P"]));
+/// Whether a commit in the history of `tips` has a committer date earlier than a parent's.
+fn dated_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
+    let args = [&["log", "--format=%H %ct %P"], tips].concat();
+    let log = text(&git(dir, &args));
     let rows: Vec<Vec<&str>> = log
         .lines()
         .map(|l| l.split_whitespace().collect())
