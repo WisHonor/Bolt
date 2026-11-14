@@ -1,0 +1,11 @@
+---
+source: crates/opal-vcs/tests/lines.rs
+expression: "json_of(&env, &[\"line\", \"rename\", \"trunk\"])"
+---
+{
+  "from": "main",
+  "opalro_json": 1,
+  "renamed": true,
+  "to": "trunk",
+  "warnings": []
+}

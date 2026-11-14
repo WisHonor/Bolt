@@ -1,0 +1,28 @@
+---
+source: crates/opal-vcs/tests/lines.rs
+expression: "json_of(&env, &[\"line\", \"new\", \"wall-run\"])"
+---
+{
+  "line": "wall-run",
+  "opalro_json": 1,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "A",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": []
+}

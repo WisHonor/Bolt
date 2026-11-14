@@ -5,6 +5,7 @@ mod goto_output;
 mod help;
 mod history_output;
 mod import_output;
+mod line_output;
 mod output;
 mod progress;
 mod setup_output;
@@ -35,7 +36,7 @@ use opal_core::history::{
 };
 use opal_core::id::{ChangeId, Id};
 use opal_core::import::{ImportError, ImportPass, ImportRequest, import_git};
-use opal_core::lines::resolve_target;
+use opal_core::lines::{self, LineError, resolve_target};
 use opal_core::names::{GivenPathError, project_given, project_path};
 use opal_core::presets::{Looked, Preset, suggested};
 use opal_core::repo::{RepoError, Repository, elevated_only_note, resolved};
@@ -114,8 +115,13 @@ enum Command {
         /// The save, by line name, change ID or fingerprint; the one you're at if left out.
         save: Option<String>,
     },
-    /// List the lines, marking the one you're on, then the server lines.
-    Line,
+    /// List the lines, marking the one you're on, then the server lines; or make, rename or
+    /// delete one.
+    #[command(disable_help_subcommand = true)]
+    Line {
+        #[command(subcommand)]
+        action: Option<LineAction>,
+    },
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
     Goto {
         /// The line or save to go to.
@@ -170,6 +176,24 @@ enum Command {
     /// Check everything Opalro has stored, and that the project has everything it needs. Changes
     /// nothing.
     Verify,
+}
+
+#[derive(Subcommand)]
+enum LineAction {
+    /// Make a new line at the save you're on, and move onto it.
+    New { name: String },
+    /// Rename a line: the one you're on, or the one named first.
+    Rename {
+        #[arg(value_name = "NAME", num_args = 1..=2, required = true)]
+        names: Vec<String>,
+    },
+    /// Delete a line. Its saves stay stored for the undo window.
+    Delete {
+        name: String,
+        /// Delete without asking, even when no other line or tag has its saves.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -307,6 +331,16 @@ impl From<SetupError> for Failure {
 
 impl From<ImportError> for Failure {
     fn from(e: ImportError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<LineError> for Failure {
+    fn from(e: LineError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -678,6 +712,22 @@ fn setup_command(
 /// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
 fn ask_apply() -> bool {
     let _ = write!(std::io::stderr(), "Apply these changes? [y/N] ");
+    answered_yes()
+}
+
+/// Asks in the terminal whether to delete `line`, which alone holds `only_here` saves.
+fn ask_delete_line(line: &str, only_here: u64) -> bool {
+    let line = style::err().paint(style::Role::Line, &escape(line, false));
+    let saves = output::counted(only_here, "save", "saves");
+    output::tell(&format!(
+        "Line {line} holds {saves} that no other line or tag has."
+    ));
+    let _ = write!(std::io::stderr(), "Delete it? [y/N] ");
+    answered_yes()
+}
+
+/// Whether the answer typed in is a yes. One that can't be read is a no.
+fn answered_yes() -> bool {
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return false;
@@ -1497,6 +1547,114 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
         }
     }
     output::print_quietly(&shown, &warnings)
+}
+
+/// `opalro line new`, `rename` and `delete`.
+fn line_action(
+    json: bool,
+    action: LineAction,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let (mut warnings, mut document, text, recorded) = match action {
+        LineAction::New { name } => {
+            let made = lines::new_line(repo, &name, &who, &mut waiting)?;
+            let mut warnings = made.warnings;
+            let (save, at) = save_named(repo, &made.save, &mut warnings);
+            let document = json!({"line": made.line, "save": save});
+            (
+                warnings,
+                document,
+                line_output::started(&made.line, &at),
+                true,
+            )
+        }
+        LineAction::Rename { mut names } => {
+            let new = names.pop().unwrap_or_default();
+            let old = names.pop();
+            let done = lines::rename_line(repo, old.as_deref(), &new, &who, &mut waiting)?;
+            let document = json!({"from": done.from, "to": done.to, "renamed": done.renamed});
+            let text = line_output::renamed(&done.from, &done.to, done.renamed);
+            (done.warnings, document, text, done.renamed)
+        }
+        LineAction::Delete { name, yes } => {
+            let asked = Cell::new(false);
+            let mut confirm = |line: &str, only_here: u64| {
+                if yes || !style::may_ask() {
+                    return yes;
+                }
+                asked.set(true);
+                ask_delete_line(line, only_here)
+            };
+            let done = match lines::delete_line(repo, &name, &who, &mut waiting, &mut confirm) {
+                Err(LineError::Kept { .. }) if asked.get() => {
+                    return output::print_quietly(
+                        "Nothing was deleted.\n",
+                        &repo.store().warnings(),
+                    );
+                }
+                Err(LineError::Kept { line, only_here }) => {
+                    let line = escape(&line, false);
+                    let without = if json {
+                        "with --json"
+                    } else {
+                        "without a terminal"
+                    };
+                    return Err(Failure {
+                        message: format!(
+                            "Line {line} holds {} that no other line or tag has, and Opalro can't \
+                             ask whether to delete it {without}.",
+                            output::counted(only_here, "save", "saves")
+                        ),
+                        hint: Some(format!("To delete it: opalro line delete {line} --yes")),
+                        printed: false,
+                    });
+                }
+                done => done?,
+            };
+            let mut warnings = done.warnings;
+            let (save, at) = save_named(repo, &done.save, &mut warnings);
+            let document = json!({"line": done.line, "save": save, "only_here": done.only_here});
+            let text = line_output::deleted(&done.line, &at, done.only_here);
+            (warnings, document, text, true)
+        }
+    };
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        document["opalro_json"] = OPALRO_JSON.into();
+        document["warnings"] = output::warnings_json(&warnings);
+        format!("{document}\n")
+    } else {
+        text
+    };
+    output::print_done(&text, &warnings)?;
+    if !json && recorded {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// Save `id` as a `--json` document gives it (`null` if it can't be read back), and as an outcome
+/// line names it.
+fn save_named(
+    repo: &Repository,
+    id: &Id,
+    warnings: &mut Vec<Warning>,
+) -> (serde_json::Value, String) {
+    match repo.store().save(id, repo.signatures_allowed()) {
+        Ok(save) => {
+            let short = short_or_whole(repo, id, &save.change_id, warnings);
+            let named = goto_output::at_save(&short, Some(&save));
+            (output::save_json(id, &save, &short), named)
+        }
+        Err(_) => (
+            serde_json::Value::Null,
+            goto_output::at_save(&id.short_hex(), None),
+        ),
+    }
 }
 
 /// The name of the project's folder, as the system writes it.
@@ -2366,7 +2524,10 @@ fn main() -> ExitCode {
         }
         Command::Import => import(cli.json, &mut opened),
         Command::Save(args) => save(cli.json, args, &mut opened),
-        Command::Line => line_command(cli.json, &mut opened),
+        Command::Line { action: None } => line_command(cli.json, &mut opened),
+        Command::Line {
+            action: Some(action),
+        } => line_action(cli.json, action, &mut opened),
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::Changes { save, paths } => {
             changes_command(cli.json, save.as_deref(), &paths, &mut opened)

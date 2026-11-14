@@ -426,6 +426,41 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `server_lines` | list of string | Every server line as `line@server`, by server and then line, in byte order. `[]` if none. |
 | `warnings` | list | See §4. |
 
+### `opalro line new --json`
+
+`opalro line new <name>` makes a line at the save the project is on, and puts the project on it ([decision 158](decisions/158-making-renaming-and-deleting-lines.md)). The folder isn't touched, so unsaved changes stay as they are and the next save goes on the new line. It works on a line and at a save. A name that breaks the rules for line names, that another line has in any letter case, or that is a tag's fails the command (exit code 1), changing nothing. It is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `line` | string | The new line's name. |
+| `save` | save or `null` | The save the new line starts at. `null` only if Opalro couldn't read it back after making the line, which happened all the same. |
+| `warnings` | list | See §4. |
+
+### `opalro line rename --json`
+
+`opalro line rename <old> <new>` renames the line `old`, and `opalro line rename <new>` the line the project is on; at a save, with no line, the second fails (exit code 1). A project on the line stays on it, under the new name. Saves already made keep the old name as the line they were made on. The new name follows `line new`'s rules, except that a line may take another spelling of its own name (`Main` to `main`). Renaming a line to the name it has already changes nothing and records no step. A rename is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `from` | string | The line's name before. |
+| `to` | string | Its name now. |
+| `renamed` | boolean | `false` when the line already had that name, so nothing changed and no step was recorded. |
+| `warnings` | list | See §4. |
+
+### `opalro line delete --json`
+
+`opalro line delete <name>` takes the name away; the line's saves stay stored, and `opalro undo` brings the line back for as long as the undo window lasts. The line the project is on can't be deleted (exit code 1). When no other line, no tag and no server line has the line's newest save in its history, the line holds saves nothing else shows: in a terminal Opalro asks first, and with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `line` | string | The deleted line's name. |
+| `save` | save or `null` | The line's newest save. `null` only if Opalro couldn't read it back after deleting the line, which happened all the same. |
+| `only_here` | number | How many of the line's saves no other line, tag or server line has. `0` when something else holds them all. |
+| `warnings` | list | See §4. |
+
 ### `opalro history --json`
 
 | Field | Type | Meaning |

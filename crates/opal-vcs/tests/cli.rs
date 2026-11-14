@@ -2875,7 +2875,7 @@ const COMMANDS: [(&str, &[&str]); 17] = [
     ("goto", &[]),
     ("undo", &["--shelve", "--list", "--all", "--to"]),
     ("redo", &["--shelve"]),
-    ("line", &[]),
+    ("line", &["--yes"]),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),

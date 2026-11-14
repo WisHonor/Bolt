@@ -107,6 +107,18 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     docs.push(("`opalro history --json`", 0, history));
     docs.push(("`opalro show --json`", 0, run(&["show"], 0)));
     docs.push(("`opalro line --json`", 0, run(&["line"], 0)));
+    docs.push(("`opalro line new --json`", 0, run(&["line", "new", "x"], 0)));
+    docs.push((
+        "`opalro line rename --json`",
+        0,
+        run(&["line", "rename", "x", "y"], 0),
+    ));
+    run(&["goto", "main"], 0);
+    docs.push((
+        "`opalro line delete --json`",
+        0,
+        run(&["line", "delete", "y"], 0),
+    ));
     docs.push(("`opalro goto --json`", 0, run(&["goto", &first], 0)));
     run(&["goto", "main"], 0);
     env.overwrite("a.txt", "three\n");

@@ -29,7 +29,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
     (
         "Lines, shelves and details",
         &[
-            ("line", "List your lines", None),
+            ("line", "List, make, rename and delete lines", None),
             ("shelf", "Set your unsaved changes aside", Some("unshelf")),
             (
                 "discard",
@@ -140,7 +140,18 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             ("opalro redo", "Bring back the step undone last"),
             ("opalro redo 2", "Bring back the last two"),
         ],
-        "line" => &[("opalro line", "List the lines, marking the one you're on")],
+        "line" => &[
+            ("opalro line", "List your lines"),
+            (
+                "opalro line new wall-run",
+                "Start a new line where you are, and move onto it",
+            ),
+            ("opalro line rename wall-run wall-running", "Rename a line"),
+            (
+                "opalro line delete wall-run",
+                "Delete a line; undo brings it back",
+            ),
+        ],
         "shelf" => &[
             ("opalro shelf", "Set your unsaved changes aside"),
             (
@@ -232,8 +243,37 @@ pub fn page(root: &mut Command, name: &str) -> Option<String> {
     let usage = command.clone().render_usage().to_string();
     let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage);
     text += &format!("\n{}\n{usage}\n", s.paint(Role::Bold, "Usage"));
+    let forms: Vec<(String, String)> = command
+        .get_subcommands()
+        .map(|form| {
+            let usage = form.clone().render_usage().to_string();
+            let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage).to_owned();
+            (
+                usage,
+                form.get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    if let Some(wide) = forms.iter().map(|(usage, _)| style::columns(usage)).max() {
+        text += &format!("\n{}\n", s.paint(Role::Bold, "Forms"));
+        for (usage, does) in &forms {
+            text += &format!("{usage:<wide$}  {does}\n");
+        }
+    }
+    // A form's options are listed with the command's own.
+    let mut with_forms = command.clone();
+    for arg in command.get_subcommands().flat_map(Command::get_arguments) {
+        let listed = with_forms
+            .get_arguments()
+            .any(|a| a.get_id() == arg.get_id());
+        if !arg.is_positional() && !listed {
+            with_forms = with_forms.arg(arg.clone());
+        }
+    }
     for (title, tag) in [("Arguments", "{positionals}"), ("Options", "{options}")] {
-        let rendered = command
+        let rendered = with_forms
             .clone()
             .help_template(tag)
             .term_width(0)

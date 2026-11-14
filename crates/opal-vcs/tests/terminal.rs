@@ -163,6 +163,10 @@ fn without_a_terminal_opals_own_words_are_plain() {
         &["undo", "--list"],
         &["undo"],
         &["redo"],
+        &["line", "new", "x"],
+        &["line", "rename", "x", "y"],
+        &["goto", "main"],
+        &["line", "delete", "y"],
     ] {
         run(args);
     }

@@ -380,7 +380,7 @@ goto      Go to another line or save
 undo      Take back your last step   (and: redo)
 
 Lines, shelves and details
-line      List your lines
+line      List, make, rename and delete lines
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -658,7 +658,24 @@ On the server (origin):
   main@origin
 ```
 
-`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw. See [Lines](#8-lines) for how a new line starts.
+`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw.
+
+`opalro line new` starts a new line at the save you're on and moves you onto it; your files stay as they are. `opalro line rename` renames a line, and `opalro line delete` deletes one; `opalro undo` takes back each of them.
+
+```sh
+opalro line new wall-run
+opalro line rename wall-run wall-running
+opalro goto main
+opalro line delete wall-running
+```
+
+```text
+Started line wall-run at save tqwl "Eggs too".
+
+    You're on it: your next save goes on wall-run.
+```
+
+`opalro line rename trunk`, with one name, renames the line you're on. You can't delete the line you're on: go to another first. See [Lines](#8-lines) for more.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -1050,7 +1067,28 @@ opalro line
 
 **Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case.
 
-**In v0.1** a line can be made, listed and switched to. There is no merging yet: two lines can't be combined into one, and lines can't be renamed or deleted. Those come in v0.2.
+**Making, renaming and deleting a line.** `opalro line new <name>` starts a line at the save you're on, without saving: your unsaved changes stay, and your next save goes on the new line. `opalro line rename <old> <new>` renames a line, and `opalro line rename <new>` the one you're on; the saves already made keep the old name as the line they were made on. `opalro line delete <name>` deletes a line, but not the one you're on.
+
+```sh
+opalro line new jump-test
+echo "jump higher" > jump.txt
+opalro save "Jump higher"
+opalro line rename jump-test double-jump
+opalro goto main
+opalro line delete double-jump --yes
+```
+
+```text
+Deleted line double-jump, which was at save mzpv "Jump higher".
+
+    No other line or tag has its 1 save. opalro tidy frees them once the undo window has passed.
+
+Changed your mind? opalro undo
+```
+
+Deleting a line keeps its saves: `opalro undo` brings the line back for as long as the undo window lasts (30 days unless you change it), and `opalro tidy` keeps them till then. When no other line or tag has the line's saves, Opalro asks first (`Delete it? [y/N]`); `--yes` deletes without asking, and without a terminal Opalro stops and names `--yes`. When another line or tag holds them all, it asks nothing.
+
+**Not yet:** two lines can't be combined into one.
 
 ## 9. Coming from Git
 

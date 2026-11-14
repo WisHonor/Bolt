@@ -11,6 +11,20 @@ use opal_core::text::{escape, thousands};
 use crate::output;
 use crate::style::{self, Role};
 
+/// A save as outcome lines name it: `short`, its change ID, and its message's first line in
+/// quotes; or `short` alone, 12 hex digits of its fingerprint, when it couldn't be read.
+pub fn at_save(short: &str, save: Option<&Save>) -> String {
+    let s = style::out();
+    match save {
+        Some(save) => format!(
+            "{} {}",
+            s.paint(Role::ChangeId, short),
+            output::quoted_title(save)
+        ),
+        None => s.paint(Role::Fingerprint, short),
+    }
+}
+
 /// `opalro goto`'s outcome line and details. `short` names the save it is at, `save` is that save
 /// if it could be read, and `lines` are the project's lines now. A goto that recorded no step
 /// found the project already there, and only that is said.
@@ -21,14 +35,7 @@ pub fn switched(
     lines: &BTreeMap<String, Id>,
 ) -> String {
     let s = style::out();
-    let at = match save {
-        Some(save) => format!(
-            "{} {}",
-            s.paint(Role::ChangeId, short),
-            output::quoted_title(save)
-        ),
-        None => s.paint(Role::Fingerprint, short),
-    };
+    let at = at_save(short, save);
     let switched = s.paint(Role::Ok, "Switched");
     if !done.recorded {
         return match &done.position {

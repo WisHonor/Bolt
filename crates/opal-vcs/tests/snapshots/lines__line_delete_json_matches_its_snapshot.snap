@@ -1,0 +1,29 @@
+---
+source: crates/opal-vcs/tests/lines.rs
+expression: "json_of(&env, &[\"line\", \"delete\", \"x\", \"--yes\"])"
+---
+{
+  "line": "x",
+  "only_here": 1,
+  "opalro_json": 1,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "x",
+    "message": "X",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": []
+}

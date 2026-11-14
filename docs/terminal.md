@@ -122,6 +122,7 @@ A question is asked only when stdin and stderr are both terminals and `--json` w
 | A save away from a line | `Name a new line for this save:` | `--line <name>` | stops, saving nothing |
 | Which preset (`opalro start`) | `Choice [N]:` | `--preset <name>` | stops, starting nothing |
 | A preset switch (`opalro setup --preset`) | `Apply these changes? [y/N]` | `--yes` | stops after showing the changes |
+| A line no other line or tag holds (`opalro line delete`) | `Delete it? [y/N]` | `--yes` | stops, deleting nothing |
 
 Every stop is an `error:` whose `hint:` names the flag.
 
@@ -129,7 +130,7 @@ Every stop is an `error:` whose `hint:` names the flag.
 
 - `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
 - `opalro help` and `opalro --help` end with exit code 0. `opalro` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Opalro couldn't use.
-- `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. The usage, the arguments and the options are read from the command line's own definitions, so only options the command really takes are listed. Every example is a command line Opalro takes.
+- `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Forms` (when the command has forms, as `opalro line new` is one of `opalro line`'s: each form's usage, then its one-line description, padded as the examples are), `Arguments` (when the command takes any) and `Options` (a form's options with the command's own), each a title on a line of its own, its lines under it flush left, one line each. The usage, the forms, the arguments and the options are read from the command line's own definitions, so only options the command really takes are listed. Every example is a command line Opalro takes.
 - Git's words appear nowhere in help. A command line Opalro can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
 - Help is plain text on stdout, with section titles in bold on a terminal, and nothing else styled. It is never wrapped or cut: it reads the same at any width and in a pipe.
 
@@ -379,6 +380,21 @@ On the server (origin):
 - **The outcome line:** `Lines in <project>:`; at a save, `Lines in <project>. You are at save <12 hex digits>, not on a line.`, and no row is marked. `<project>` is the name of the project's folder.
 - **A row** is the line's name, the place marker on the one you are on; the others start with two spaces. Each server's lines follow after an empty line, under `On the server (<server>):`, named `<line>@<server>` as `opalro goto` takes them. Rows show only names: a line's newest save, its time and message would mean reading every line.
 - **Colour:** the marker bold, line names blue, the server's name in brackets dim.
+
+`opalro line new <name>`, `opalro line rename [<old>] <new>` and `opalro line delete <name>` make, rename and delete a line:
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| A new line | `Started line <line> at save <id> "<message>".` | `You're on it: your next save goes on <line>.` | `Changed your mind? opalro undo` |
+| Renamed | `Renamed line <old> to <new>.` | `Saves already made keep <old> as the line they were made on.` | `Changed your mind? opalro undo` |
+| The same name | `Line <line> already has that name.` | | |
+| Deleted | `Deleted line <line>, which was at save <id> "<message>".` | when nothing else had its saves: `No other line or tag has its 3 saves. opalro tidy frees them once the undo window has passed.` (`its 1 save`) | `Changed your mind? opalro undo` |
+| The question, answered no | `Nothing was deleted.` | | |
+| No terminal and no `--yes` | stdout gets nothing; `error: Line <line> holds 3 saves that no other line or tag has, and Opalro can't ask whether to delete it without a terminal.` (`… with --json.`) | `hint: To delete it: opalro line delete <line> --yes` | |
+
+- **The question** comes only when no other line, tag or server line has the line's newest save in its history. On stderr, as §10 asks one: `Line <line> holds 3 saves that no other line or tag has.`, then `Delete it? [y/N] `. With `--yes` it isn't asked.
+- The save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
+- **Colour:** `Started`, `Renamed` and `Deleted` green and bold, line names blue, IDs magenta and bold.
 
 ### `opalro undo` and `opalro redo`
 
