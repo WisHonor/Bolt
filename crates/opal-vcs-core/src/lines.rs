@@ -9,7 +9,7 @@ use crate::history::{ResolveError, line_named, resolve, tip_of};
 use crate::id::Id;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
-use crate::switch::{self, SwitchError};
+use crate::switch::{self, Earlier, SwitchError};
 use crate::text::escape;
 use crate::warning::Warning;
 use crate::writeout::{Applied, Plan};
@@ -146,7 +146,7 @@ pub fn new_line(
     who: &Person,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<Made, LineError> {
-    step(repo, "line new", on_wait, |repo, lock, warnings| {
+    step(repo, "line new", on_wait, |repo, lock, earlier| {
         let (head, entry) = repo.current()?;
         check_new_name(repo, &entry.state, name, None)?;
         let save = tip_of(&entry)?;
@@ -157,7 +157,7 @@ pub fn new_line(
         Ok(Made {
             line: name.to_owned(),
             save,
-            warnings,
+            warnings: told(earlier),
         })
     })
 }
@@ -170,7 +170,7 @@ pub fn rename_line(
     who: &Person,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<Renamed, LineError> {
-    step(repo, "line rename", on_wait, |repo, lock, warnings| {
+    step(repo, "line rename", on_wait, |repo, lock, earlier| {
         let (head, entry) = repo.current()?;
         let old = match (old, &entry.state.position) {
             (Some(old), _) => old.to_owned(),
@@ -195,7 +195,7 @@ pub fn rename_line(
             from: old,
             to: new.to_owned(),
             renamed,
-            warnings,
+            warnings: told(earlier),
         })
     })
 }
@@ -209,7 +209,7 @@ pub fn delete_line(
     on_wait: &mut dyn FnMut(&str),
     confirm: &mut dyn FnMut(&str, u64) -> bool,
 ) -> Result<Deleted, LineError> {
-    step(repo, "line delete", on_wait, |repo, lock, warnings| {
+    step(repo, "line delete", on_wait, |repo, lock, earlier| {
         let (head, entry) = repo.current()?;
         let Some(&save) = entry.state.lines.get(name) else {
             return Err(LineError::NoSuchLine(name.to_owned()));
@@ -243,7 +243,7 @@ pub fn delete_line(
             line: name.to_owned(),
             save,
             only_here,
-            warnings,
+            warnings: told(earlier),
         })
     })
 }
@@ -280,17 +280,16 @@ pub(crate) fn check_new_name(
     Ok(())
 }
 
-/// Runs `f` under the lock for changes once a stopped switch is finished, giving it the warnings
-/// that finishing left to tell.
+/// Runs `f` under the lock for changes once a stopped switch is finished. What finishing left to
+/// tell stays in `earlier` until `f` takes it with [`told`], so a refusal still tells it.
 fn step<T>(
     repo: &mut Repository,
     command: &str,
     on_wait: &mut dyn FnMut(&str),
-    f: impl FnOnce(&mut Repository, &ChangeLock, Vec<Warning>) -> Result<T, LineError>,
+    f: impl FnOnce(&mut Repository, &ChangeLock, &mut Earlier) -> Result<T, LineError>,
 ) -> Result<T, LineError> {
     let done = switch::locked(repo, command, on_wait, |repo, lock, earlier, _| {
-        let warnings = switch::switch_warnings(Plan::default(), Applied::default(), earlier);
-        Ok(f(repo, lock, warnings.warnings))
+        Ok(f(repo, lock, earlier))
     });
     match done {
         Ok(done) => done,
@@ -300,6 +299,11 @@ fn step<T>(
             e.to_string(),
         )))),
     }
+}
+
+/// What finishing a stopped switch left to tell, taken for a step that succeeded.
+fn told(earlier: &mut Earlier) -> Vec<Warning> {
+    switch::switch_warnings(Plan::default(), Applied::default(), earlier).warnings
 }
 
 /// Records a step to `state` that changes no file.

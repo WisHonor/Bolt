@@ -181,11 +181,36 @@ fn a_line_can_take_another_spelling_of_its_own_name() {
     renamed(&mut repo, Some("Main"), "main").unwrap();
     assert!(state(&repo).lines.contains_key("main"));
     made(&mut repo, "other").unwrap();
+    let head = repo.head().unwrap();
     let taken = renamed(&mut repo, Some("main"), "Other").unwrap_err();
     assert!(
         matches!(&taken, LineError::Name(NameError::Taken { taken, .. }) if taken == "other"),
         "{taken:?}"
     );
+    let bad = renamed(&mut repo, Some("main"), "wall run").unwrap_err();
+    assert!(
+        matches!(bad, LineError::Name(NameError::Bad { .. })),
+        "{bad:?}"
+    );
+    assert_eq!(repo.head().unwrap(), head);
+}
+
+#[test]
+fn a_rename_elsewhere_leaves_the_position_as_it_is() {
+    let (_dir, mut repo, s) = project();
+    set(&mut repo, None, |st| {
+        st.lines.insert("b".into(), s);
+    });
+    renamed(&mut repo, Some("b"), "c").unwrap();
+    let st = state(&repo);
+    assert_eq!(st.position, Position::OnLine("main".into()));
+    assert_eq!(st.lines.keys().collect::<Vec<_>>(), ["c", "main"]);
+
+    set(&mut repo, None, |st| st.position = Position::AtSave(s));
+    renamed(&mut repo, Some("main"), "trunk").unwrap();
+    let st = state(&repo);
+    assert_eq!(st.position, Position::AtSave(s));
+    assert_eq!(st.lines.keys().collect::<Vec<_>>(), ["c", "trunk"]);
 }
 
 #[test]
@@ -201,10 +226,12 @@ fn renaming_to_the_same_name_makes_no_step() {
 fn renaming_the_current_line_at_a_save_is_refused() {
     let (_dir, mut repo, s) = project();
     set(&mut repo, None, |st| st.position = Position::AtSave(s));
+    let head = repo.head().unwrap();
     let refused = renamed(&mut repo, None, "trunk").unwrap_err();
     assert!(matches!(refused, LineError::NotOnALine), "{refused:?}");
     let unknown = renamed(&mut repo, Some("nope"), "trunk").unwrap_err();
     assert!(matches!(unknown, LineError::NoSuchLine(_)), "{unknown:?}");
+    assert_eq!(repo.head().unwrap(), head);
 }
 
 #[test]
@@ -347,17 +374,16 @@ fn undo_takes_each_line_step_back() {
     }
 }
 
+/// A project on line `old` whose `goto main` stopped between its journal and its head, so the
+/// next command has the switch to finish. Gives `main`'s save too.
 #[cfg(feature = "fault-injection")]
-#[test]
-fn a_line_step_after_a_stopped_goto_finishes_it_first() {
+fn stopped_goto() -> (tempfile::TempDir, Repository, Id) {
     use crate::fsio::fault;
     use crate::journal::Journal;
     use crate::listing::EntryKind;
     use crate::switch::goto;
     use crate::test_support::plant_save;
-    use crate::warning::SWITCH_FINISHED;
-    for n in 1.. {
-        assert!(n < 100, "no goto stopped between its journal and its head");
+    for n in 1..100 {
         // On line `old`, the folder holding its file, with `main` a save further on.
         let (dir, mut repo, start) = project();
         std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
@@ -397,24 +423,62 @@ fn a_line_step_after_a_stopped_goto_finishes_it_first() {
         );
         fault::disarm();
         drop(repo);
-        let mut repo = Repository::open(dir.path()).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
         let journal = Journal::read(&repo).unwrap();
-        let unfinished = journal.is_some_and(|j| j.target != repo.head().unwrap());
         // Only a stop between the journal and the head leaves a switch to finish.
-        if !unfinished {
-            continue;
+        if journal.is_some_and(|j| j.target != repo.head().unwrap()) {
+            assert!(stopped.is_err(), "fault {n}");
+            return (dir, repo, main);
         }
-        assert!(stopped.is_err(), "fault {n}");
-        let done = made(&mut repo, "next").unwrap();
-        let mut told = done.warnings.clone();
-        told.extend(repo.store().warnings());
-        assert!(
-            told.iter().any(|w| w.kind == SWITCH_FINISHED),
-            "fault {n}: {told:?}"
-        );
-        assert_eq!(done.save, main, "fault {n}");
-        assert_eq!(state(&repo).lines["next"], main);
-        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"A");
-        break;
     }
+    panic!("no goto stopped between its journal and its head");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_line_step_after_a_stopped_goto_finishes_it_first() {
+    use crate::warning::SWITCH_FINISHED;
+    let (dir, mut repo, main) = stopped_goto();
+    let done = made(&mut repo, "next").unwrap();
+    let mut told = done.warnings.clone();
+    told.extend(repo.store().warnings());
+    assert!(told.iter().any(|w| w.kind == SWITCH_FINISHED), "{told:?}");
+    assert_eq!(done.save, main);
+    assert_eq!(state(&repo).lines["next"], main);
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"A");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_refused_line_step_still_tells_what_finishing_a_stopped_goto_left() {
+    use crate::journal::{Action, Journal};
+    use crate::warning::{NOT_WRITTEN_HERE, SWITCH_FINISHED};
+    let (_dir, mut repo, _) = stopped_goto();
+    // A journal can hold a name no system may write (one made elsewhere, say): finishing leaves
+    // it unwritten, and must say so.
+    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut journal = Journal::read(&repo).unwrap().unwrap();
+    let change = journal.actions[0].change;
+    journal.actions.insert(
+        0,
+        Action {
+            path: ".GIT".into(),
+            change,
+            expected: None,
+        },
+    );
+    journal.write(&repo, &lock).unwrap();
+    drop(lock);
+
+    let head = repo.head().unwrap();
+    let refused = made(&mut repo, "main").unwrap_err();
+    assert!(
+        matches!(refused, LineError::Name(NameError::Taken { .. })),
+        "{refused:?}"
+    );
+    assert_ne!(repo.head().unwrap(), head, "the switch wasn't finished");
+    let told = repo.store().warnings();
+    let kinds: Vec<&str> = told.iter().map(|w| w.kind).collect();
+    assert!(kinds.contains(&SWITCH_FINISHED), "{told:?}");
+    assert!(kinds.contains(&NOT_WRITTEN_HERE), "{told:?}");
 }
