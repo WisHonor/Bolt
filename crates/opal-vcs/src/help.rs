@@ -30,6 +30,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
         "Lines, shelves and details",
         &[
             ("line", "List, make, rename and delete lines", None),
+            ("tag", "Name a save, like v1.0, or list your tags", None),
             ("shelf", "Set your unsaved changes aside", Some("unshelf")),
             (
                 "discard",
@@ -150,6 +151,18 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             (
                 "opalro line delete wall-run",
                 "Delete a line; undo brings it back",
+            ),
+        ],
+        "tag" => &[
+            ("opalro tag", "List your tags"),
+            (
+                "opalro tag v1.0 \"First playable\"",
+                "Tag the save you're at",
+            ),
+            ("opalro tag v1.0 --save main", "Tag another save"),
+            (
+                "opalro tag --delete v1.0",
+                "Delete a tag; undo brings it back",
             ),
         ],
         "shelf" => &[

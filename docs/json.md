@@ -461,6 +461,40 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `only_here` | number | How many of the line's saves no other line, tag or server line has. `0` when something else holds them all. |
 | `warnings` | list | See §4. |
 
+### `opalro tag --json`
+
+`opalro tag` lists the project's tags ([decision 159](decisions/159-tags.md)). No save is read.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tags` | list of object | Each tag as `{"name": string, "save": 64 hex digits, "message": string}`, in name order (byte order). `message` is the tag's whole message, as it is; `""` if it has none. `[]` if the project has no tags. |
+| `warnings` | list | See §4. |
+
+### `opalro tag <name> --json`
+
+`opalro tag <name> [<message>] [--save <save>]` tags the save the project is at, or the one `--save` names (by line name, change ID or fingerprint). A new tag's name follows the rules for line names, and can't be a line's or differ from another tag's only by letter case; such a name fails the command (exit code 1), changing nothing. Tagging the save a tag is at already changes nothing and records no step. A tag at another save is moved, which in a terminal Opalro asks about first; with `--json` it never asks, so the command fails (exit code 1), moving nothing, and `error.hint` names `--yes`, which moves it without asking. Making or moving a tag is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tag` | string | The tag's name. |
+| `save` | save or `null` | The save the tag is at now. `null` only if Opalro couldn't read it back, after tagging it all the same. |
+| `moved_from` | string or `null` | The save the tag was at before it moved (64 hex digits); `null` when it didn't move. |
+| `changed` | boolean | `false` when the tag was at that save already, so nothing changed and no step was recorded. |
+| `warnings` | list | See §4. |
+
+### `opalro tag --delete --json`
+
+`opalro tag --delete <name>` deletes a tag; `opalro undo` brings it back. In a terminal Opalro asks first; with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking. A tag that isn't there fails the command (exit code 1).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tag` | string | The deleted tag's name. |
+| `save` | save or `null` | The save the tag was at. `null` only if Opalro couldn't read it back, after deleting the tag all the same. |
+| `warnings` | list | See §4. |
+
 ### `opalro history --json`
 
 | Field | Type | Meaning |

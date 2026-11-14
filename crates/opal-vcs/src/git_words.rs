@@ -105,7 +105,7 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         "restore" => Typed::Explain(RESTORE),
         "rm" | "mv" => Typed::Explain(RM_MV),
         "reset" => Typed::Explain(RESET),
-        "merge" | "rebase" | "cherry-pick" | "tag" | "blame" => Typed::Explain(LATER),
+        "merge" | "rebase" | "cherry-pick" | "blame" => Typed::Explain(LATER),
         "clone" | "fetch" | "pull" | "push" | "remote" => Typed::Explain(SYNC),
         "revert" => Typed::Explain(REVERT),
         "clean" => Typed::Explain(CLEAN),
@@ -468,9 +468,12 @@ mod tests {
         ] {
             assert_eq!(explained(typed), STASH, "{typed}");
         }
-        for word in ["merge", "rebase", "cherry-pick", "tag", "blame"] {
+        for word in ["merge", "rebase", "cherry-pick", "blame"] {
             assert_eq!(explained(word), LATER);
         }
+        // Opalro's own word too, so it runs as typed.
+        let typed: Vec<OsString> = ["tag", "v1"].map(OsString::from).into();
+        assert!(matches!(translate(typed.clone()), Typed::Opalro(a) if a == typed));
         for word in ["clone", "fetch", "pull", "push", "remote"] {
             assert_eq!(explained(word), SYNC);
         }

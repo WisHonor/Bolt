@@ -1,0 +1,30 @@
+---
+source: crates/opal-vcs/tests/tags.rs
+expression: "json_of(&env, &[\"tag\", \"v1.0\", \"First playable\"])"
+---
+{
+  "changed": true,
+  "moved_from": null,
+  "opalro_json": 1,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "A",
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "tag": "v1.0",
+  "warnings": []
+}

@@ -1,0 +1,20 @@
+---
+source: crates/opal-vcs/tests/tags.rs
+expression: "json_of(&env, &[\"tag\"])"
+---
+{
+  "opalro_json": 1,
+  "tags": [
+    {
+      "message": "",
+      "name": "release/2026-11",
+      "save": "[redacted]"
+    },
+    {
+      "message": "First playable",
+      "name": "v1.0",
+      "save": "[redacted]"
+    }
+  ],
+  "warnings": []
+}

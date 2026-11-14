@@ -246,6 +246,23 @@ fn save_line_on_a_line_refuses_a_tags_name() {
 }
 
 #[test]
+fn line_new_and_save_line_refuse_a_tags_name() {
+    let env = project();
+    run(&env, &["tag", "v1"], 0);
+    let before = env.standing();
+    let (_, said) = run(&env, &["line", "new", "v1"], 1);
+    assert!(
+        said.contains("\"v1\" is a tag's name already, and a line can't share it."),
+        "{said}"
+    );
+    env.overwrite("a.txt", "b");
+    let err = refused_save(&env, &["--line", "v1", "B"]);
+    assert!(err.contains("is a tag's name already"), "{err}");
+    assert_eq!(lines_now(&env)["lines"], serde_json::json!(["main"]));
+    assert_eq!(env.standing().0, before.0);
+}
+
+#[test]
 fn line_lists_lines_and_server_lines() {
     let env = Env::new();
     env.commit("a.txt", "a\n", "First");

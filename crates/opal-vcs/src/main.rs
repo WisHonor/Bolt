@@ -12,6 +12,7 @@ mod setup_output;
 mod shelf_output;
 mod show_output;
 mod style;
+mod tag_output;
 mod undo_output;
 
 use std::cell::{Cell, RefCell};
@@ -47,6 +48,7 @@ use opal_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_f
 use opal_core::status::{PathChange, status, why_stopped};
 use opal_core::store::StoreError;
 use opal_core::switch::{SwitchError, discard, goto};
+use opal_core::tags::{self, Ask, TagError, Tagged};
 use opal_core::text::escape;
 use opal_core::tidy;
 use opal_core::undo::{self, StepInfo, StepRequest};
@@ -121,6 +123,23 @@ enum Command {
     Line {
         #[command(subcommand)]
         action: Option<LineAction>,
+    },
+    /// Name a save with a tag, list the tags, or delete one.
+    Tag {
+        /// The tag's name. Without one, the tags are listed.
+        name: Option<String>,
+        /// What the tag marks, in a few words.
+        message: Option<String>,
+        /// The save to tag, by line name, tag, change ID or fingerprint; the one you're at if left
+        /// out.
+        #[arg(long, value_name = "SAVE", requires = "name")]
+        save: Option<String>,
+        /// Delete this tag.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["name", "message", "save"])]
+        delete: Option<String>,
+        /// Move or delete the tag without asking.
+        #[arg(long)]
+        yes: bool,
     },
     /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
     Goto {
@@ -341,6 +360,16 @@ impl From<ImportError> for Failure {
 
 impl From<LineError> for Failure {
     fn from(e: LineError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<TagError> for Failure {
+    fn from(e: TagError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -1559,7 +1588,7 @@ fn line_action(
         &std::env::current_dir()?,
     )?));
     let who = now_person(&load_identity(Some(repo.root()))?);
-    let (mut warnings, mut document, text, recorded) = match action {
+    let (mut warnings, document, text, recorded) = match action {
         LineAction::New { name } => {
             let made = lines::new_line(repo, &name, &who, &mut waiting)?;
             let mut warnings = made.warnings;
@@ -1598,16 +1627,12 @@ fn line_action(
                 }
                 Err(LineError::Kept { line, only_here }) => {
                     let line = escape(&line, false);
-                    let without = if json {
-                        "with --json"
-                    } else {
-                        "without a terminal"
-                    };
                     return Err(Failure {
                         message: format!(
                             "Line {line} holds {} that no other line or tag has, and Opalro can't \
-                             ask whether to delete it {without}.",
-                            output::counted(only_here, "save", "saves")
+                             ask whether to delete it {}.",
+                            output::counted(only_here, "save", "saves"),
+                            unasked(json)
                         ),
                         hint: Some(format!("To delete it: opalro line delete {line} --yes")),
                         printed: false,
@@ -1623,18 +1648,225 @@ fn line_action(
         }
     };
     warnings.extend(repo.store().warnings());
+    print_step(json, document, text, &warnings, recorded)
+}
+
+/// What a command that may record a step prints: its `--json` document, or `text` and, when it
+/// `recorded` one, how to take it back.
+fn print_step(
+    json: bool,
+    mut document: serde_json::Value,
+    text: String,
+    warnings: &[Warning],
+    recorded: bool,
+) -> Result<(), Failure> {
     let text = if json {
         document["opalro_json"] = OPALRO_JSON.into();
-        document["warnings"] = output::warnings_json(&warnings);
+        document["warnings"] = output::warnings_json(warnings);
         format!("{document}\n")
     } else {
         text
     };
-    output::print_done(&text, &warnings)?;
+    output::print_done(&text, warnings)?;
     if !json && recorded {
         style::changed_your_mind();
     }
     Ok(())
+}
+
+/// Why a question couldn't be asked, for an error that names the flag that answers it.
+fn unasked(json: bool) -> &'static str {
+    if json {
+        "with --json"
+    } else {
+        "without a terminal"
+    }
+}
+
+/// `opalro tag`: the tags in name order.
+fn tag_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let (_, entry) = repo.current()?;
+    let list = repo.tag_list(&entry.state)?;
+    let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    warnings.extend(repo.store().warnings());
+    if json {
+        let tags: Vec<serde_json::Value> = (list.tags.iter())
+            .map(|(name, tag)| {
+                json!({"name": name, "save": tag.save.to_hex(), "message": tag.message})
+            })
+            .collect();
+        let document = json!({
+            "opalro_json": OPALRO_JSON,
+            "tags": tags,
+            "warnings": output::warnings_json(&warnings),
+        });
+        return output::print_quietly(&format!("{document}\n"), &warnings);
+    }
+    output::print_quietly(&tag_output::list(&list), &warnings)
+}
+
+/// What `tags::tag` and `tags::delete_tag` call before they move or delete a tag: yes with
+/// `--yes`, no where Opalro can't ask, and otherwise the answer, noting in `asked` that it asked.
+/// The saves are named through `reader`, as the engine holds the project while it asks.
+fn tag_confirm<'a>(
+    yes: bool,
+    reader: &'a Repository,
+    asked: &'a Cell<bool>,
+    noticed: &'a mut Vec<Warning>,
+) -> impl FnMut(&Ask<'_>) -> bool + 'a {
+    move |ask| {
+        if yes || !style::may_ask() {
+            return yes;
+        }
+        asked.set(true);
+        ask_about_tag(reader, ask, noticed)
+    }
+}
+
+/// Asks in the terminal whether to move or delete a tag.
+fn ask_about_tag(repo: &Repository, ask: &Ask<'_>, noticed: &mut Vec<Warning>) -> bool {
+    let e = style::err();
+    let mut at = |id: &Id| {
+        let (short, title) = named_save(repo, id, noticed);
+        match title {
+            Some(title) => format!(
+                "{} \"{}\"",
+                e.paint(style::Role::ChangeId, &short),
+                escape(&title, false)
+            ),
+            None => e.paint(style::Role::Fingerprint, &short),
+        }
+    };
+    let question = match ask {
+        Ask::Move { name, from, to } => {
+            let name = tag_output::named(e, name);
+            output::tell(&format!("Tag {name} is at save {}.", at(from)));
+            format!("Move it to save {}? [y/N] ", at(to))
+        }
+        Ask::Delete { name, save } => format!(
+            "Delete tag {}, at save {}? [y/N] ",
+            tag_output::named(e, name),
+            at(save)
+        ),
+    };
+    let _ = write!(std::io::stderr(), "{question}");
+    answered_yes()
+}
+
+/// What a question answered no prints.
+fn nothing_changed(repo: &Repository, mut warnings: Vec<Warning>) -> Result<(), Failure> {
+    warnings.extend(repo.store().warnings());
+    output::print_quietly("Nothing was changed.\n", &warnings)
+}
+
+/// `opalro tag <name> [message] [--save <save>]`: makes the tag, or moves it once asked.
+fn tag_command(
+    json: bool,
+    name: &str,
+    message: Option<&str>,
+    save: Option<&str>,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let save = save.map(|text| resolve(repo, text)).transpose()?;
+    let reader = Repository::open_untouched(repo.root())?;
+    let (asked, mut noticed) = (Cell::new(false), Vec::new());
+    let mut confirm = tag_confirm(yes, &reader, &asked, &mut noticed);
+    let done = tags::tag(repo, name, message, save, &who, &mut waiting, &mut confirm);
+    drop(confirm);
+    let (tagged, mut warnings) = match done {
+        Err(TagError::NotMoved { .. }) if asked.get() => return nothing_changed(repo, noticed),
+        Err(TagError::NotMoved { name, from, .. }) => {
+            let (was, _) = named_save(repo, &from, &mut Vec::new());
+            return Err(Failure {
+                message: format!(
+                    "Tag {} is at another save, {was}, and Opalro can't ask whether to move it {}.",
+                    escape(&name, false),
+                    unasked(json)
+                ),
+                hint: Some("To move it, run the same command with --yes.".into()),
+                printed: false,
+            });
+        }
+        done => done?,
+    };
+    warnings.extend(noticed);
+    let (document, text, recorded) = match tagged {
+        Tagged::Made { save } => {
+            let (save, at) = save_named(repo, &save, &mut warnings);
+            let document = json!({"tag": name, "save": save, "moved_from": null, "changed": true});
+            (document, tag_output::made(name, &at), true)
+        }
+        Tagged::Already { save } => {
+            let (save, at) = save_named(repo, &save, &mut warnings);
+            let document = json!({"tag": name, "save": save, "moved_from": null, "changed": false});
+            (document, tag_output::already(name, &at), false)
+        }
+        Tagged::Moved { from, to } => {
+            let (save, at) = save_named(repo, &to, &mut warnings);
+            let (_, was) = save_named(repo, &from, &mut warnings);
+            let document =
+                json!({"tag": name, "save": save, "moved_from": from.to_hex(), "changed": true});
+            (document, tag_output::moved(name, &at, &was), true)
+        }
+    };
+    warnings.extend(reader.store().warnings());
+    warnings.extend(repo.store().warnings());
+    print_step(json, document, text, &warnings, recorded)
+}
+
+/// `opalro tag --delete <name>`, once asked.
+fn tag_delete_command(
+    json: bool,
+    name: &str,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let reader = Repository::open_untouched(repo.root())?;
+    let (asked, mut noticed) = (Cell::new(false), Vec::new());
+    let mut confirm = tag_confirm(yes, &reader, &asked, &mut noticed);
+    let done = tags::delete_tag(repo, name, &who, &mut waiting, &mut confirm);
+    drop(confirm);
+    let (save, mut warnings) = match done {
+        Err(TagError::NotDeleted { .. }) if asked.get() => return nothing_changed(repo, noticed),
+        Err(TagError::NotDeleted { name }) => {
+            return Err(Failure {
+                message: format!(
+                    "Opalro asks before it deletes a tag, and can't {}.",
+                    unasked(json)
+                ),
+                hint: Some(format!(
+                    "To delete it: opalro tag --delete {} --yes",
+                    escape(&name, false)
+                )),
+                printed: false,
+            });
+        }
+        done => done?,
+    };
+    warnings.extend(noticed);
+    let (document_save, at) = save_named(repo, &save, &mut warnings);
+    warnings.extend(reader.store().warnings());
+    warnings.extend(repo.store().warnings());
+    let document = json!({"tag": name, "save": document_save});
+    print_step(
+        json,
+        document,
+        tag_output::deleted(name, &at),
+        &warnings,
+        true,
+    )
 }
 
 /// Save `id` as a `--json` document gives it (`null` if it can't be read back), and as an outcome
@@ -2528,6 +2760,28 @@ fn main() -> ExitCode {
         Command::Line {
             action: Some(action),
         } => line_action(cli.json, action, &mut opened),
+        Command::Tag {
+            name: None,
+            delete: None,
+            ..
+        } => tag_list_command(cli.json, &mut opened),
+        Command::Tag {
+            name,
+            message,
+            save,
+            delete,
+            yes,
+        } => match delete {
+            Some(name) => tag_delete_command(cli.json, &name, yes, &mut opened),
+            None => tag_command(
+                cli.json,
+                &name.unwrap_or_default(),
+                message.as_deref(),
+                save.as_deref(),
+                yes,
+                &mut opened,
+            ),
+        },
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::Changes { save, paths } => {
             changes_command(cli.json, save.as_deref(), &paths, &mut opened)

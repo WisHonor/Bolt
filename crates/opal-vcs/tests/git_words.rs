@@ -278,7 +278,6 @@ fn each_explained_word_explains() {
         "merge",
         "rebase",
         "cherry-pick",
-        "tag",
         "blame",
         "clone",
         "fetch",

@@ -381,6 +381,7 @@ undo      Take back your last step   (and: redo)
 
 Lines, shelves and details
 line      List, make, rename and delete lines
+tag       Name a save, like v1.0, or list your tags
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -678,6 +679,35 @@ Changed your mind? opalro undo
 ```
 
 `opalro line rename trunk`, with one name, renames the line you're on. You can't delete the line you're on: go to another first. See [Lines](#8-lines) for more.
+
+### `opalro tag`
+
+Name a save, like a sticky note on it: `v1.0`, or `release/2026-11`. Unlike a line, a tag stays where you put it when you save again.
+
+```sh
+opalro tag v1.0 "First playable"
+opalro tag
+```
+
+```text
+Tagged save tqwl "Eggs too" as v1.0.
+
+Changed your mind? opalro undo
+```
+
+```text
+1 tag:
+
+  v1.0  9d02c3aa41f0  "First playable"
+```
+
+The message is optional. `--save` tags another save than the one you're at: `opalro tag v1.0 --save main`, or a change ID. Naming a tag that is at another save moves it, after asking (`--yes` moves it without asking). `opalro tag --delete` deletes a tag, after asking too; `opalro undo` brings it back.
+
+```sh
+opalro tag --delete v1.0 --yes
+```
+
+See [Lines](#8-lines) for more on tags.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -1089,6 +1119,8 @@ Changed your mind? opalro undo
 ```
 
 Deleting a line keeps its saves: `opalro undo` brings the line back for as long as the undo window lasts (30 days unless you change it), and `opalro tidy` keeps them till then. When no other line or tag has the line's saves, Opalro asks first (`Delete it? [y/N]`); `--yes` deletes without asking, and without a terminal Opalro stops and names `--yes`. When another line or tag holds them all, it asks nothing.
+
+**Tags.** A tag names one save for good, such as the build you shipped: `opalro tag v1.0 "First playable"` tags the save you're at, and `opalro tag` lists the tags. A line moves on with each save; a tag stays put until you move it. Tag names follow the same rules as line names, and a tag can't share a line's name. Naming a tag that is at another save moves it there, and deleting one (`opalro tag --delete <name>`) takes it away; Opalro asks before either (`--yes` answers for you), and `opalro undo` takes each back. Tags a Git import brought in are listed too, with their messages. As long as a tag holds a save, `opalro tidy` keeps it and the saves before it.
 
 **Not yet:** two lines can't be combined into one.
 

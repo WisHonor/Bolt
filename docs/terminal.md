@@ -123,12 +123,14 @@ A question is asked only when stdin and stderr are both terminals and `--json` w
 | Which preset (`opalro start`) | `Choice [N]:` | `--preset <name>` | stops, starting nothing |
 | A preset switch (`opalro setup --preset`) | `Apply these changes? [y/N]` | `--yes` | stops after showing the changes |
 | A line no other line or tag holds (`opalro line delete`) | `Delete it? [y/N]` | `--yes` | stops, deleting nothing |
+| Moving a tag that is at another save (`opalro tag <name>`) | `Move it to save <id> "<message>"? [y/N]` | `--yes` | stops, moving nothing |
+| Deleting a tag (`opalro tag --delete`) | `Delete tag <tag>, at save <id> "<message>"? [y/N]` | `--yes` | stops, deleting nothing |
 
 Every stop is an `error:` whose `hint:` names the flag.
 
 ## 11. Help
 
-- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
+- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `tag`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
 - `opalro help` and `opalro --help` end with exit code 0. `opalro` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Opalro couldn't use.
 - `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Forms` (when the command has forms, as `opalro line new` is one of `opalro line`'s), `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. A command with forms lists them under `Forms`, each with its usage naming its own options (`opalro line delete [--yes] <NAME>`), then its one-line description, padded as the examples are; each of a form's own options is explained on a line under it, indented. `Options` holds only what the command itself takes. The usage, the forms, the arguments and the options are read from the command line's own definitions, so only options the command or form really takes are listed. Every example is a command line Opalro takes.
 - Git's words appear nowhere in help. A command line Opalro can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
@@ -395,6 +397,35 @@ On the server (origin):
 - **The question** comes only when no other line, tag or server line has the line's newest save in its history. On stderr, as §10 asks one: `Line <line> holds 3 saves that no other line or tag has.`, then `Delete it? [y/N] `. With `--yes` it isn't asked.
 - The save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
 - **Colour:** `Started`, `Renamed` and `Deleted` green and bold, line names blue, IDs magenta and bold.
+
+### `opalro tag`
+
+```text
+3 tags:
+
+  release/2026-11  4f9c2e81a7b3  "November build"
+  v1.0             9d02c3aa41f0  "First playable"
+  v1.1             1b7e55d0c9a2
+```
+
+- **The list:** `3 tags:` (`1 tag:`), then a row a tag in name order: two spaces, the name, the first 12 hex digits of its save's fingerprint, and its message's first line in quotes when it has one. No save is read. On a terminal the message is cut at its end to fit. With no tags: `No tags: opalro tag <name> names the save you're at.`
+
+`opalro tag <name> ["<message>"] [--save <save>]` tags the save you're at, or another, and `opalro tag --delete <name>` deletes a tag:
+
+| State | Outcome line | Next step |
+|---|---|---|
+| Made | `Tagged save <id> "<message>" as <tag>.` | `Changed your mind? opalro undo` |
+| Already there | `Tag <tag> is already at save <id> "<message>".` | |
+| Moved | `Moved tag <tag> to save <id> "<message>". It was at save <old id>.` | `Changed your mind? opalro undo` |
+| Deleted | `Deleted tag <tag>, which was at save <id> "<message>".` | `Changed your mind? opalro undo` |
+| A question answered no | `Nothing was changed.` | |
+| A move with no terminal and no `--yes` | stdout gets nothing; `error: Tag <tag> is at another save, <old id>, and Opalro can't ask whether to move it without a terminal.` (`… with --json.`); `hint: To move it, run the same command with --yes.` | |
+| A delete with no terminal and no `--yes` | `error: Opalro asks before it deletes a tag, and can't without a terminal.` (`… with --json.`); `hint: To delete it: opalro tag --delete <tag> --yes` | |
+
+- **The questions,** on stderr, as §10 asks one: moving a tag that is at another save asks `Tag <tag> is at save <old id> "<message>".`, then `Move it to save <id> "<message>"? [y/N] `; deleting one asks `Delete tag <tag>, at save <id> "<message>"? [y/N] `. With `--yes` neither is asked.
+- A save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
+- A tag's name and message can be any text a Git import brought in, so both are escaped wherever they are shown, and the list shows only a message's first line.
+- **Colour:** `Tagged`, `Moved` and `Deleted` green and bold, tag names blue like line names, IDs magenta and bold, the list's fingerprints blue.
 
 ### `opalro undo` and `opalro redo`
 

@@ -119,6 +119,17 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
         0,
         run(&["line", "delete", "y"], 0),
     ));
+    docs.push((
+        "`opalro tag <name> --json`",
+        0,
+        run(&["tag", "v1", "First"], 0),
+    ));
+    docs.push(("`opalro tag --json`", 0, run(&["tag"], 0)));
+    docs.push((
+        "`opalro tag --delete --json`",
+        0,
+        run(&["tag", "--delete", "v1", "--yes"], 0),
+    ));
     docs.push(("`opalro goto --json`", 0, run(&["goto", &first], 0)));
     run(&["goto", "main"], 0);
     env.overwrite("a.txt", "three\n");

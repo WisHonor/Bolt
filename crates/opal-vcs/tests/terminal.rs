@@ -167,6 +167,9 @@ fn without_a_terminal_opals_own_words_are_plain() {
         &["line", "rename", "x", "y"],
         &["goto", "main"],
         &["line", "delete", "y"],
+        &["tag", "v1", "First"],
+        &["tag"],
+        &["tag", "--delete", "v1", "--yes"],
     ] {
         run(args);
     }
