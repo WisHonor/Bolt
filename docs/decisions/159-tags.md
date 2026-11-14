@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 7 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (tags are fixed names; moving or deleting one asks first); [decision 017](017-commands-and-output.md) (`tag`); [decision 034](034-tags-kept-and-shared.md) (the tag list); [decision 055](055-lines-in-v0.1.md) (what `goto` takes, and in which order); [decision 116](116-gits-words-as-shortcuts.md) (Git's word `tag`)
-- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (a new name can't start with `-`; a message given for a tag already there; a tag list that can't be read; Git's `tag <name> <commit>`)
+- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (a new name can't start with `-`; a message given for a tag already there; a tag list that can't be read; Git's `tag <name> <commit>`); [decision 162](162-red-team-m7-rulings.md) (the order holds in all four commands; a name that is both a line and a tag at two saves is refused; an odd name is shown between quotes, and no hint carries one inside a command)
 
 ## Context
 
