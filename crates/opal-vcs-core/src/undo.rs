@@ -345,8 +345,17 @@ fn pick_up(
         let read = repo.store().save(save, repo.signatures_allowed());
         read.map_err(|e| unusable(saves, e.to_string()))?;
     }
-    repo.tag_list(&entry.state)
-        .map_err(|e| unusable("its tag list", e.to_string()))?;
+    // The line already says it is the tag list: give damage by the store's own words alone.
+    repo.tag_list(&entry.state).map_err(|e| {
+        let detail = match &e {
+            RepoError::Damaged { detail } => detail
+                .strip_prefix("the project's tag list can't be read: ")
+                .unwrap_or(detail)
+                .to_owned(),
+            _ => e.to_string(),
+        };
+        unusable("its tag list", detail)
+    })?;
     repo.server_lines(&entry.state)
         .map_err(|e| unusable("its server lines", e.to_string()))?;
     // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.

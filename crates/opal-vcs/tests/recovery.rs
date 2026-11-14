@@ -548,6 +548,13 @@ fn a_pick_up_refuses_an_entry_whose_tag_list_or_server_lines_cannot_be_read() {
             broken.short_hex()
         );
         assert!(said.contains(&why), "{said}");
+        if what == "tag list" {
+            let whole = format!(
+                "{why}object {} is not in the store), so nothing was changed.\n",
+                Id([0x77; 32])
+            );
+            assert!(said.contains(&whole), "{said}");
+        }
         assert!(
             said.contains("hint: Pick another: opalro undo --list shows"),
             "{said}"
