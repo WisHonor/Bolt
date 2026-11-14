@@ -512,7 +512,7 @@ Name files or folders to look only there:
 opalro changes todo.txt
 ```
 
-`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
+`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
 
 ```sh
 opalro changes --save main

@@ -171,7 +171,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `opalro changes --json`
 
-`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (a line name, the start of a change ID, or the start of a fingerprint) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
+`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (a line name, a tag's name, the start of a change ID, or the start of a fingerprint) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
